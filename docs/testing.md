@@ -1,0 +1,89 @@
+# Testing
+
+## Automated (run in this repository)
+
+| Command | What it covers |
+|---|---|
+| `npm run typecheck` | `tsc --noEmit`, strict mode |
+| `npm run lint` | ESLint + typescript-eslint |
+| `npm test` | Vitest unit/snapshot tests (`tests/unit`) |
+| `npm run test:e2e` | Playwright smoke tests on desktop and mobile Chromium (`tests/e2e`). Builds and serves on port 5179. First run `npx playwright install chromium` |
+| `npm run check` | typecheck + lint + unit tests |
+
+Unit test coverage by acceptance criterion:
+
+- **Owner profile loads exactly / reset restores**: `profiles.test.ts` (every owner decision, independent copies), `app.spec.ts` (controls, reset).
+- **Basic/Advanced toggle does not reset values**: `app.spec.ts`.
+- **Import/export round trip keeps every field; no secret leakage by default**: `profiles.test.ts`, `app.spec.ts`, `generate.test.ts` ("does not leak secrets").
+- **Snapshots for default XML and variations**: `generate.test.ts`, `components.test.ts` (`__snapshots__/`).
+- **Parser assertions, passes, architecture, schema**: `generate.test.ts`, `xml-structure.ts` (runs on every generation).
+- **Incompatible combinations rejected with field-level messages**: `validation.test.ts`, `app.spec.ts`.
+- **Escaping of quotes, ampersands, script text and names**: `serialize.test.ts`, `scripts.test.ts`, `generate.test.ts` (Wi-Fi SSID/password, plain-text password, names with diacritics).
+- **Disk setup interactive, no wipe**: `generate.test.ts`, `components.test.ts` (rejects disk elements), `profiles.test.ts` (rejects `diskMode` other than interactive), plus a runtime check in `checkStructure`.
+- **Name edits update hostname and account references**: `generate.test.ts`, `naming.test.ts`, `app.spec.ts`.
+- **Four script stages, empty lists, no phantom execution**: `scripts.test.ts`.
+- **Advanced XML merge, conflicts, malformed input**: `components.test.ts`.
+- **Registry ↔ schema coverage and metadata completeness**: `registry.test.ts`.
+
+## Not automated: must be done on Windows (status: UNVERIFIED)
+
+Claude's environment could not run Windows ADK/WSIM or install Windows in a VM. **None of the following
+has been done.** The generated file is well-formed and structurally checked, but that does **not** prove
+that Windows Setup accepts it or behaves as intended.
+
+### A. WSIM catalog validation
+
+1. Install the **Windows ADK** matching your media (the Windows 11 ADK; only "Deployment Tools" is
+   needed). Record the ADK version.
+2. Download the Windows 11 ISO you will deploy (e.g. 25H2, English US, x64). Record the exact build
+   from `dism /Get-WimInfo /WimFile:<mount>\sources\install.wim /Index:<Pro index>`.
+3. Copy `sources\install.wim` to a writable folder. Open **Windows System Image Manager**, then
+   *File → Select Windows Image* → choose the Pro index and let it create the catalog (`.clg`).
+4. Generate the answer file from the app (enter a test name), then *File → Open Answer File* →
+   `autounattend.xml`.
+5. Run *Tools → Validate Answer File*. Record every message. Expected:
+   - **No errors** for components, settings, passes or values.
+   - WSIM may warn about the `Extensions` element in the foreign namespace. Windows Setup ignores
+     unknown namespaces (upstream relies on this). Record the warning text.
+6. Repeat with any additional XML components you plan to use.
+
+### B. Disposable VM install (repeat twice: with Internet and without)
+
+Hyper-V Generation 2 (Secure Boot + vTPM) or VMware/VirtualBox with EFI + TPM 2.0, 4 GB RAM,
+64 GB disk, **no snapshots of real data**.
+
+1. Build media: write the ISO to a USB drive (or a second ISO with only `autounattend.xml` in the
+   root, attached as a second DVD drive in the VM). Put `autounattend.xml` in the **root**.
+2. Run 1 with the virtual network adapter **connected** to the Internet. Run 2 **disconnected**.
+3. Boot and verify, recording timestamps and screenshots:
+   - [ ] No language, edition or EULA page appears (edition = Pro).
+   - [ ] **Setup stops at "Where do you want to install Windows?"** Nothing is selected or wiped
+         automatically. Create/select the partition manually.
+   - [ ] After install, OOBE shows the **Wi-Fi/network page** (interactive, owner default) when a
+         Wi-Fi adapter is present. In a VM with wired networking it may be skipped by OOBE.
+   - [ ] **No Microsoft account page** appears in either run. The privacy page does not appear
+         (ProtectYourPC=3).
+   - [ ] The local account `<Name>` is created, and the computer name is `<Name>-Computer` (`hostname`).
+   - [ ] The desktop signs in automatically. A PowerShell window runs FirstLogon.ps1 **once**.
+         Check `C:\Windows\Setup\Scripts\FirstLogon.log`, `Specialize.log` and `DefaultUser.log` for errors.
+   - [ ] Reboot twice: auto-login **persists** (owner "persistent" mode, unverified mechanism).
+         Check `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon` (`AutoAdminLogon=1`,
+         no `AutoLogonCount`).
+   - [ ] UAC: `HKLM\…\Policies\System` shows `EnableLUA=1`, `ConsentPromptBehaviorAdmin=5`,
+         `PromptOnSecureDesktop=0`. A prompt appears without dimming.
+   - [ ] `powercfg /a` shows Hibernate available. Fast Startup is off (`HiberbootEnabled=0`).
+   - [ ] File extensions are shown. Explorer opens This PC. Taskbar is left-aligned with the search
+         icon only. Widgets are gone. Task View is visible.
+   - [ ] Desktop shows only the Recycle Bin, with no Edge shortcut. Shortcut arrows are blank
+         (**unverified tweak**: check for black squares).
+   - [ ] Start → folders next to Power: Downloads, Personal folder, Pictures, Settings.
+   - [ ] `Get-AppxProvisionedPackage -Online` no longer lists removed apps. Kept apps are still present.
+   - [ ] `Get-ComputerRestorePoint` / System Protection shows C: protected.
+   - [ ] `C:\Windows\Panther\unattend.xml` is deleted.
+   - [ ] Add a test FirstLogon script (e.g. writes a file to `C:\fl-test.txt`) and confirm it ran
+         once, at the first logon, after the generated steps.
+4. Record: ISO name and build, ADK version, hypervisor and version, VM settings, repository commit,
+   and results per checkbox, in `docs/validation-log.md` (create it).
+
+Report anything that fails as **unverified/failed**. Do not mark M1 as hardware-validated until both
+runs pass.
