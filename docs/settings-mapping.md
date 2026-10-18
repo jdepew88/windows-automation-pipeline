@@ -19,7 +19,7 @@ Validation rules live next to each setting in `src/features/<section>/index.ts` 
 | Edition | `setup.editionId` | pro | Basic | windowsPE | Generic key for the edition (upstream resource/WindowsEdition.json) | Media must contain the edition |  | upstream-tested |
 | Product key | `setup.customProductKey` | (empty) | Advanced | windowsPE, specialize | UserData/ProductKey/Key and specialize › Shell-Setup › ProductKey | Windows 10/11 | Secret-like data: the key appears in the answer file and in C:\Windows\Panther until it is deleted. | upstream-tested |
 | Disk selection and partitioning | `setup.diskMode` | interactive | Basic | none | Absence of windowsPE › Microsoft-Windows-Setup › DiskConfiguration / ImageInstall (asserted by tests) | All |  | documented |
-| Bypass Windows 11 hardware requirements check (TPM, Secure Boot, RAM) | `setup.bypassRequirementsCheck` | false | Advanced | windowsPE | windowsPE RunSynchronous: reg.exe add HKLM\SYSTEM\Setup\LabConfig /v BypassTPMCheck|BypassSecureBootCheck|BypassRAMCheck = 1 | Windows 11 Setup (windowsPE) | Microsoft does not support Windows 11 on hardware that fails these checks. | upstream-tested |
+| Bypass Windows 11 hardware requirements check (TPM, Secure Boot, RAM) | `setup.bypassRequirementsCheck` | false | Advanced | windowsPE | windowsPE RunSynchronous: reg.exe add HKLM\SYSTEM\Setup\LabConfig /v BypassTPMCheck\|BypassSecureBootCheck\|BypassRAMCheck = 1 | Windows 11 Setup (windowsPE) | Microsoft does not support Windows 11 on hardware that fails these checks. | upstream-tested |
 | Allow OOBE to proceed without an Internet connection (BypassNRO) | `setup.bypassNetworkCheck` | false | Advanced | specialize | Specialize.ps1: reg.exe add HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\OOBE /v BypassNRO /t REG_DWORD /d 1 | Windows 11 builds that still honor BypassNRO |  | upstream-tested |
 | Processor architectures | `setup.processorArchitectures` | amd64 | Advanced | windowsPE, specialize, oobeSystem | component/@processorArchitecture (component duplicated per architecture) | Windows 11 has no x86 edition |  | upstream-tested |
 | Time zone | `setup.timeZoneMode` | implicit | Advanced | specialize | specialize › Microsoft-Windows-Shell-Setup › TimeZone | Windows 10/11 |  | upstream-tested |
@@ -127,7 +127,7 @@ Validation rules live next to each setting in `src/features/<section>/index.ts` 
 | Setting | Path | Owner default | View | Stage | Mapping | Applies to | Caveat | Status |
 |---|---|---|---|---|---|---|---|---|
 | Left-align taskbar icons | `taskbar.leftAlign` | true | Basic | defaultUser | HKU\DefaultUser\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced\TaskbarAl = 0 | Windows 11 |  | upstream-tested |
-| Taskbar search | `taskbar.search` | icon | Basic | userOnce | UserOnce.ps1: HKCU\Software\Microsoft\Windows\CurrentVersion\Search\SearchboxTaskbarMode = 0|1|2|3; restart Explorer | Windows 11 |  | upstream-tested |
+| Taskbar search | `taskbar.search` | icon | Basic | userOnce | UserOnce.ps1: HKCU\Software\Microsoft\Windows\CurrentVersion\Search\SearchboxTaskbarMode = 0\|1\|2\|3; restart Explorer | Windows 11 |  | upstream-tested |
 | Hide the Task View button | `taskbar.hideTaskView` | false | Basic | defaultUser | HKU\DefaultUser\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced\ShowTaskViewButton = 0 | Windows 10/11 |  | upstream-tested |
 | Disable Widgets | `taskbar.disableWidgets` | true | Basic | specialize | HKLM\SOFTWARE\Policies\Microsoft\Dsh\AllowNewsAndInterests = 0 | Windows 11 |  | upstream-tested |
 | Always show all notification-area icons | `taskbar.showAllTrayIcons` | false | Advanced | defaultUser | ShowAllTrayIcons.ps1/.xml (upstream): EnableAutoTray=0 on Windows 10; scheduled task promoting NotifyIconSettings on Windows 11 | Windows 10/11 |  | upstream-tested |
@@ -138,7 +138,7 @@ Validation rules live next to each setting in `src/features/<section>/index.ts` 
 | Setting | Path | Owner default | View | Stage | Mapping | Applies to | Caveat | Status |
 |---|---|---|---|---|---|---|---|---|
 | Remove the Microsoft Edge desktop shortcut | `desktop.deleteEdgeShortcut` | true | Basic | specialize, userOnce | Remove-Item 'C:\Users\Public\Desktop\Microsoft Edge.lnk' (specialize) and '%USERPROFILE%\Desktop\Microsoft Edge.lnk' (UserOnce) | Windows 10/11 |  | upstream-tested |
-| Desktop icons | `desktop.iconsMode` | custom | Basic | userOnce | UserOnce.ps1: HKCU\…\Explorer\HideDesktopIcons\{ClassicStartMenu,NewStartPanel}\<GUID> = 0 (show) | 1 (hide); restart Explorer | Windows 10/11 |  | upstream-tested |
+| Desktop icons | `desktop.iconsMode` | custom | Basic | userOnce | UserOnce.ps1: HKCU\…\Explorer\HideDesktopIcons\{ClassicStartMenu,NewStartPanel}\<GUID> = 0 (show) \| 1 (hide); restart Explorer | Windows 10/11 |  | upstream-tested |
 | Icons shown on the desktop | `desktop.icons` | RecycleBin | Basic | userOnce | HideDesktopIcons GUIDs from upstream resource/DesktopIcon.json | Windows 10/11 (Gallery and Home: Windows 11) |  | upstream-tested |
 
 ## Start menu
@@ -154,7 +154,7 @@ Validation rules live next to each setting in `src/features/<section>/index.ts` 
 
 | Setting | Path | Owner default | View | Stage | Mapping | Applies to | Caveat | Status |
 |---|---|---|---|---|---|---|---|---|
-| Visual effects | `personalization.visualEffects` | default | Advanced | specialize, userOnce | HKLM\…\Explorer\VisualEffects\<Effect>\DefaultValue; UserOnce: HKCU\…\VisualEffects\VisualFXSetting = 1|2 | Windows 10/11 |  | upstream-tested |
+| Visual effects | `personalization.visualEffects` | default | Advanced | specialize, userOnce | HKLM\…\Explorer\VisualEffects\<Effect>\DefaultValue; UserOnce: HKCU\…\VisualEffects\VisualFXSetting = 1\|2 | Windows 10/11 |  | upstream-tested |
 | Sticky Keys | `personalization.stickyKeys` | default | Advanced | defaultUser, specialize | HKU\DefaultUser\Control Panel\Accessibility\StickyKeys\Flags and HKU\.DEFAULT (logon screen) = "10" | Windows 10/11 |  | upstream-tested |
 
 ## App removal

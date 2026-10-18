@@ -6,7 +6,7 @@ import { BLOATWARE } from '../src/features/bloatware/catalog';
 
 /** Regenerates docs/settings-mapping.md from the settings registry (single source of truth). */
 const p = ownerDefaults();
-const cell = (s: string) => s.replace(/\|/g, '\|').replace(/\n/g, ' ');
+const cell = (s: string) => s.replace(/\|/g, '\\|').replace(/\n/g, ' ');
 const fmt = (v: unknown) => {
   if (Array.isArray(v)) return v.length ? v.join(', ') : '(empty)';
   if (v && typeof v === 'object') return Object.entries(v).filter(([, x]) => x === true).map(([k]) => k).join(', ') || '(map)';
