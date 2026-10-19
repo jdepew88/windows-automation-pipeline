@@ -7,7 +7,7 @@
 | `npm run typecheck` | `tsc --noEmit`, strict mode |
 | `npm run lint` | ESLint + typescript-eslint |
 | `npm test` | Vitest unit/snapshot tests (`tests/unit`) |
-| `npm run test:e2e` | Playwright smoke tests on desktop and mobile Chromium (`tests/e2e`). Builds and serves on port 5179. First run `npx playwright install chromium` |
+| `npm run test:e2e` | Playwright smoke tests on desktop and mobile Chromium (`tests/e2e`). Builds and serves on port 5179. First run `npx playwright install chromium`. Set `E2E_BASE_URL=<url>` to run against a deployed site instead |
 | `npm run check` | typecheck + lint + unit tests |
 
 Unit test coverage by acceptance criterion:
