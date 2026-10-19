@@ -4,11 +4,18 @@
 
 Done in code and covered by automated tests. **Not validated with WSIM or a VM**; see `testing.md`.
 
+## Phase 2: Windows Update automation (branch `feature/phase-2-windows-updates`)
+
+Implemented and covered by automated tests, plus one read-only scan on real Windows. **Not
+validated in a VM**; see `testing.md` C. Review: `phase-2/review.md`. Report:
+`phase-2/implementation-report.md`.
+
 ## Milestone 2: validation and hardening
 
 - Run WSIM validation and both VM runs (with and without Internet). Fix any findings and record a `docs/validation-log.md`.
 - Confirm or replace the unverified mechanisms: persistent auto-logon, shortcut-arrow overlay, `Enable-ComputerRestore` at first logon.
 - Re-check bloatware identifiers against the exact target build (`Get-AppxProvisionedPackage -Online` on a clean install).
+- Run the Phase 2 update-engine VM checks (`testing.md` C), including the offline and reboot-limit runs.
 
 ## Milestone 3: deployment bundle
 
@@ -16,6 +23,8 @@ Done in code and covered by automated tests. **Not validated with WSIM or a VM**
 - Durable first-logon orchestration: staged on the Windows volume before first logon, idempotent (state file), connectivity-aware queue with retry and logging. No empty bundle that only pretends to run.
 - WinGet package selection: empty by default, chosen individually, with a dry-run view. Lists from imports stay in the session only.
 - PowerShell 7 installation through that pipeline (`deferred.installPowerShell7`).
+- The orchestrator starts application installation only after the Phase 2 marker
+  `C:\ProgramData\WindowsDeploymentBuilder\state\windows-update.done` exists (or reads `result.json`).
 
 ## Later
 

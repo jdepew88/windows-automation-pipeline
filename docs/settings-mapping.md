@@ -89,6 +89,24 @@ Validation rules live next to each setting in `src/features/<section>/index.ts` 
 | Do not include drivers with Windows quality updates | `updates.excludeDrivers` | true | Basic | specialize | HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\ExcludeWUDriversInQualityUpdate = 1 | Windows 10/11 Pro and higher |  | documented |
 | Prevent Windows Update from rebooting while a user is signed in | `updates.preventAutomaticReboot` | false | Advanced | specialize | HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU\AUOptions = 4, NoAutoRebootWithLoggedOnUsers = 1; scheduled task MoveActiveHours | Windows 10/11 | Relies on a recurring scheduled task. Can only be combined with fully automatic updates. | upstream-tested |
 
+## Windows Update automation
+
+| Setting | Path | Owner default | View | Stage | Mapping | Applies to | Caveat | Status |
+|---|---|---|---|---|---|---|---|---|
+| Install all applicable Windows updates after setup | `windowsUpdate.enabled` | true | Basic | specialize, firstLogon | Embeds WindowsUpdateEngine.ps1, Install-UpdateEngine.ps1 and config.json in C:\Windows\Setup\Scripts\WindowsUpdate. The last FirstLogon command runs Install-UpdateEngine.ps1, which registers the task \WindowsDeploymentBuilder\WindowsUpdate (SYSTEM, at startup + hourly). Result: C:\ProgramData\WindowsDeploymentBuilder\Updates\result.json; completion marker: C:\ProgramData\WindowsDeploymentBuilder\state\windows-update.done. | Windows 10/11 (Windows PowerShell 5.1, Windows Update Agent API) | The computer restarts on its own, even while someone is signed in (they get a warning first). With automatic sign-in this repeats until updating is finished. Unsaved work in that session can be lost. Not yet validated in a VM. | unverified |
+| Drivers | `windowsUpdate.drivers` | followPolicy | Basic | firstLogon | config.json › drivers. exclude adds Type='Software' to the search criteria. | Windows 10/11 (Windows PowerShell 5.1, Windows Update Agent API) |  | documented |
+| Feature updates (new Windows versions, e.g. 24H2 to 25H2) | `windowsUpdate.featureUpdates` | skip | Basic | firstLogon | config.json › featureUpdates (category 3689bdc8-b205-4af4-8d4b-a63924c5e9d5) | Windows 10/11 (Windows PowerShell 5.1, Windows Update Agent API) | Small "enablement packages" that switch versions may arrive as regular updates and install even with Skip. Confirm on your build. | unverified |
+| Optional and preview updates | `windowsUpdate.optionalUpdates` | skip | Advanced | firstLogon | config.json › optionalUpdates (IUpdate.BrowseOnly) | Windows 10/11 (Windows PowerShell 5.1, Windows Update Agent API) |  | documented |
+| Also update other Microsoft products (Microsoft Update) | `windowsUpdate.microsoftUpdate` | false | Advanced | firstLogon | config.json › microsoftUpdate (service 7971f918-a847-4430-9279-4a52d1efe18d) | Windows 10/11 (Windows PowerShell 5.1, Windows Update Agent API) |  | documented |
+| Maximum restarts (1-30) | `windowsUpdate.maxReboots` | 10 | Advanced | firstLogon | config.json › maxReboots | Windows 10/11 (Windows PowerShell 5.1, Windows Update Agent API) |  | unverified |
+| Attempts per update (1-5) | `windowsUpdate.maxAttemptsPerUpdate` | 2 | Advanced | firstLogon | config.json › maxAttemptsPerUpdate | Windows 10/11 (Windows PowerShell 5.1, Windows Update Agent API) |  | unverified |
+| Maximum total runtime in hours (1-24) | `windowsUpdate.maxRuntimeHours` | 6 | Advanced | firstLogon | config.json › maxRuntimeHours | Windows 10/11 (Windows PowerShell 5.1, Windows Update Agent API) |  | unverified |
+| Network wait per start in minutes (1-60) | `windowsUpdate.networkWaitMinutes` | 15 | Advanced | firstLogon | config.json › networkWaitMinutes | Windows 10/11 (Windows PowerShell 5.1, Windows Update Agent API) |  | unverified |
+| Confirmation scans (0-5) | `windowsUpdate.confirmationScans` | 1 | Advanced | firstLogon | config.json › confirmationScans | Windows 10/11 (Windows PowerShell 5.1, Windows Update Agent API) |  | unverified |
+| Reset Windows Update components once if updates keep failing | `windowsUpdate.resetComponentsOnce` | true | Advanced | firstLogon | config.json › resetComponentsOnce | Windows 10/11 (Windows PowerShell 5.1, Windows Update Agent API) | Clears the update history shown in Settings. | documented |
+| Restart warning in seconds (0-600) | `windowsUpdate.rebootWarningSeconds` | 60 | Advanced | firstLogon | config.json › rebootWarningSeconds | Windows 10/11 (Windows PowerShell 5.1, Windows Update Agent API) |  | unverified |
+| Never install these KB numbers | `windowsUpdate.excludedKbs` | (empty) | Advanced | firstLogon | config.json › excludedKbs | Windows 10/11 (Windows PowerShell 5.1, Windows Update Agent API) |  | documented |
+
 ## System tweaks
 
 | Setting | Path | Owner default | View | Stage | Mapping | Applies to | Caveat | Status |

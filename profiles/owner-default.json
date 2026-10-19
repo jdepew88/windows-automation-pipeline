@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "profileName": "Owner default",
   "setup": {
     "languageMode": "unattended",
@@ -68,6 +68,21 @@
     "mode": "notifyInstall",
     "excludeDrivers": true,
     "preventAutomaticReboot": false
+  },
+  "windowsUpdate": {
+    "enabled": true,
+    "drivers": "followPolicy",
+    "featureUpdates": "skip",
+    "optionalUpdates": "skip",
+    "microsoftUpdate": false,
+    "maxReboots": 10,
+    "maxAttemptsPerUpdate": 2,
+    "maxRuntimeHours": 6,
+    "networkWaitMinutes": 15,
+    "confirmationScans": 1,
+    "resetComponentsOnce": true,
+    "rebootWarningSeconds": 60,
+    "excludedKbs": ""
   },
   "system": {
     "disableFastStartup": true,

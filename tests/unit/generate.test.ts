@@ -74,7 +74,11 @@ describe('owner-default answer file', () => {
 
   it('maps FirstLogon to oobeSystem FirstLogonCommands with ordered commands', () => {
     const cl = commandLines(r.root);
-    expect(cl.firstLogon).toEqual(['powershell.exe -WindowStyle "Normal" -ExecutionPolicy "Unrestricted" -NoProfile -File "C:\\Windows\\Setup\\Scripts\\FirstLogon.ps1"']);
+    expect(cl.firstLogon).toEqual([
+      'powershell.exe -WindowStyle "Normal" -ExecutionPolicy "Unrestricted" -NoProfile -File "C:\\Windows\\Setup\\Scripts\\FirstLogon.ps1"',
+      // Phase 2: the Windows Update engine is installed last, after every M1 FirstLogon step.
+      'powershell.exe -WindowStyle "Normal" -ExecutionPolicy "Unrestricted" -NoProfile -File "C:\\Windows\\Setup\\Scripts\\WindowsUpdate\\Install-UpdateEngine.ps1"',
+    ]);
     expect(cl.specialize[0]).toContain('$xml.unattend.Extensions.ExtractScript');
     expect(cl.specialize.slice(1)).toEqual([
       'powershell.exe -WindowStyle "Normal" -ExecutionPolicy "Unrestricted" -NoProfile -File "C:\\Windows\\Setup\\Scripts\\Specialize.ps1"',
@@ -82,7 +86,7 @@ describe('owner-default answer file', () => {
       'powershell.exe -WindowStyle "Normal" -ExecutionPolicy "Unrestricted" -NoProfile -File "C:\\Windows\\Setup\\Scripts\\DefaultUser.ps1"',
       'reg.exe unload "HKU\\DefaultUser"',
     ]);
-    expect(texts(r.root, 'Order')).toEqual(['1', '2', '3', '4', '5', '1']);
+    expect(texts(r.root, 'Order')).toEqual(['1', '2', '3', '4', '5', '1', '2']);
   });
 
   it('applies the owner security and system choices in the staged scripts', () => {
@@ -241,6 +245,7 @@ describe('variations', () => {
       p.security.disableInsiderBuilds = false;
       p.updates.mode = 'windowsDefault';
       p.updates.excludeDrivers = false;
+      p.windowsUpdate.enabled = false;
     }, ''));
     expect(r.xml).not.toContain('Extensions');
     expect(r.xml).not.toContain('RunSynchronous');

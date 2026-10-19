@@ -1,13 +1,23 @@
 import { SCHEMA_VERSION } from '../schema/profile';
 
 /**
- * Schema migrations. `MIGRATIONS[n]` upgrades a version-n object to version n+1.
- * Version 1 is the first published schema, so the table is empty today. Add entries here (and
- * tests) whenever `SCHEMA_VERSION` is bumped.
+ * Schema migrations. `MIGRATIONS[n]` upgrades a version-n object to version n+1. Add entries here
+ * (and tests) whenever `SCHEMA_VERSION` is bumped. Fields a migration leaves out are filled from
+ * owner defaults by the importer.
  */
 export type Migration = (input: Record<string, unknown>) => { value: Record<string, unknown>; note?: string };
 
-export const MIGRATIONS: Record<number, Migration> = {};
+export const MIGRATIONS: Record<number, Migration> = {
+  // v2 adds Windows Update automation. Profiles saved before it existed keep generating the same
+  // answer file, so the engine starts disabled for them.
+  1: (input) => {
+    if ('windowsUpdate' in input) return { value: input };
+    return {
+      value: { ...input, windowsUpdate: { enabled: false } },
+      note: 'Windows Update automation (added in schema version 2) is turned off for this older profile. Turn it on under "Windows Update automation" if you want it.',
+    };
+  },
+};
 
 export type MigrateResult =
   | { ok: true; value: Record<string, unknown>; notes: string[] }

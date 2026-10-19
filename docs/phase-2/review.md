@@ -1,6 +1,12 @@
 # Phase 2: licensing and architecture review (Windows Update engine)
 
-Status: **review only. No application code has been changed on this branch yet.**
+Status: review completed and **approved by the owner on 2026-10-19** with these decisions:
+- independent implementation (no AutoPatch code, no PSWindowsUpdate);
+- engine **on** in the owner defaults;
+- one read-only scan allowed on the development PC.
+
+The implementation follows this document. See `implementation-report.md` for what was built and
+tested.
 Reviewed: `ps1xml/AutoPatch` at commit `4eab0cf` (2026-07-23), and the module it bundles,
 `PSWindowsUpdate` 2.2.1.5 (`mgajda83/PSWindowsUpdate`).
 

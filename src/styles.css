@@ -572,6 +572,28 @@ table.summary th {
 .files details {
   margin: 4px 0;
 }
+.asset-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.asset-list li {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  margin: 6px 0;
+  min-width: 0;
+}
+.asset-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.asset-head code {
+  overflow-wrap: anywhere;
+}
 
 footer {
   max-width: 1200px;

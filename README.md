@@ -1,4 +1,4 @@
-# Windows Deployment Builder (Milestone 1)
+# Windows Deployment Builder (Milestone 1 + Phase 2 Windows Update automation)
 
 A local, offline, browser-based generator for **Windows 11 Pro `autounattend.xml`** answer files,
 written entirely in TypeScript. It is built on the option model and XML patterns of
@@ -65,6 +65,13 @@ saved automatically.
   Recycle Bin is the only desktop icon. Custom Start folders.
 - App removal with **Keep / Remove / Leave untouched** for each app (owner list applied). Wi-Fi is
   interactive. Scripts and extra XML are empty.
+- **Windows Update automation (Phase 2), on.** After the first sign-in, a SYSTEM scheduled task
+  installs all applicable updates. It restarts as needed (with a warning) and resumes, until none
+  remain. Drivers follow the driver policy above, and feature updates are skipped. It stops after at
+  most 10 restarts, 2 attempts per update, or 6 hours, and reports `Succeeded`,
+  `CompletedWithFailures`, `Failed` or `Offline`. It is built only on documented Windows APIs. The
+  scripts are also offered as separate downloads under **Review & download → Deployment assets**.
+  ⚠️ **Not yet validated in a VM.**
 
 The full per-setting mapping is in [docs/settings-mapping.md](docs/settings-mapping.md) (generated
 from code).
@@ -78,10 +85,12 @@ from code).
 - [docs/roadmap.md](docs/roadmap.md): later milestones
 - [docs/upstream-attribution.md](docs/upstream-attribution.md): what was adapted, from which revision, and the deviations
 - [docs/implementation-report.md](docs/implementation-report.md): what was built, tested and not tested, blockers
-- [docs/samples/autounattend.sample.xml](docs/samples/autounattend.sample.xml): owner defaults with the name "Alex" (`npm run generate:sample`)
+- [docs/samples/autounattend.sample.xml](docs/samples/autounattend.sample.xml): owner defaults with the name "Alex" (`npm run generate:sample`), and the update engine assets in [docs/samples/windows-update/](docs/samples/windows-update/)
+- [docs/phase-2/review.md](docs/phase-2/review.md): Windows Update engine licensing and architecture review
+- [docs/phase-2/implementation-report.md](docs/phase-2/implementation-report.md): what Phase 2 built, tested and left unverified
 
-## Not in Milestone 1
+## Not yet implemented
 
-WinGet packages, application installation, the ZIP bundle and `setup.ps1` orchestrator, ISO/boot
+WinGet packages (Phase 3), application installation, the ZIP bundle and `setup.ps1` orchestrator, ISO/boot
 media editing, unattended disk formatting, and background deployment. The profile records
 `deferred.installPowerShell7` and an empty `deferred.wingetPackages` as extension points only.

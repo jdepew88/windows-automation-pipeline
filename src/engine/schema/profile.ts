@@ -7,7 +7,7 @@ import { z } from 'zod';
  *
  * Bump {@link SCHEMA_VERSION} and add a migration in `migrations.ts` for any breaking change.
  */
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 export const ScriptTypeSchema = z.enum(['ps1', 'cmd', 'reg', 'vbs']);
 export type ScriptType = z.infer<typeof ScriptTypeSchema>;
@@ -134,6 +134,26 @@ export const ProfileSchema = z
         mode: z.enum(['windowsDefault', 'notifyDownload', 'notifyInstall']),
         excludeDrivers: bool,
         preventAutomaticReboot: bool,
+      })
+      .strict(),
+
+    /** Phase 2: unattended Windows Update engine started at the end of FirstLogon. */
+    windowsUpdate: z
+      .object({
+        enabled: bool,
+        drivers: z.enum(['followPolicy', 'include', 'exclude']),
+        featureUpdates: z.enum(['skip', 'install']),
+        optionalUpdates: z.enum(['skip', 'install']),
+        microsoftUpdate: bool,
+        maxReboots: z.number().int(),
+        maxAttemptsPerUpdate: z.number().int(),
+        maxRuntimeHours: z.number().int(),
+        networkWaitMinutes: z.number().int(),
+        confirmationScans: z.number().int(),
+        resetComponentsOnce: bool,
+        rebootWarningSeconds: z.number().int(),
+        /** Comma/space separated KB numbers that are never installed. */
+        excludedKbs: z.string().max(2000),
       })
       .strict(),
 

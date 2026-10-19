@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "engineVersion": "1.0.0",
+  "dataRoot": "C:\\ProgramData\\WindowsDeploymentBuilder",
+  "taskPath": "\\WindowsDeploymentBuilder\\",
+  "taskName": "WindowsUpdate",
+  "drivers": "exclude",
+  "featureUpdates": "skip",
+  "optionalUpdates": "skip",
+  "microsoftUpdate": false,
+  "maxReboots": 10,
+  "maxAttemptsPerUpdate": 2,
+  "maxRuntimeHours": 6,
+  "networkWaitMinutes": 15,
+  "confirmationScans": 1,
+  "resetComponentsOnce": true,
+  "rebootWarningSeconds": 60,
+  "excludedKbs": []
+}

@@ -6,6 +6,7 @@ import * as accounts from './accounts';
 import * as security from './security';
 import * as privacy from './privacy';
 import * as updates from './updates';
+import * as windowsUpdate from './windows-update';
 import * as system from './system';
 import * as explorer from './explorer';
 import * as taskbar from './taskbar';
@@ -25,6 +26,11 @@ export const SECTIONS: SectionDef[] = [
   { id: 'security', title: 'Security' },
   { id: 'privacy', title: 'Privacy', intro: 'Maximum practical privacy for Windows 11 Pro. Required diagnostic data cannot be turned off on Pro.' },
   { id: 'updates', title: 'Windows Update' },
+  {
+    id: 'windowsUpdate',
+    title: 'Windows Update automation',
+    intro: 'Installs all applicable updates after setup, restarting and resuming until none remain. Uses only built-in Windows components.',
+  },
   { id: 'system', title: 'System tweaks' },
   { id: 'explorer', title: 'File Explorer' },
   { id: 'taskbar', title: 'Taskbar' },
@@ -46,6 +52,7 @@ export const ALL_SETTINGS: SettingDef[] = [
   ...security.settings,
   ...privacy.settings,
   ...updates.settings,
+  ...windowsUpdate.settings,
   ...system.settings,
   ...explorer.settings,
   ...taskbar.settings,
@@ -68,6 +75,7 @@ export const VALIDATORS: ((p: Profile, issues: Issue[]) => void)[] = [
   accounts.validate,
   security.validate,
   updates.validate,
+  windowsUpdate.validate,
   desktop.validate,
   start.validate,
   bloatware.validate,
@@ -76,4 +84,4 @@ export const VALIDATORS: ((p: Profile, issues: Issue[]) => void)[] = [
   advancedXml.validate,
 ];
 
-export { setup, accounts, security, privacy, updates, system, explorer, taskbar, desktop, start, personalization, bloatware, virtualization, wifi, scripts, advancedXml, output };
+export { setup, accounts, security, privacy, updates, windowsUpdate, system, explorer, taskbar, desktop, start, personalization, bloatware, virtualization, wifi, scripts, advancedXml, output };

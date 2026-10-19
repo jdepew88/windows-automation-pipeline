@@ -10,15 +10,18 @@ src/
     xml/                         typed element tree, namespace-aware ASCII-safe serializer, parser
     stages/                      command builders, PowerShell sequences (Specialize/DefaultUser/UserOnce/FirstLogon)
     context.ts                   GenContext: base document, component helpers, command appenders, embedded files
-    pipeline.ts                  generate(profile) → { ok, issues, xml, fileName, embeddedFiles }
+    pipeline.ts                  generate(profile) → { ok, issues, xml, fileName, embeddedFiles, assets }
     validation/                  validate.ts (schema + cross-field), xml-structure.ts (post-build checks)
     settings/types.ts            SettingDef: the declarative metadata contract
     resources/upstream.ts        verbatim upstream script/task resources (generated)
+    windows-update/              Phase 2 update engine: config.json builder, downloadable assets
+      scripts/*.ps1              WindowsUpdateEngine.ps1 + Install-UpdateEngine.ps1 (static, tested directly)
   features/<section>/index.ts    settings: SettingDef[]  +  validate(profile, issues)  +  modify(ctx)
   data/                          upstream reference data (locales, keyboards, editions, components, …)
   ui/                            vanilla-TS DOM UI rendered from the registry
   main.ts                        app shell (header actions, sections, issue routing, review)
 tests/unit, tests/e2e            Vitest and Playwright
+tests/powershell                 engine scenarios against a simulated Windows Update Agent (run by Vitest on Windows)
 scripts/                         sample generator, settings-doc generator
 ```
 
@@ -56,6 +59,44 @@ embedded extraction script, which writes every file to disk. This is upstream's 
 FirstLogon then runs from local disk, independent of network or USB media. A FirstLogon step deletes
 the Panther copies afterwards unless "Keep sensitive files" is on.
 
+## Windows Update engine (Phase 2)
+
+Enabled by `windowsUpdate.enabled` (owner default: on). The design review, including the AutoPatch
+licence assessment, is in `docs/phase-2/review.md`.
+
+```
+specialize   extract WindowsUpdateEngine.ps1, Install-UpdateEngine.ps1, config.json
+             → C:\Windows\Setup\Scripts\WindowsUpdate\  (Administrators-only)
+FirstLogon   …all M1 steps (FirstLogon.ps1)… → LAST command: Install-UpdateEngine.ps1
+               secure C:\ProgramData\WindowsDeploymentBuilder (SYSTEM/Admins full, Users read)
+               copy engine + config to …\Updates, archive any previous run
+               register task \WindowsDeploymentBuilder\WindowsUpdate (SYSTEM; at startup +2 min; hourly)
+               start it and wait for the engine to check in (status.json)
+engine       mutex → state.json → limits → wait for network → wait while installer busy
+             loop: search (WUA) → plan (policy, exclusions, given-up) → download → install
+                   → reboot (shutdown /r /t N) and exit; the task resumes it after boot
+             nothing left (after confirmation scans) → result.json, event, marker, remove task
+```
+
+- **Only documented interfaces**: `Microsoft.Update.Session`/`Searcher`/`Downloader`/`Installer`,
+  `Microsoft.Update.SystemInfo`, `Microsoft.Update.ServiceManager` (only when Microsoft Update is on),
+  the inbox `ScheduledTasks` module and `shutdown.exe`. No third-party modules, no downloads.
+- **Policy**: drivers by update `Type`, feature updates by the `Upgrades` category GUID, optional
+  updates by `BrowseOnly`, updates that need user input are never attempted, KB exclusions.
+- **Loop protection**: each update's attempts are counted *before* acting (so crashes count too).
+  An update is given up after `maxAttemptsPerUpdate`. That also covers updates that report success
+  but keep being offered. A one-time component reset grants one more attempt. Further hard stops:
+  `maxReboots`, `maxRuntimeHours`, `maxErrors` (unexpected exceptions) and 50 passes per start.
+- **Outcomes**: `Succeeded`, `CompletedWithFailures`, `Failed`, `Offline` in `result.json`, plus
+  Application events 1100–1103. The orchestrator contract is the marker file
+  `C:\ProgramData\WindowsDeploymentBuilder\state\windows-update.done`, written only for `Succeeded`
+  and `CompletedWithFailures`.
+- **Testability**: everything that touches the system is a small adapter function. The scenario tests
+  dot-source the engine (which defines functions without running) and replace the adapters with a
+  simulation, including time.
+- With the engine **off**, the answer file is byte-identical to Milestone 1. This is enforced by
+  `tests/unit/windows-update.test.ts` against a frozen fixture.
+
 ## Extension points for later milestones
 
 - `profile.deferred` (`installPowerShell7`, `wingetPackages`) is recorded and round-tripped.
@@ -64,7 +105,11 @@ the Panther copies afterwards unless "Keep sensitive files" is on.
   `Windows-Deployment.zip` (`setup.ps1`, WinGet JSON, README) without changes to the engine.
 - New settings: add a schema field, an owner default, a `SettingDef` and a `modify`/`validate`
   function. `tests/unit/registry.test.ts` fails if the registry and schema drift apart.
-- Schema changes: bump `SCHEMA_VERSION` and register a step in `profiles/migrations.ts`.
+- Schema changes: bump `SCHEMA_VERSION` and register a step in `profiles/migrations.ts`. v1→v2 adds
+  `windowsUpdate` with the engine **off**, so profiles exported by Milestone 1 keep producing the
+  same answer file.
+- A Phase 3 orchestrator waits for `windows-update.done` (or reads `result.json`) before installing
+  applications. The engine needs no changes for that.
 
 ## Key decisions
 

@@ -6,6 +6,7 @@ import { resolveIdentity } from '../engine/naming';
 import { lookup } from '../data';
 import { SETTINGS_BY_PATH } from '../features';
 import { isEffective, PHASES } from '../features/scripts';
+import { resolveDrivers } from '../engine/windows-update';
 import { clear, download, h } from './dom';
 
 function labelFor(path: string): string {
@@ -44,6 +45,12 @@ function summaryRows(p: Profile): [string, string][] {
     ['Computer name', id.computerName ?? 'Random (Windows-generated)'],
     ['UAC', p.security.uacLevel],
     ['Windows Update', `${p.updates.mode}${p.updates.excludeDrivers ? ', drivers excluded' : ''}`],
+    [
+      'Update automation',
+      p.windowsUpdate.enabled
+        ? `On: drivers ${resolveDrivers(p) === 'include' ? 'included' : 'excluded'}, feature updates ${p.windowsUpdate.featureUpdates === 'install' ? 'installed' : 'skipped'}, at most ${p.windowsUpdate.maxReboots} restarts / ${p.windowsUpdate.maxRuntimeHours} h`
+        : 'Off',
+    ],
     ['Wi-Fi', p.wifi.mode],
     ['Apps removed', String(removed)],
     ['Custom scripts', scripts],
@@ -63,6 +70,7 @@ export function renderReview(): ReviewHandle {
   const status = h('div', { class: 'status', 'data-testid': 'status', 'aria-live': 'polite' });
   const preview = h('pre', { class: 'preview', 'data-testid': 'xml-preview', tabindex: 0 });
   const files = h('div', { class: 'files advanced' });
+  const assets = h('div', { class: 'assets', 'data-testid': 'assets' });
   let current: GenerateResult | undefined;
 
   const downloadBtn = h(
@@ -98,6 +106,8 @@ export function renderReview(): ReviewHandle {
     ),
     h('div', { class: 'actions' }, downloadBtn, copyBtn),
     preview,
+    h('h3', {}, 'Deployment assets'),
+    assets,
     h('h3', { class: 'advanced' }, 'Embedded files (extracted to disk during specialize)'),
     files,
   );
@@ -140,6 +150,34 @@ export function renderReview(): ReviewHandle {
       downloadBtn.disabled = !result.ok;
       copyBtn.disabled = !result.ok;
       preview.textContent = result.ok ? result.xml! : 'No XML is shown while there are errors.';
+
+      clear(assets);
+      if (!result.ok) {
+        assets.append(h('p', { class: 'empty' }, 'Available once the errors above are fixed.'));
+      } else if (result.assets.length === 0) {
+        assets.append(h('p', { class: 'empty' }, 'None. Turn on Windows Update automation to get the update engine scripts.'));
+      } else {
+        assets.append(
+          h(
+            'p',
+            { class: 'desc' },
+            'Already embedded in the answer file and installed automatically. Download them to inspect, or to run the engine by hand on an installed PC (see the README).',
+          ),
+          h(
+            'ul',
+            { class: 'asset-list' },
+            result.assets.map((a) =>
+              h(
+                'li',
+                { 'data-asset': a.name },
+                h('div', { class: 'asset-head' }, h('code', {}, a.name), h('button', { type: 'button', class: 'btn', 'data-action': 'download-asset', onclick: () => download(a.name, a.content, a.mime) }, 'Download')),
+                h('span', { class: 'choice-desc' }, a.description),
+                h('details', {}, h('summary', {}, 'Preview'), h('pre', { class: 'preview small' }, a.content)),
+              ),
+            ),
+          ),
+        );
+      }
 
       clear(files);
       if (result.ok) {

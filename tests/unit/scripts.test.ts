@@ -83,6 +83,7 @@ describe('custom scripts in the four stages', () => {
       p.setup.keepSensitiveFiles = true;
       p.accounts.autoLogon = 'none';
       p.security.systemRestore = 'windowsDefault';
+      p.windowsUpdate.enabled = false;
       p.scripts.firstLogon.push(s('only', 'cmd', 'echo hi'));
     }));
     expect(commandLines(r.root).firstLogon).toHaveLength(1);

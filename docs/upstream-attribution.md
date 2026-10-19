@@ -52,3 +52,21 @@ original.
 | Shortcut arrows | n/a | `Shell Icons\29` tweak | Owner requirement. **Undocumented, unverified** |
 | Advanced XML components | Replaces an existing component's content silently | Rejects overlap with generator-owned components; checks names/passes against `Component.json`; forbids disk elements and foreign namespaces | Spec: reject conflicting insertions |
 | Output | `Extensions` namespace `https://schneegans.de/…` | `urn:windows-deployment-builder:extensions:v1` | Don't present our output as upstream's |
+
+## AutoPatch (Phase 2 Windows Update engine): ideas only, no code
+
+- Repository: <https://github.com/ps1xml/AutoPatch>, reviewed at commit `4eab0cf` (2026-07-23).
+- License position: the README says "MIT". A standard MIT text with **no named copyright holder**
+  exists only inside `AutoPatch.zip`, and GitHub detects no license. The bundled PSWindowsUpdate
+  2.2.1.5 is a compiled DLL without published source, whose manifest says "All rights reserved"
+  while its repository says MIT. See `docs/phase-2/review.md`.
+- Decision: **nothing was copied** from AutoPatch, and PSWindowsUpdate is **not bundled or used**.
+  `WindowsUpdateEngine.ps1` and `Install-UpdateEngine.ps1` were written independently against the
+  documented Windows Update Agent API and the inbox ScheduledTasks module.
+- General techniques that AutoPatch also uses, credited as design inspiration: a single-instance
+  mutex; a startup scheduled task that resumes after restarts; detecting updates that keep being
+  re-offered; a status JSON for progress; a one-time Windows Update component reset; restricting the
+  SYSTEM-executed folder to Administrators.
+- Deliberately different: no Deep Freeze support; feature updates detected by category instead of
+  title text; per-update attempt tracking instead of whole-set fingerprints; explicit reboot,
+  runtime and error limits; explicit final states and a completion marker.

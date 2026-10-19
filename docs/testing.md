@@ -6,7 +6,8 @@
 |---|---|
 | `npm run typecheck` | `tsc --noEmit`, strict mode |
 | `npm run lint` | ESLint + typescript-eslint |
-| `npm test` | Vitest unit/snapshot tests (`tests/unit`) |
+| `npm test` | Vitest unit/snapshot tests (`tests/unit`). On Windows this also parses every generated `.ps1` with the PowerShell parser and runs `tests/powershell/Engine.Tests.ps1` |
+| `npm run test:ps` | Only the Windows Update engine scenarios (Windows PowerShell 5.1, simulated Windows Update Agent; nothing is installed) |
 | `npm run test:e2e` | Playwright smoke tests on desktop and mobile Chromium (`tests/e2e`). Builds and serves on port 5179. First run `npx playwright install chromium`. Set `E2E_BASE_URL=<url>` to run against a deployed site instead |
 | `npm run check` | typecheck + lint + unit tests |
 
@@ -24,6 +25,17 @@ Unit test coverage by acceptance criterion:
 - **Four script stages, empty lists, no phantom execution**: `scripts.test.ts`.
 - **Advanced XML merge, conflicts, malformed input**: `components.test.ts`.
 - **Registry ↔ schema coverage and metadata completeness**: `registry.test.ts`.
+- **Phase 2: Milestone 1 output preserved** (engine off = byte-identical M1 XML; v1 profiles import
+  with the engine off), embedding, ordering, config mapping, validation: `windows-update.test.ts`.
+- **Phase 2 engine behaviour** (`Engine.Tests.ps1`, 22 scenarios):
+  - clean machine; install → reboot → resume, with follow-up updates;
+  - re-offered and failing updates given up, one component reset, download failures;
+  - reboot limit;
+  - policy skips (feature, driver, optional, interactive, KB);
+  - offline → `Offline`, late network;
+  - scan failures, unexpected errors → `Failed`, a crash counted as an attempt;
+  - busy installer, already finished, pending restart, corrupt state;
+  - single instance (mutex across processes), log content, config defaults.
 
 ## Not automated: must be done on Windows (status: UNVERIFIED)
 
@@ -87,3 +99,31 @@ Hyper-V Generation 2 (Secure Boot + vTPM) or VMware/VirtualBox with EFI + TPM 2.
 
 Report anything that fails as **unverified/failed**. Do not mark M1 as hardware-validated until both
 runs pass.
+
+### C. Windows Update engine (Phase 2; status: UNVERIFIED)
+
+Only a **read-only** scan has run on real Windows (`-Mode Scan` on the developer's Windows 11
+Insider workstation, 2026-10-19). It found 2 applicable updates and correctly reported an
+existing pending restart. Nothing was installed. Installing, restarting and resuming have only
+been exercised against the simulation.
+
+Run in the same disposable VM as B, using an ISO that is a few months old so updates are pending:
+
+1. Generate with the owner defaults (engine on). After the first desktop appears:
+   - [ ] `FirstLogon.log` shows FirstLogon.ps1 finished **before** Install-UpdateEngine.ps1 ran. The
+         installer printed "Engine is running".
+   - [ ] Task Scheduler → `\WindowsDeploymentBuilder\WindowsUpdate` exists and runs as SYSTEM.
+   - [ ] `icacls C:\ProgramData\WindowsDeploymentBuilder` shows SYSTEM/Administrators F, Users RX only.
+2. Watch `C:\ProgramData\WindowsDeploymentBuilder\Updates\logs\engine.log` and `status.json`:
+   - [ ] A restart warning appears about 60 s before each restart. After the restart the engine resumes
+         (start N+1 in the log) without anyone signing in.
+   - [ ] No second engine instance (`Get-CimInstance Win32_Process -Filter "Name='powershell.exe'"`).
+   - [ ] The run ends with `result.json` `status: Succeeded` (or `CompletedWithFailures` with the KBs
+         listed). `windows-update.done` exists. Application log has event 1100/1101. The task is gone.
+   - [ ] Settings → Windows Update shows "You're up to date". No feature update was installed (skip),
+         and no drivers when the driver exclusion is on.
+3. Negative runs (one each, fresh VM):
+   - [ ] Network disconnected for the whole run, with `maxRuntimeHours` = 1: ends `Offline`, no marker.
+   - [ ] `maxReboots` = 1 on an old ISO: ends `Failed` with "Reboot limit (1) reached".
+   - [ ] Network connected only after the first hour: the engine resumes at the hourly trigger.
+4. Record the results and the ISO build in `docs/validation-log.md`.

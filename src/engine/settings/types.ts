@@ -17,6 +17,7 @@ export type SectionId =
   | 'security'
   | 'privacy'
   | 'updates'
+  | 'windowsUpdate'
   | 'system'
   | 'explorer'
   | 'taskbar'

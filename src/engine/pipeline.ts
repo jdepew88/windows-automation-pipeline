@@ -8,6 +8,7 @@ import { validateProfile } from './validation/validate';
 import { XmlCharacterError, serialize } from './xml/serialize';
 import { NS, clone, elements, getAttr, setAttr, walk, type XElement } from './xml/tree';
 import * as f from '../features';
+import { updateEngineAssets, type DeploymentAsset } from './windows-update';
 
 export interface GenerateResult {
   ok: boolean;
@@ -17,6 +18,8 @@ export interface GenerateResult {
   fileName: string;
   /** Files embedded for extraction during specialize (for review/debugging). */
   embeddedFiles: { path: string; content: string }[];
+  /** Separately downloadable deployment files (Windows Update engine); present only when ok. */
+  assets: DeploymentAsset[];
 }
 
 /** Removes leaf elements without children or attributes (upstream EmptyElementsModifier). */
@@ -126,6 +129,7 @@ function build(profile: Profile): GenContext {
   f.security.modifyAppLocker(ctx);
   f.scripts.modify(ctx);
   emitSequences(ctx);
+  f.windowsUpdate.modify(ctx);
 
   const userComponents = f.advancedXml.modify(ctx);
   numberCommands(ctx.root, userComponents);
@@ -141,25 +145,25 @@ export function generate(input: unknown): GenerateResult {
   const fallbackName = 'autounattend.xml';
   const { profile, issues } = validateProfile(input);
   const fileName = profile?.output.answerFileName ?? fallbackName;
-  if (!profile || hasErrors(issues)) return { ok: false, issues, fileName, embeddedFiles: [] };
+  if (!profile || hasErrors(issues)) return { ok: false, issues, fileName, embeddedFiles: [], assets: [] };
 
   let ctx: GenContext;
   try {
     ctx = build(profile);
   } catch (e) {
     if (e instanceof CommandError || e instanceof XmlCharacterError) {
-      return { ok: false, issues: [...issues, { severity: 'error', path: '', message: e.message }], fileName, embeddedFiles: [] };
+      return { ok: false, issues: [...issues, { severity: 'error', path: '', message: e.message }], fileName, embeddedFiles: [], assets: [] };
     }
     throw e;
   }
   const all = [...issues, ...ctx.issues, ...checkStructure(ctx.root)];
-  if (hasErrors(all)) return { ok: false, issues: all, fileName, embeddedFiles: [] };
+  if (hasErrors(all)) return { ok: false, issues: all, fileName, embeddedFiles: [], assets: [] };
 
   try {
-    return { ok: true, issues: all, xml: serialize(ctx.root), fileName, embeddedFiles: ctx.files };
+    return { ok: true, issues: all, xml: serialize(ctx.root), fileName, embeddedFiles: ctx.files, assets: updateEngineAssets(profile) };
   } catch (e) {
     if (e instanceof XmlCharacterError) {
-      return { ok: false, issues: [...all, { severity: 'error', path: '', message: e.message }], fileName, embeddedFiles: [] };
+      return { ok: false, issues: [...all, { severity: 'error', path: '', message: e.message }], fileName, embeddedFiles: [], assets: [] };
     }
     throw e;
   }
