@@ -21,7 +21,14 @@ npx playwright install chromium && npm run test:e2e   # browser smoke tests
 npm run lint
 ```
 
-Everything runs locally. Nothing is uploaded, no script runs in the browser, and profiles are not
+## Deployment (Cloudflare Workers)
+
+The site is deployed as the static-assets-only Worker `windows-automation-pipeline` (`wrangler.jsonc`
+serves `dist/`; source maps are excluded by `public/.assetsignore`). Deploy manually with
+`npm run deploy`, or let Cloudflare Workers Builds deploy pushes to `main` (build command
+`npm run build`, deploy command `npx wrangler deploy`).
+
+Everything runs locally in the browser, including on the deployed site. Nothing is uploaded, no script runs in the browser, and profiles are not
 saved automatically.
 
 ## Using it

@@ -4,11 +4,12 @@
   "private": true,
   "description": "Local TypeScript generator for Windows 11 Pro autounattend.xml (Milestone 1)",
   "type": "module",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
+    "deploy": "npm run build && wrangler deploy",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "test": "vitest run",
@@ -28,7 +29,8 @@
     "typescript-eslint": "^8.71.2",
     "vite": "^6.4.4",
     "vite-node": "^3.2.4",
-    "vitest": "^3.2.7"
+    "vitest": "^3.2.7",
+    "wrangler": "^4.151.1"
   },
   "dependencies": {
     "@xmldom/xmldom": "^0.9.12",
