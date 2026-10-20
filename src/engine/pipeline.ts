@@ -10,7 +10,8 @@ import { NS, clone, elements, getAttr, setAttr, walk, type XElement } from './xm
 import * as f from '../features';
 import { updateEngineAssets, type DeploymentAsset } from './windows-update';
 import { applicationAssets } from './applications';
-import { orchestrationContract } from './orchestration';
+import { orchestrationAsset } from './orchestration';
+import * as deployment from './deployment';
 
 export interface GenerateResult {
   ok: boolean;
@@ -133,6 +134,7 @@ function build(profile: Profile): GenContext {
   emitSequences(ctx);
   f.windowsUpdate.modify(ctx);
   f.applications.modify(ctx);
+  deployment.modify(ctx);
 
   const userComponents = f.advancedXml.modify(ctx);
   numberCommands(ctx.root, userComponents);
@@ -144,16 +146,7 @@ function build(profile: Profile): GenContext {
 export function deploymentAssets(profile: Profile): DeploymentAsset[] {
   const assets = [...updateEngineAssets(profile), ...applicationAssets(profile)];
   if (assets.length === 0) return assets;
-  return [
-    ...assets,
-    {
-      name: 'orchestration.json',
-      content: (JSON.stringify(orchestrationContract(profile), null, 2) + '\n').replace(/\r?\n/g, '\r\n'),
-      mime: 'application/json',
-      description: 'Stages, order, coordination locks and result files for the deployment orchestrator',
-      group: 'orchestration',
-    },
-  ];
+  return [...assets, orchestrationAsset(profile)];
 }
 
 /**

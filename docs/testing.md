@@ -7,7 +7,7 @@
 | `npm run typecheck` | `tsc --noEmit`, strict mode |
 | `npm run lint` | ESLint + typescript-eslint |
 | `npm test` | Vitest unit/snapshot tests (`tests/unit`). On Windows this also parses every generated `.ps1` with the PowerShell parser and runs `tests/powershell/Engine.Tests.ps1` |
-| `npm run test:ps` | Only the engine scenarios: `Engine.Tests.ps1` (Windows Update, simulated Windows Update Agent) and `Applications.Tests.ps1` (application engine and WinGet bootstrap, simulated WinGet). Windows PowerShell 5.1; nothing is installed |
+| `npm run test:ps` | Only the engine scenarios: `Engine.Tests.ps1` (Windows Update, simulated Windows Update Agent), `Applications.Tests.ps1` (application engine and WinGet bootstrap, simulated WinGet) and `Deployment.Tests.ps1` (Phase 4 orchestrator against the real generated package, simulated machine; see [phase-4-usb-deployment/testing.md](phase-4-usb-deployment/testing.md)). Windows PowerShell 5.1; nothing is installed |
 | `npm run test:e2e` | Playwright smoke tests on desktop and mobile Chromium (`tests/e2e`). Builds and serves on port 5179. First run `npx playwright install chromium`. Set `E2E_BASE_URL=<url>` to run against a deployed site instead |
 | `npm run check` | typecheck + lint + unit tests |
 

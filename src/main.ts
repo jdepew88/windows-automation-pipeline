@@ -13,6 +13,7 @@ import { renderField, type FieldHandle } from './ui/form';
 import { icon, type IconName } from './ui/icons';
 import { FIELD_GROUPS, NAV_GROUPS, PAGE_ICONS, type NavItem, type PageId } from './ui/layout';
 import { renderReview } from './ui/review';
+import { renderDeploymentPage } from './ui/deployment';
 import { Store } from './ui/store';
 
 type View = 'basic' | 'advanced';
@@ -40,6 +41,7 @@ function savePref(key: string, value: string): void {
 const store = new Store();
 const fields: { def: SettingDef; handle: FieldHandle }[] = [];
 const review = renderReview();
+const deploymentPage = renderDeploymentPage();
 const app = document.getElementById('app')!;
 
 // Notice -----------------------------------------------------------------------------------------
@@ -244,6 +246,11 @@ for (const section of SECTIONS) {
   pages.set(section.id, pageEl);
   pagesEl.append(pageEl);
 }
+const deploymentPager = h('nav', { class: 'pager', 'aria-label': 'Previous and next section' });
+deploymentPage.el.append(deploymentPager);
+pagers.set('deployment', deploymentPager);
+pages.set('deployment', deploymentPage.el);
+pagesEl.append(deploymentPage.el);
 review.el.hidden = true;
 const reviewPager = h('nav', { class: 'pager', 'aria-label': 'Previous and next section' });
 review.el.append(reviewPager);
@@ -485,6 +492,7 @@ function refresh(p: Profile, structural: boolean): void {
   autologonBanner.hidden = !(p.accounts.accountMode === 'unattendedLocal' && p.accounts.autoLogon !== 'none' && p.accounts.accountGroup === 'Administrators');
   const result: GenerateResult = generate(p);
   showIssues(result.issues);
+  deploymentPage.update(p, result);
   review.update(p, result);
 }
 

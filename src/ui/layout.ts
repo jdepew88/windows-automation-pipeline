@@ -6,7 +6,7 @@ import type { IconName } from './icons';
  * each page. Nothing here changes a setting, its value or what is generated.
  */
 
-export type PageId = SectionId | 'review';
+export type PageId = SectionId | 'deployment' | 'review';
 
 export interface NavItem {
   /** Element id the link targets: a page (`section-<id>`) or an anchor inside one. */
@@ -56,6 +56,7 @@ export const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
       page('advancedXml', 'XML components', 'code'),
       page('output', 'Output', 'file'),
       page('deferred', 'Later milestones', 'clock'),
+      page('deployment', 'Deployment package', 'usb'),
       { target: 'deployment-assets', page: 'review', label: 'Deployment assets', icon: 'archive' },
       page('review', 'Review & download', 'download'),
     ],

@@ -73,7 +73,8 @@ licence assessment, is in `docs/phase-2/review.md`.
 ```
 specialize   extract WindowsUpdateEngine.ps1, Install-UpdateEngine.ps1, config.json
              → C:\Windows\Setup\Scripts\WindowsUpdate\  (Administrators-only)
-FirstLogon   …all M1 steps (FirstLogon.ps1)… → LAST command: Install-UpdateEngine.ps1
+FirstLogon   …all M1 steps (FirstLogon.ps1)… → Install-UpdateEngine.ps1 (since Phase 4 run once by
+             Initialize-Deployment.ps1, the LAST FirstLogon command; see "USB deployment" below)
                secure C:\ProgramData\WindowsDeploymentBuilder (SYSTEM/Admins full, Users read)
                copy engine + config to …\Updates, archive any previous run
                register task \WindowsDeploymentBuilder\WindowsUpdate (SYSTEM; at startup +2 min; hourly)
@@ -113,7 +114,8 @@ is empty, which is the owner default: six built-in profiles, all empty. Details:
 UI          profiles (+inherit) ∪ added − removed ─► resolveSelection ─► ordered, de-duplicated queue
             (identity = source + PackageIdentifier)     (catalog deps first, interaction-required and unresolved last)
 generate    winget-packages.json (Microsoft schema 2.0) + applications-config.json + 3 scripts
-            → embedded to C:\Windows\Setup\Scripts\Applications; LAST FirstLogon command:
+            → embedded to C:\Windows\Setup\Scripts\Applications; at first sign-in (run once by
+            Initialize-Deployment.ps1 since Phase 4):
             Install-ApplicationEngine.ps1 → task \WindowsDeploymentBuilder\Applications
             (signed-in user, interactive, highest privileges; at sign-in + hourly)
 engine      mutex → state → network → WinGet check → winget show (preparation, parallel to WU)
@@ -135,6 +137,26 @@ engine      mutex → state → network → WinGet check → winget show (prepar
 - **Testability:** like Phase 2, every system touchpoint is an adapter function, and the scenario
   tests replace them. TypeScript and PowerShell parity (commands, exit codes, the coordination
   block) is enforced by tests.
+
+## USB deployment and orchestration (Phase 4)
+
+`src/engine/deployment/` builds the deployment ZIP (answer file at the USB root plus a
+`WindowsDeployment` folder with a SHA-256 manifest, `setup.cmd`, orchestrator, engines, profiles and
+docs) in the browser, and embeds the orchestrator in the answer file:
+
+```
+specialize   also extracts C:\Windows\Setup\Scripts\Deployment\ (orchestrator + runtime manifest)
+FirstLogon   …FirstLogon.ps1… → LAST: Initialize-Deployment.ps1 (user, elevated)
+               verify embedded files against the manifest → copy to …\Package (protected) → verify again
+               launch each enabled stage once: Install-UpdateEngine.ps1 (→ SYSTEM task),
+               Install-ApplicationEngine.ps1 (→ task for this user)
+               register \WindowsDeploymentBuilder\Deployment (SYSTEM; startup + every 15 min)
+monitor      verify …\Package → read each engine's result/status/task → Deployment\status.json
+             all final or deadline → report (reports\deployment-report.*), marker, remove task
+```
+
+Details: `docs/phase-4-usb-deployment/architecture.md`. With both engines off nothing is added and
+the answer file stays byte-identical to Milestone 1.
 
 ## Extension points for later milestones
 

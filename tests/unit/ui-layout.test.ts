@@ -11,9 +11,9 @@ describe('UI layout (presentation only)', () => {
     }
   });
 
-  it('gives every section with settings, plus Review, exactly one sidebar page entry', () => {
+  it('gives every section with settings, plus Deployment package and Review, exactly one sidebar page entry', () => {
     const withSettings = SECTIONS.filter((s) => ALL_SETTINGS.some((d) => d.section === s.id)).map((s) => s.id as string);
     const pageItems = NAV_GROUPS.flatMap((g) => g.items).filter((i) => i.target === `section-${i.page}`).map((i) => i.page as string);
-    expect(pageItems.slice().sort()).toEqual([...withSettings, 'review'].sort());
+    expect(pageItems.slice().sort()).toEqual([...withSettings, 'deployment', 'review'].sort());
   });
 });

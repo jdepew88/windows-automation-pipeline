@@ -100,11 +100,11 @@ describe('answer file with applications selected', () => {
     expect(r.embeddedFiles.filter((f) => f.path.startsWith(APP_STAGING_DIR)).map((f) => f.path.slice(APP_STAGING_DIR.length + 1))).toEqual([...EMBEDDED_APP_FILES]);
   });
 
-  it('runs the application installer as the very last FirstLogon command, after the update engine', () => {
+  it('embeds the application installer; the orchestrator (last FirstLogon command) runs it after the update engine', () => {
     const fl = commandLines(r.root).firstLogon;
-    expect(fl).toHaveLength(3);
-    expect(fl[1]).toContain('WindowsUpdate\\Install-UpdateEngine.ps1');
-    expect(fl[2]).toBe(`powershell.exe -WindowStyle "Normal" -ExecutionPolicy "Unrestricted" -NoProfile -File "${APP_STAGING_DIR}\\Install-ApplicationEngine.ps1"`);
+    expect(fl).toHaveLength(2);
+    expect(fl[1]).toContain('Deployment\\scripts\\bootstrap\\Initialize-Deployment.ps1');
+    expect(r.embeddedFiles.map((f) => f.path)).toContain(`${APP_STAGING_DIR}\\Install-ApplicationEngine.ps1`);
   });
 
   it('round-trips the scripts and both JSON files exactly through the XML', () => {

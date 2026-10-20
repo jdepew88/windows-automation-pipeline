@@ -13,6 +13,8 @@ import { clear, download, h } from './dom';
 import { icon, type IconName } from './icons';
 import { codeView } from './code-view';
 import { choicesOf } from './form';
+import { PACKAGE_FILE_NAME } from '../engine/deployment';
+import { currentPackage, downloadPackage } from './deployment';
 
 export function labelFor(path: string): string {
   const exact = SETTINGS_BY_PATH.get(path);
@@ -241,6 +243,7 @@ export function renderReview(): ReviewHandle {
   const steps = h('ol', { class: 'steps' });
   const assetCount = h('a', { href: '#deployment-assets', class: 'asset-link' });
   let current: GenerateResult | undefined;
+  let currentProfile: Profile | undefined;
   let summaryText = '';
 
   const fileNameLabel = h('span', { class: 'btn-sub' });
@@ -248,12 +251,26 @@ export function renderReview(): ReviewHandle {
     'button',
     {
       type: 'button',
-      class: 'btn primary hero',
+      class: 'btn wide stacked',
       'data-action': 'download-xml',
       onclick: () => current?.ok && current.xml && download(current.fileName, current.xml, 'application/xml'),
     },
     icon('download'),
     h('span', { class: 'btn-stack' }, h('span', { class: 'btn-label' }, 'Download answer file'), fileNameLabel),
+  );
+  const packageBtn = h(
+    'button',
+    {
+      type: 'button',
+      class: 'btn primary hero',
+      'data-action': 'download-package',
+      onclick: () => {
+        const pkg = current && currentProfile ? currentPackage(currentProfile, current) : null;
+        if (pkg) downloadPackage(pkg);
+      },
+    },
+    icon('archive'),
+    h('span', { class: 'btn-stack' }, h('span', { class: 'btn-label' }, 'Download deployment package'), h('span', { class: 'btn-sub' }, PACKAGE_FILE_NAME)),
   );
   const copyBtn = h('button', { type: 'button', class: 'btn wide', onclick: () => current?.xml && copy(current.xml, copyBtn) }, icon('copy'), h('span', { class: 'btn-label' }, 'Copy XML to clipboard'));
   const copySummaryBtn = h('button', { type: 'button', class: 'btn sm', onclick: () => copy(summaryText, copySummaryBtn) }, icon('copy'), h('span', { class: 'btn-label' }, 'Copy summary'));
@@ -295,7 +312,13 @@ export function renderReview(): ReviewHandle {
       h(
         'aside',
         { class: 'review-side' },
-        card('actions-card', cardHead('Actions', null, 'Download the answer file or copy it to the clipboard.'), h('div', { class: 'action-stack' }, downloadBtn, copyBtn), assetCount),
+        card(
+          'actions-card',
+          cardHead('Actions', null, 'The deployment package is everything for a USB installation; the answer file alone also works.'),
+          h('div', { class: 'action-stack' }, packageBtn, downloadBtn, copyBtn),
+          h('a', { href: '#section-deployment', class: 'asset-link' }, icon('usb'), h('span', {}, 'Package contents and USB instructions'), icon('chevronRight')),
+          assetCount,
+        ),
         card('issues-card', h('div', { class: 'card-head', id: 'review-issues' }, h('div', { class: 'card-title' }, icon('alert'), issuesTitle), issuesCount), issuesList),
         card('steps-card', cardHead('Next steps', null, null), steps),
       ),
@@ -337,6 +360,7 @@ export function renderReview(): ReviewHandle {
     el,
     update(p, result) {
       current = result;
+      currentProfile = p;
       const tiles = summaryTiles(p, result);
       clear(summary);
       for (const t of tiles) {
@@ -416,6 +440,7 @@ export function renderReview(): ReviewHandle {
       else issuesList.append(...all.map(issueLine));
 
       downloadBtn.disabled = !result.ok;
+      packageBtn.disabled = !result.ok;
       copyBtn.disabled = !result.ok;
       copyXmlSmall.disabled = !result.ok;
       fileNameLabel.textContent = result.fileName;
@@ -425,7 +450,7 @@ export function renderReview(): ReviewHandle {
       clear(steps);
       const engines = [p.windowsUpdate.enabled && 'Windows updates', result.assets.some((a) => a.group === 'applications') && 'the selected applications'].filter(Boolean);
       const stepList: [string, string][] = [
-        [`Download ${result.fileName}`, 'Copy the file to the root of your installation USB drive.'],
+        ['Download the deployment package', `Extract it to the root of your Windows 11 installation USB drive (${result.fileName} next to setup.exe).`],
         ['Boot from the installation media', 'Use Windows 11 installation media and start Setup.'],
         ['Choose the disk', 'Setup stops at disk selection: select, create and format the partition yourself.'],
         ...(engines.length ? [['After the first sign-in', `${engines.join(' and ')} install automatically. Logs and results are described in the README files under Deployment assets.`] as [string, string]] : []),

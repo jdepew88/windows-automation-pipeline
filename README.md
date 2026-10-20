@@ -1,4 +1,4 @@
-# Windows Deployment Builder (Milestone 1 + Phase 2 Windows Update + Phase 3 WinGet provisioning)
+# Windows Deployment Builder (Milestone 1 + Phase 2 Windows Update + Phase 3 WinGet provisioning + Phase 4 USB deployment)
 
 A local, offline, browser-based generator for **Windows 11 Pro `autounattend.xml`** answer files,
 written entirely in TypeScript. It is built on the option model and XML patterns of
@@ -84,6 +84,17 @@ saved automatically.
   - **Additional Software:** records installers that WinGet does not cover, as a manual follow-up.
     Nothing is downloaded.
   - ⚠️ **Not yet validated in a VM.**
+- **USB deployment package (Phase 4).** **Deployment package** (or **Review & download**) builds
+  `windows-deployment-package.zip` in the browser: `autounattend.xml` for the root of an ordinary
+  Windows 11 installation USB drive plus a `WindowsDeployment` folder (manifest with SHA-256 of
+  every file, `setup.cmd`, orchestrator, both engines, profiles, docs).
+  - **Installation:** Setup still stops at disk selection; you choose the disk.
+  - **First sign-in:** the orchestrator verifies the embedded files, starts Windows Update (SYSTEM)
+    and the applications (signed-in user) once each, follows them across restarts, shows progress,
+    and writes a deployment report. The USB drive is not needed after Setup.
+  - Guides: [USB preparation](docs/phase-4-usb-deployment/usb-preparation.md),
+    [recovery](docs/phase-4-usb-deployment/recovery.md).
+  - ⚠️ **Tested with simulations only; not yet run in a VM or on hardware.**
 
 The full per-setting mapping is in [docs/settings-mapping.md](docs/settings-mapping.md) (generated
 from code).
@@ -104,11 +115,16 @@ from code).
 - [docs/phase-3/orchestration.md](docs/phase-3/orchestration.md): stages, Windows Update / WinGet coordination, results, Phase 4 driver interface
 - [docs/phase-3/profile-format.md](docs/phase-3/profile-format.md): builder profile JSON vs Microsoft's WinGet JSON
 - [docs/phase-3/testing.md](docs/phase-3/testing.md): Phase 3 test coverage, read-only real-Windows checks and the VM checklist
+- [docs/phase-4-usb-deployment/architecture.md](docs/phase-4-usb-deployment/architecture.md): audit, staging method, package layout, manifest, orchestration, restarts
+- [docs/phase-4-usb-deployment/implementation-report.md](docs/phase-4-usb-deployment/implementation-report.md): Phase 4 built, answer-file changes, defects found, limitations
+- [docs/phase-4-usb-deployment/testing.md](docs/phase-4-usb-deployment/testing.md): Phase 4 coverage, regression results, VM/hardware checklist
+- [docs/phase-4-usb-deployment/usb-preparation.md](docs/phase-4-usb-deployment/usb-preparation.md): preparing the USB drive (Media Creation Tool, Rufus, manual copy)
+- [docs/phase-4-usb-deployment/recovery.md](docs/phase-4-usb-deployment/recovery.md): progress, logs, recovery commands
 
 ## Not yet implemented
 
-Manufacturer driver installation (Phase 4; the interface is defined in
-`src/engine/drivers/contract.ts`), the ZIP bundle and `setup.ps1` orchestrator, automatic
-execution of Additional Software installers, ISO/boot media editing, unattended disk formatting,
-and background deployment. The profile records `deferred.installPowerShell7` as an extension point
+Manufacturer driver installation (a later phase; the interface is defined in
+`src/engine/drivers/contract.ts` and the orchestrator reports the stage as not implemented), PXE or
+network delivery, automatic execution of Additional Software installers, ISO/boot media editing,
+unattended disk formatting, and customer data restoration. The profile records `deferred.installPowerShell7` as an extension point
 only. To install PowerShell 7, select "PowerShell 7" under Application provisioning.

@@ -1,4 +1,5 @@
 import type { Profile } from './schema/profile';
+import type { DeploymentAsset } from './windows-update';
 import { COMPLETION_MARKER, DATA_ROOT, RESULT_FILE, TASK_NAME, TASK_PATH } from './windows-update';
 import { APP_MARKER, APP_RESULT_FILE, APP_TASK_NAME, applicationsActive } from './applications';
 import { FINAL_STATUSES, MARKER_STATUSES } from './applications/results';
@@ -69,5 +70,16 @@ export function orchestrationContract(p: Profile) {
         note: 'Interface only (src/engine/drivers/contract.ts). No driver is installed by this version.',
       },
     ],
+  };
+}
+
+/** The orchestration.json deployment asset (also included in the deployment package). */
+export function orchestrationAsset(p: Profile): DeploymentAsset {
+  return {
+    name: 'orchestration.json',
+    content: (JSON.stringify(orchestrationContract(p), null, 2) + '\n').replace(/\r?\n/g, '\r\n'),
+    mime: 'application/json',
+    description: 'Stages, order, coordination locks and result files for the deployment orchestrator',
+    group: 'orchestration',
   };
 }

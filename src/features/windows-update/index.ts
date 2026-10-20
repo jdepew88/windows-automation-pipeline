@@ -5,6 +5,7 @@ import type { Issue } from '../../engine/validation/issues';
 import {
   CONFIG_FILE,
   COMPLETION_MARKER,
+  EMBEDDED_UPDATE_FILES,
   ENGINE_FILE,
   INSTALLER_FILE,
   LIMITS,
@@ -48,7 +49,7 @@ export const settings: SettingDef[] = [
     risk:
       'The computer restarts on its own, even while someone is signed in (they get a warning first). With automatic sign-in this repeats until updating is finished. Unsaved work in that session can be lost. Not yet validated in a VM.',
     stages: ['specialize', 'firstLogon'],
-    mapping: `Embeds ${ENGINE_FILE}, ${INSTALLER_FILE} and ${CONFIG_FILE} in ${STAGING_DIR}. The last FirstLogon command runs ${INSTALLER_FILE}, which registers the task ${TASK_PATH}${TASK_NAME} (SYSTEM, at startup + hourly). Result: ${RESULT_FILE}; completion marker: ${COMPLETION_MARKER}.`,
+    mapping: `Embeds ${ENGINE_FILE}, ${INSTALLER_FILE} and ${CONFIG_FILE} in ${STAGING_DIR}. At the first sign-in the deployment orchestrator (Initialize-Deployment.ps1) verifies the files and runs ${INSTALLER_FILE} once, which registers the task ${TASK_PATH}${TASK_NAME} (SYSTEM, at startup + hourly). Result: ${RESULT_FILE}; completion marker: ${COMPLETION_MARKER}.`,
     advanced: false,
     verification: 'unverified',
   },
@@ -172,14 +173,13 @@ export function validate(p: Profile, issues: Issue[]): void {
   if (invalid.length > 0) err('windowsUpdate.excludedKbs', `Not a KB number: ${invalid.slice(0, 5).join(', ')}. Use the form KB5034441.`);
 }
 
-/** Must run after the FirstLogon script is emitted, so installing the engine is the last step. */
+/**
+ * Embeds the engine files. The deployment orchestrator (Initialize-Deployment.ps1, the last
+ * FirstLogon command, src/engine/deployment) runs INSTALLER_FILE from its verified package copy.
+ */
 export function modify(ctx: GenContext): void {
   if (!ctx.profile.windowsUpdate.enabled) return;
-  let installer = '';
   for (const asset of updateEngineAssets(ctx.profile)) {
-    if (!asset.name.endsWith('.ps1') && !asset.name.endsWith('.json')) continue;
-    const path = ctx.embedFile(`${STAGING_DIR}\\${asset.name}`, asset.content);
-    if (asset.name === INSTALLER_FILE) installer = path;
+    if (EMBEDDED_UPDATE_FILES.includes(asset.name)) ctx.embedFile(`${STAGING_DIR}\\${asset.name}`, asset.content);
   }
-  ctx.appendCommand('firstLogon', ctx.cmd.powerShellFile(installer));
 }

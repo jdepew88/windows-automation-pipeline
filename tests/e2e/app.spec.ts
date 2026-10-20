@@ -248,7 +248,7 @@ test('application provisioning: empty by default, nothing generated until someth
   }
   await expect(page.getByTestId('app-count')).toHaveText('0 selected');
   await expect(page.getByTestId('summary')).toContainText('On, nothing selected');
-  await expect(preview(page)).not.toContainText('Install-ApplicationEngine');
+  await expect(preview(page)).not.toContainText('Applications\\Install-ApplicationEngine.ps1');
   await expect(page.getByTestId('assets').locator('[data-asset-group="applications"]')).toHaveCount(0);
 });
 
@@ -499,4 +499,46 @@ test('Windows 11 requirement bypass controls are present (Advanced), off by defa
   await expect(preview(page)).toContainText('BypassNRO');
   await checkbox(page, 'setup.bypassRequirementsCheck').uncheck();
   await expect(preview(page)).not.toContainText('LabConfig');
+});
+
+// Phase 4: deployment package -----------------------------------------------------------------
+
+test('deployment package: ZIP built offline in the browser, answer file at the root, exact selection, verified manifest', async ({ page, context }) => {
+  const { readZip } = await import('../../src/engine/deployment/zip');
+  await setName(page, 'Alex');
+  await go(page, 'applications');
+  await catalogAdd(page, 'git').click();
+  await catalogAdd(page, '7zip').click();
+  await apps(page).locator('[data-package="winget:7zip.7zip"] [data-action="app-remove"]').click();
+  await context.setOffline(true);
+  await go(page, 'deployment');
+  await expect(page.getByTestId('package-status')).toContainText('Ready: windows-deployment-package.zip');
+  await expect(page.getByTestId('package-contents')).toContainText('WindowsDeployment/setup.cmd');
+  await expect(page.getByTestId('package-contents')).toContainText('WindowsDeployment/scripts/bootstrap/Initialize-Deployment.ps1');
+  await expect(page.getByTestId('package-stages').locator('[data-stage="drivers"]')).toContainText('Not implemented');
+  await expect(page.getByTestId('package-stages').locator('[data-stage="applications"]')).toContainText('signed-in user');
+
+  const [dl] = await Promise.all([page.waitForEvent('download'), page.locator('#section-deployment [data-action="download-package"]').click()]);
+  expect(dl.suggestedFilename()).toBe('windows-deployment-package.zip');
+  const entries = readZip(new Uint8Array(await readFile((await dl.path())!)));
+  const files = new Map(entries.map((e) => [e.path, new TextDecoder().decode(e.data)]));
+  expect(entries[0]!.path).toBe('autounattend.xml');
+  const manifest = JSON.parse(files.get('WindowsDeployment/deployment-manifest.json')!);
+  expect(manifest.applications.packages.map((x: { packageIdentifier: string }) => x.packageIdentifier)).toEqual(['Git.Git']);
+  expect(JSON.parse(files.get('WindowsDeployment/scripts/applications/winget-packages.json')!).Sources[0].Packages).toEqual([{ PackageIdentifier: 'Git.Git' }]);
+  for (const f of manifest.files) expect(files.has(`WindowsDeployment/${f.path}`), f.path).toBe(true);
+
+  await go(page, 'review');
+  expect(files.get('autounattend.xml')!.replace(/\r\n/g, '\n').trim()).toBe((await preview(page).textContent())!.replace(/\r\n/g, '\n').trim());
+  await expect(page.locator('#section-review [data-action="download-package"]')).toBeEnabled();
+  await context.setOffline(false);
+});
+
+test('deployment package is blocked while the configuration has errors', async ({ page }) => {
+  await go(page, 'deployment');
+  await expect(page.getByTestId('package-status')).toContainText('Package blocked');
+  await expect(page.locator('#section-deployment [data-action="download-package"]')).toBeDisabled();
+  await setName(page, 'Alex');
+  await go(page, 'deployment');
+  await expect(page.locator('#section-deployment [data-action="download-package"]')).toBeEnabled();
 });

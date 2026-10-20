@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest';
 import { generateOk, profile } from './helpers';
 import { wingetArguments } from '../../src/engine/applications';
 import { ApplicationsResultSchema, WINGET_EXIT_CODES } from '../../src/engine/applications/results';
+import { writeDeploymentFixture } from '../powershell/deployment-fixture';
 
 /**
  * Runs Windows PowerShell 5.1 against the generated scripts. Only possible on Windows; skipped
@@ -72,6 +73,22 @@ describe.skipIf(!onWindows)('PowerShell (Windows only)', () => {
         const parsed = ApplicationsResultSchema.safeParse(JSON.parse(stripBom(readFileSync(join(dir, f), 'utf8'))));
         expect(parsed.success ? [] : parsed.error.issues, f).toEqual([]);
       }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 240_000);
+
+  it('deployment orchestrator scenarios pass against the real generated package (Phase 4)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'wdd-fixture-'));
+    try {
+      writeDeploymentFixture(dir);
+      let out: string;
+      try {
+        out = ps(['-File', script('../powershell/Deployment.Tests.ps1'), '-Fixture', dir]);
+      } catch (e) {
+        throw new Error(`Deployment.Tests.ps1 failed:\n${(e as { stdout?: string }).stdout ?? e}`);
+      }
+      expect(out).toMatch(/\b\d+ passed, 0 failed/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

@@ -25,8 +25,8 @@ export function clear(e: Element): void {
 let counter = 0;
 export const uid = (prefix: string): string => `${prefix}-${++counter}`;
 
-export function download(fileName: string, content: string, type: string): void {
-  const blob = new Blob([content], { type });
+export function download(fileName: string, content: string | Uint8Array, type: string): void {
+  const blob = new Blob([content as BlobPart], { type });
   const url = URL.createObjectURL(blob);
   const a = h('a', { href: url, download: fileName });
   document.body.append(a);

@@ -48,7 +48,7 @@ export const settings: SettingDef[] = [
     applicability: APPLIES,
     risk: 'Installers run with administrator rights. Only select software you trust. Not yet validated in a VM.',
     stages: ['specialize', 'firstLogon'],
-    mapping: `Embeds ${EMBEDDED_APP_FILES.join(', ')} in ${APP_STAGING_DIR}. The last FirstLogon command runs ${APP_INSTALLER_FILE}, which registers ${TASK_PATH}${APP_TASK_NAME} for the signed-in user (highest privileges, at sign-in + hourly). Result: ${APP_RESULT_FILE}; marker: ${APP_MARKER}.`,
+    mapping: `Embeds ${EMBEDDED_APP_FILES.join(', ')} in ${APP_STAGING_DIR}. At the first sign-in the deployment orchestrator (Initialize-Deployment.ps1) verifies the files and runs ${APP_INSTALLER_FILE} once as that user, which registers ${TASK_PATH}${APP_TASK_NAME} for the signed-in user (highest privileges, at sign-in + hourly). Result: ${APP_RESULT_FILE}; marker: ${APP_MARKER}.`,
     advanced: false,
     verification: 'unverified',
   },
@@ -186,14 +186,13 @@ export function validate(p: Profile, issues: Issue[]): void {
   }
 }
 
-/** Must run after the Windows Update engine is added, so application setup is the last FirstLogon step. */
+/**
+ * Embeds the engine files. The deployment orchestrator (Initialize-Deployment.ps1, the last
+ * FirstLogon command, src/engine/deployment) runs APP_INSTALLER_FILE from its verified package copy.
+ */
 export function modify(ctx: GenContext): void {
   if (!applicationsActive(ctx.profile)) return;
-  let installer = '';
   for (const asset of applicationAssets(ctx.profile)) {
-    if (!(EMBEDDED_APP_FILES as readonly string[]).includes(asset.name)) continue;
-    const path = ctx.embedFile(`${APP_STAGING_DIR}\\${asset.name}`, asset.content);
-    if (asset.name === APP_INSTALLER_FILE) installer = path;
+    if ((EMBEDDED_APP_FILES as readonly string[]).includes(asset.name)) ctx.embedFile(`${APP_STAGING_DIR}\\${asset.name}`, asset.content);
   }
-  ctx.appendCommand('firstLogon', ctx.cmd.powerShellFile(installer));
 }

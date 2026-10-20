@@ -61,10 +61,12 @@ describe('engine enabled (owner default)', () => {
     expect(JSON.parse(e.get('config.json')!)).toEqual(engineConfig(profile()));
   });
 
-  it('installs the engine as the very last FirstLogon command', () => {
+  it('starts the deployment orchestrator as the very last FirstLogon command (Phase 4); the orchestrator runs the engine installer', () => {
     const fl = commandLines(r.root).firstLogon;
     expect(fl).toHaveLength(2);
-    expect(fl.at(-1)).toBe(`powershell.exe -WindowStyle "Normal" -ExecutionPolicy "Unrestricted" -NoProfile -File "${STAGING_DIR}\\Install-UpdateEngine.ps1"`);
+    expect(fl.at(-1)).toBe(`powershell.exe -WindowStyle "Normal" -ExecutionPolicy "Unrestricted" -NoProfile -File "C:\\Windows\\Setup\\Scripts\\Deployment\\scripts\\bootstrap\\Initialize-Deployment.ps1"`);
+    expect(fl.join('\n')).not.toContain('Install-UpdateEngine.ps1');
+    expect(r.embeddedFiles.map((f) => f.path)).toContain(`${STAGING_DIR}\\Install-UpdateEngine.ps1`);
   });
 
   it('respects the hidden-window setting', () => {
@@ -97,7 +99,7 @@ describe('engine enabled (owner default)', () => {
     const cl = commandLines(only.root);
     expect(cl.specialize).toHaveLength(1);
     expect(cl.specialize[0]).toContain('ExtractScript');
-    expect(cl.firstLogon).toEqual([expect.stringContaining('Install-UpdateEngine.ps1')]);
+    expect(cl.firstLogon).toEqual([expect.stringContaining('Initialize-Deployment.ps1')]);
   });
 });
 

@@ -1,0 +1,87 @@
+#Requires -Version 5.1
+<#
+.SYNOPSIS
+    Deployment monitor: follows the stages, keeps status.json current and finishes the deployment.
+
+.DESCRIPTION
+    Runs as SYSTEM from \WindowsDeploymentBuilder\Deployment (registered by
+    Initialize-Deployment.ps1) at startup and every 15 minutes, so it survives every restart. Each
+    run is short and idempotent:
+
+      1. Single instance (mutex shared with Initialize and Resume).
+      2. Verifies the staged package against its manifest before doing anything else. A modified
+         or missing file stops the deployment monitor (IntegrityFailed); nothing is executed.
+      3. Reads what each engine wrote (result.json, status.json, its task) and writes
+         <dataRoot>\Deployment\status.json. Completion markers are not trusted on their own:
+         the final status always comes from result.json.
+      4. When every enabled stage is final, or the deadline has passed, runs
+         Complete-Deployment.ps1 (report, marker, event, cleanup).
+
+    It never launches or re-launches an engine. A stage whose task disappeared without a result is
+    reported as Stalled and needs Resume-Deployment.ps1, so no stage can loop.
+#>
+[CmdletBinding()]
+param()
+
+$script:MonitorMain = $MyInvocation.InvocationName -ne '.'
+. (Join-Path $PSScriptRoot '..\common\DeploymentCommon.ps1')
+. (Join-Path $PSScriptRoot '..\finalization\Complete-Deployment.ps1')
+
+function Invoke-WddMonitor {
+    param([hashtable] $Paths)
+    Initialize-WddLogging $Paths
+    $mutex = Enter-WddMutex 30
+    if (-not $mutex) { Write-WddLog 'Monitor: another deployment process is running; skipping this run.'; return 'Busy' }
+    try {
+        $state = Read-WddJson $Paths.State
+        if (-not $state) { Write-WddLog 'Monitor: no deployment state; nothing to follow.' 'WARN'; return 'NoState' }
+        if ($state.status -eq 'Completed') { Unregister-WddTask '\WindowsDeploymentBuilder\' 'Deployment'; return 'AlreadyCompleted' }
+        if ($state.status -eq 'IntegrityFailed') { return 'IntegrityFailed' }
+
+        $manifestPath = Join-Path $Paths.Package 'deployment-manifest.json'
+        try { $manifest = Read-WddManifest $manifestPath } catch { $manifest = $null; $err = $_.Exception.Message }
+        $check = if ($manifest) { Test-WddFiles $Paths.Package $manifest 'Text' @($state.stagedFiles) } else { @{ Ok = $false; Missing = @('deployment-manifest.json'); Mismatched = @() } }
+        if (-not $check.Ok -or ($manifest -and $manifest.packageId -ne $state.packageId)) {
+            $state.status = 'IntegrityFailed'
+            $state.message = "The staged package was modified or is incomplete ($($check.Missing.Count) missing, $($check.Mismatched.Count) modified). The monitor stopped; nothing more is run by it."
+            Save-WddState $Paths $state
+            Write-WddLog $state.message 'ERROR'
+            foreach ($m in @($check.Missing) + @($check.Mismatched)) { Write-WddLog "  $m" 'ERROR' }
+            Write-WddJson $Paths.Status ([ordered]@{ packageId = $state.packageId; updatedUtc = (Get-WddNow).ToString('o'); deploymentState = 'IntegrityFailed'; overall = 'Failed'; message = $state.message })
+            Write-WddEvent 3003 $state.message 'Error'
+            return 'IntegrityFailed'
+        }
+
+        $state.monitorRuns = [int] $state.monitorRuns + 1
+        $state.lastMonitorUtc = (Get-WddNow).ToString('o')
+        $snapshot = Get-WddSnapshot $manifest $Paths $state
+        Save-WddState $Paths $state
+        Write-WddJson $Paths.Status $snapshot
+        $summary = (@($snapshot.stages) | ForEach-Object { "$($_.id)=$($_.state)$(if ($_.status) { "/$($_.status)" })" }) -join ', '
+        Write-WddLog "Monitor run $($state.monitorRuns): $summary"
+
+        if ($snapshot.allFinal) {
+            $overall = Complete-WddDeployment $manifest $Paths $state $snapshot
+            return "Completed:$overall"
+        }
+        $deadline = ConvertTo-WddDate $state.deadlineUtc
+        if ($deadline -and (Get-WddNow) -ge $deadline) {
+            Write-WddLog "Deadline $($state.deadlineUtc) reached with unfinished stages." 'WARN'
+            $overall = Complete-WddDeployment $manifest $Paths $state $snapshot -DeadlineReached
+            return "Completed:$overall"
+        }
+        return 'InProgress'
+    } finally {
+        Exit-WddMutex $mutex
+    }
+}
+
+if ($script:MonitorMain) {
+    # The monitor lives in <dataRoot>\Package\scripts\orchestrator; dataRoot comes from the manifest.
+    $package = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+    $manifest = Read-WddManifest (Join-Path $package 'deployment-manifest.json')
+    $outcome = Invoke-WddMonitor (Get-WddPaths $manifest.dataRoot)
+    Write-Output $outcome
+    if ($outcome -eq 'IntegrityFailed') { exit 1 }
+    exit 0
+}

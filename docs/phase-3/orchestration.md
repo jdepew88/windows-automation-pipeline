@@ -14,9 +14,15 @@ The machine-readable version is the `orchestration.json` deployment asset (`src/
 
 `…` = `C:\ProgramData\WindowsDeploymentBuilder` (SYSTEM and Administrators full control, Users read).
 
-FirstLogon order: `FirstLogon.ps1` (Milestone 1), then `Install-UpdateEngine.ps1`, then
+FirstLogon order (Phase 3): `FirstLogon.ps1` (Milestone 1), then `Install-UpdateEngine.ps1`, then
 `Install-ApplicationEngine.ps1`. The application installer is generated only when applications or
 Additional Software entries are selected.
+
+**Since Phase 4** the two installer commands are replaced by one, `Initialize-Deployment.ps1`,
+which verifies the files and runs the same two installers once each, in the same order and
+contexts, then follows both stages to a single report. See
+`docs/phase-4-usb-deployment/architecture.md`. Everything below (coordination, lock, results) is
+unchanged.
 
 ### Why the application stage runs as the user
 

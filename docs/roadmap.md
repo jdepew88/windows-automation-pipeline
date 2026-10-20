@@ -16,6 +16,13 @@ Implemented and covered by automated tests, plus read-only checks on real Window
 dry-run plan, `winget import` format acceptance). **Not validated in a VM**; see
 `phase-3/testing.md`. Report: `phase-3/implementation-report.md`.
 
+## Phase 4: USB deployment and first-boot orchestration (branch `feature/phase-4-usb-deployment`)
+
+Implemented and covered by automated tests (simulated machine, real generated package), plus a
+read-only package verification on real Windows. **Not validated in a VM or on hardware**; see
+`phase-4-usb-deployment/testing.md`. Report: `phase-4-usb-deployment/implementation-report.md`.
+This delivers the former "Milestone 3: deployment bundle" items except PowerShell 7 via the catalog.
+
 ## Milestone 2: validation and hardening
 
 - Run WSIM validation and both VM runs (with and without Internet). Fix any findings and record a `docs/validation-log.md`.
@@ -25,19 +32,22 @@ dry-run plan, `winget import` format acceptance). **Not validated in a VM**; see
 - Run the Phase 3 application VM checks (`phase-3/testing.md`): WinGet at first sign-in, lock
   hand-over between both engines, restarts, offline and App Installer repair.
 
-## Phase 4: manufacturer drivers
+- Run the Phase 4 USB deployment checks (`phase-4-usb-deployment/testing.md`) in a VM, then on
+  physical hardware (Media Creation Tool and Rufus media).
 
-Implement the hand-off in `src/engine/drivers/contract.ts` (stage 3 in `orchestration.json`):
-inventory, vendor-recommended candidates by hardware ID, verified installation, restart, and device
-validation. Never replace a driver only because a newer package exists.
+## Next: manufacturer drivers
 
-## Milestone 3: deployment bundle
+Implement the hand-off in `src/engine/drivers/contract.ts` as the `drivers` stage the Phase 4
+orchestrator already reports (`NotImplemented`): inventory, vendor-recommended candidates by
+hardware ID (AMD, NVIDIA, Intel, OEM utilities, mixed hardware), verified installation, restart
+under `install.lock`, and device validation. Never replace a driver only because a newer package
+exists.
 
-- `Windows-Deployment.zip` containing `autounattend.xml`, a WinGet-native JSON (`winget export`/`import` schema), scripts, `setup.ps1`, ancillary config and a README.
-- Durable first-logon orchestration: staged on the Windows volume before first logon, idempotent (state file), connectivity-aware queue with retry and logging. No empty bundle that only pretends to run.
-- Bundle the grouped deployment assets (Windows Update, applications, `orchestration.json`) and
-  optional offline App Installer packages. Read `orchestration.json` for stages, markers and
-  results. (WinGet selection, the dry-run plan and Windows Update coordination are done in Phase 3.)
+## Then
+
+- PXE / netboot.xyz / WinPE share / deployment server delivery of the same answer file and
+  `WindowsDeployment` folder.
+- Optional offline App Installer packages in the package.
 - PowerShell 7: replace the `deferred.installPowerShell7` switch with the catalog entry `Microsoft.PowerShell`.
 
 ## Later

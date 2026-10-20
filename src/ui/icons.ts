@@ -76,6 +76,7 @@ const ICONS = {
   hash: '<path d="M5 9h15M4 15h15M10 4 8 20M16 4l-2 16"/>',
   sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2.5v2M12 19.5v2M4.6 4.6 6 6M18 18l1.4 1.4M2.5 12h2M19.5 12h2M4.6 19.4 6 18M18 6l1.4-1.4"/>',
   moon: '<path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/>',
+  usb: '<path d="M8.5 2.5h7v5h-7z"/><rect x="6.5" y="7.5" width="11" height="14" rx="2"/><path d="M10.5 4.8h.01M13.5 4.8h.01M12 12v5M10 15l2 2 2-2"/>',
   list: '<path d="M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01"/>',
 } as const;
 

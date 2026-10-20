@@ -22,6 +22,8 @@ export const ENGINE_FILE = 'WindowsUpdateEngine.ps1';
 export const INSTALLER_FILE = 'Install-UpdateEngine.ps1';
 export const CONFIG_FILE = 'config.json';
 export const README_FILE = 'README-WindowsUpdate.txt';
+/** Files embedded in the answer file (extracted to STAGING_DIR during specialize). */
+export const EMBEDDED_UPDATE_FILES: readonly string[] = [ENGINE_FILE, INSTALLER_FILE, CONFIG_FILE];
 
 /** Numeric limits, shared by validation and the UI. */
 export const LIMITS = {

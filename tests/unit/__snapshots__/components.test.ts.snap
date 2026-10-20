@@ -160,7 +160,7 @@ exports[`additional XML components > merges a valid component into the right pas
 				</SynchronousCommand>
 				<SynchronousCommand wcm:action="add">
 					<Order>2</Order>
-					<CommandLine>powershell.exe -WindowStyle "Normal" -ExecutionPolicy "Unrestricted" -NoProfile -File "C:\\Windows\\Setup\\Scripts\\WindowsUpdate\\Install-UpdateEngine.ps1"</CommandLine>
+					<CommandLine>powershell.exe -WindowStyle "Normal" -ExecutionPolicy "Unrestricted" -NoProfile -File "C:\\Windows\\Setup\\Scripts\\Deployment\\scripts\\bootstrap\\Initialize-Deployment.ps1"</CommandLine>
 				</SynchronousCommand>
 			</FirstLogonCommands>
 		</component>
@@ -200,7 +200,7 @@ exports[`additional XML components > merges a valid component into the right pas
 				</SynchronousCommand>
 				<SynchronousCommand wcm:action="add">
 					<Order>2</Order>
-					<CommandLine>powershell.exe -WindowStyle "Normal" -ExecutionPolicy "Unrestricted" -NoProfile -File "C:\\Windows\\Setup\\Scripts\\WindowsUpdate\\Install-UpdateEngine.ps1"</CommandLine>
+					<CommandLine>powershell.exe -WindowStyle "Normal" -ExecutionPolicy "Unrestricted" -NoProfile -File "C:\\Windows\\Setup\\Scripts\\Deployment\\scripts\\bootstrap\\Initialize-Deployment.ps1"</CommandLine>
 				</SynchronousCommand>
 			</FirstLogonCommands>
 		</component>
@@ -1629,6 +1629,1585 @@ exit 1
   "rebootWarningSeconds": 60,
   "lockWaitMinutes": 60,
   "excludedKbs": []
+}
+		</File>
+		<File path="C:\\Windows\\Setup\\Scripts\\Deployment\\scripts\\common\\DeploymentCommon.ps1">
+#Requires -Version 5.1
+&lt;#
+.SYNOPSIS
+    Windows Deployment Builder - shared functions of the deployment orchestrator.
+
+.DESCRIPTION
+    Dot-sourced by Stage-Deployment.ps1, Initialize-Deployment.ps1, DeploymentOrchestrator.ps1,
+    Show-DeploymentStatus.ps1, Resume-Deployment.ps1 and Complete-Deployment.ps1. Defines functions
+    only; it never acts by itself.
+
+    Everything that touches the system (scheduled tasks, ACLs, processes, shortcuts, the event log,
+    time, identity) is a small adapter function, so tests can replace it with a simulation.
+
+    The orchestrator coordinates; it does not install. Windows Update and applications are
+    installed by the existing engines (WindowsUpdateEngine.ps1 as SYSTEM, ApplicationEngine.ps1 as
+    the signed-in user), each from its own scheduled task. The orchestrator launches each engine's
+    installer once, follows their real result files and writes one deployment status and report.
+#&gt;
+
+Set-StrictMode -Version 2.0
+
+$script:DeployVersion = '1.0.0'
+$script:EventSource = 'WindowsDeploymentBuilder'
+$script:ManifestFormat = 'windows-deployment-builder/deployment-manifest'
+$script:MutexName = 'Global\\WindowsDeploymentBuilder-Deployment'
+$script:FinalStageStatuses = @('Succeeded', 'CompletedWithFollowUp', 'CompletedWithFailures', 'Failed', 'Offline')
+$script:WddLogFile = $null
+
+# ------------------------------------------------------------------------------------------------
+# Adapters (replaced by the scenario tests)
+# ------------------------------------------------------------------------------------------------
+
+function Get-WddNow { [DateTime]::UtcNow }
+
+function Get-WddIdentity {
+    $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $p = New-Object Security.Principal.WindowsPrincipal($id)
+    @{ Name = $id.Name; IsSystem = ($id.User.Value -eq 'S-1-5-18'); IsAdmin = $p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) }
+}
+
+# Windows PE (the installation environment) must never run the orchestrator.
+function Test-WddWinPE { (Test-Path -LiteralPath 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\MiniNT') -or ($env:SystemDrive -eq 'X:') }
+
+function Get-WddTask {
+    param([string] $TaskPath, [string] $TaskName)
+    $null -ne (Get-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -ErrorAction SilentlyContinue)
+}
+
+function Unregister-WddTask {
+    param([string] $TaskPath, [string] $TaskName)
+    Get-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -ErrorAction SilentlyContinue | Unregister-ScheduledTask -Confirm:$false
+}
+
+function Start-WddTask {
+    param([string] $TaskPath, [string] $TaskName)
+    Start-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath
+}
+
+function Get-WddBootTime { (Get-CimInstance -ClassName Win32_OperatingSystem).LastBootUpTime.ToUniversalTime() }
+
+function Write-WddEvent {
+    param([int] $EventId, [string] $Message, [ValidateSet('Information', 'Warning', 'Error')] [string] $EntryType = 'Information')
+    try {
+        if (-not [System.Diagnostics.EventLog]::SourceExists($script:EventSource)) { New-EventLog -LogName Application -Source $script:EventSource }
+        Write-EventLog -LogName Application -Source $script:EventSource -EventId $EventId -EntryType $EntryType -Message $Message
+    } catch {
+        Write-WddLog "Could not write event $EventId to the Application log: $($_.Exception.Message)" 'WARN'
+    }
+}
+
+function New-WddShortcut {
+    param([string] $Name, [string] $Target, [string] $Arguments, [string] $Description)
+    $path = Join-Path ([Environment]::GetFolderPath('CommonDesktopDirectory')) "$Name.lnk"
+    $shell = New-Object -ComObject WScript.Shell
+    $lnk = $shell.CreateShortcut($path)
+    $lnk.TargetPath = $Target
+    $lnk.Arguments = $Arguments
+    $lnk.Description = $Description
+    $lnk.Save()
+}
+
+function Remove-WddShortcut {
+    param([string] $Name)
+    $path = Join-Path ([Environment]::GetFolderPath('CommonDesktopDirectory')) "$Name.lnk"
+    if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
+}
+
+# ------------------------------------------------------------------------------------------------
+# JSON, logging, paths
+# ------------------------------------------------------------------------------------------------
+
+function ConvertTo-WddHashtable {
+    param($InputObject)
+    if ($null -eq $InputObject) { return $null }
+    if ($InputObject -is [System.Collections.IDictionary]) {
+        $h = @{}
+        foreach ($k in $InputObject.Keys) { $h[$k] = ConvertTo-WddHashtable $InputObject[$k] }
+        return $h
+    }
+    if ($InputObject -is [System.Management.Automation.PSCustomObject]) {
+        $h = @{}
+        foreach ($p in $InputObject.PSObject.Properties) { $h[$p.Name] = ConvertTo-WddHashtable $p.Value }
+        return $h
+    }
+    if ($InputObject -is [System.Collections.IEnumerable] -and $InputObject -isnot [string]) {
+        return , @($InputObject | ForEach-Object { ConvertTo-WddHashtable $_ })
+    }
+    return $InputObject
+}
+
+function Write-WddJson {
+    param([string] $Path, $Value)
+    $dir = Split-Path -Parent $Path
+    if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    $json = $Value | ConvertTo-Json -Depth 12
+    $tmp = "$Path.tmp"
+    [System.IO.File]::WriteAllText($tmp, $json, (New-Object System.Text.UTF8Encoding($false)))
+    Move-Item -LiteralPath $tmp -Destination $Path -Force
+}
+
+function Read-WddJson {
+    param([string] $Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return $null }
+    # Engines write UTF-8 without a BOM; Get-Content would read that as ANSI in PowerShell 5.1.
+    try { ConvertTo-WddHashtable ([System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::UTF8) | ConvertFrom-Json) } catch { $null }
+}
+
+function Write-WddLog {
+    param([string] $Message, [ValidateSet('INFO', 'WARN', 'ERROR')] [string] $Level = 'INFO')
+    $line = '{0}  {1,-5}  {2}' -f (Get-WddNow).ToString('yyyy-MM-dd HH:mm:ss'), $Level, $Message
+    Write-Verbose $line
+    if (-not $script:WddLogFile) { return }
+    for ($i = 0; $i -lt 3; $i++) {
+        try { [System.IO.File]::AppendAllText($script:WddLogFile, $line + "\`r\`n"); return } catch { Start-Sleep -Milliseconds 200 }
+    }
+}
+
+function Get-WddPaths {
+    param([string] $DataRoot)
+    $deployment = Join-Path $DataRoot 'Deployment'
+    $state = Join-Path $DataRoot 'state'
+    $reports = Join-Path $DataRoot 'reports'
+    @{
+        Root          = $DataRoot
+        Package       = Join-Path $DataRoot 'Package'
+        Deployment    = $deployment
+        Logs          = Join-Path $deployment 'logs'
+        Log           = Join-Path (Join-Path $deployment 'logs') 'deployment.log'
+        Status        = Join-Path $deployment 'status.json'
+        StateDir      = $state
+        State         = Join-Path $state 'deployment.json'
+        Marker        = Join-Path $state 'deployment.done'
+        RestartMarker = Join-Path $state 'restart-pending.json'
+        Reports       = $reports
+        ReportJson    = Join-Path $reports 'deployment-report.json'
+        ReportText    = Join-Path $reports 'deployment-report.txt'
+    }
+}
+
+function Initialize-WddLogging {
+    param([hashtable] $Paths)
+    foreach ($d in $Paths.Deployment, $Paths.Logs, $Paths.StateDir) { if (-not (Test-Path -LiteralPath $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null } }
+    $script:WddLogFile = $Paths.Log
+    if ((Test-Path -LiteralPath $Paths.Log) -and (Get-Item -LiteralPath $Paths.Log).Length -gt 5MB) { Move-Item -LiteralPath $Paths.Log -Destination "$($Paths.Log).1" -Force }
+}
+
+# ------------------------------------------------------------------------------------------------
+# Manifest and integrity
+# ------------------------------------------------------------------------------------------------
+
+# Only plain relative paths: no drive, no root, no "..", a conservative character set.
+function Test-WddRelativePath {
+    param([string] $Path)
+    if ([string]::IsNullOrWhiteSpace($Path) -or $Path.Length -gt 200) { return $false }
+    if ($Path -notmatch '^[A-Za-z0-9._ -]+([\\\\/][A-Za-z0-9._ -]+)*$') { return $false }
+    foreach ($seg in $Path -split '[\\\\/]') { if ($seg -eq '..' -or $seg -eq '.' -or $seg.Trim() -eq '') { return $false } }
+    return $true
+}
+
+function Read-WddManifest {
+    param([string] $Path)
+    if (-not (Test-Path -LiteralPath $Path)) { throw "Deployment manifest not found: $Path" }
+    try { $m = ConvertTo-WddHashtable ([System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::UTF8) | ConvertFrom-Json) } catch { throw "Deployment manifest is not valid JSON: $Path" }
+    if ($m -isnot [hashtable] -or $m.format -ne $script:ManifestFormat) { throw "Not a Windows Deployment Builder deployment manifest: $Path" }
+    if ([int] $m.manifestVersion -ne 1) { throw "Unsupported deployment manifest version $($m.manifestVersion) (this orchestrator reads version 1)." }
+    if ([string] $m.packageId -notmatch '^[0-9A-F]{16}$') { throw 'Deployment manifest has no valid packageId.' }
+    if ([string] $m.dataRoot -notmatch '^[A-Za-z]:\\\\[^"*?&lt;&gt;|]+$') { throw 'Deployment manifest has an invalid dataRoot.' }
+    foreach ($f in @($m.files)) {
+        if (-not (Test-WddRelativePath $f.path)) { throw "Deployment manifest lists an unsafe path: $($f.path)" }
+        if ([string] $f.sha256 -notmatch '^[0-9A-F]{64}$') { throw "Deployment manifest has an invalid hash for $($f.path)." }
+        if ($f.textSha256 -and [string] $f.textSha256 -notmatch '^[0-9A-F]{64}$') { throw "Deployment manifest has an invalid text hash for $($f.path)." }
+        if ($f.embedded -and -not (Test-WddRelativePath $f.embedded)) { throw "Deployment manifest lists an unsafe embedded path: $($f.embedded)" }
+    }
+    $known = 'staging', 'windowsUpdate', 'applications', 'drivers', 'finalization'
+    foreach ($s in @($m.stages)) {
+        if ($s.id -notin $known) { throw "Deployment manifest lists an unknown stage: $($s.id)" }
+        foreach ($k in 'launcher', 'result', 'status') { if ($s.ContainsKey($k) -and $s[$k] -and -not (Test-WddRelativePath $s[$k])) { throw "Stage $($s.id) has an unsafe $k path." } }
+    }
+    return $m
+}
+
+function Get-WddSha256 {
+    param([byte[]] $Bytes)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try { -join ($sha.ComputeHash($Bytes) | ForEach-Object { $_.ToString('X2') }) } finally { $sha.Dispose() }
+}
+
+# Hash of the exact file bytes (files in the package folder are byte-identical to the ZIP).
+function Get-WddRawHash { param([string] $Path) Get-WddSha256 ([System.IO.File]::ReadAllBytes($Path)) }
+
+# Hash of the text as the answer-file extraction writes it: .ps1/.xml as UTF-8 (BOM), other files
+# in the system code page, line breaks normalised by the XML parser and the text trimmed. The
+# manifest gives a text hash only where this is exact (ASCII text, or .ps1/.xml).
+function Get-WddTextHash {
+    param([string] $Path)
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    $ext = [System.IO.Path]::GetExtension($Path).ToLowerInvariant()
+    $hasBom = $bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF
+    $encoding = if ($hasBom -or $ext -in '.ps1', '.xml') { New-Object System.Text.UTF8Encoding($false) } else { [System.Text.Encoding]::Default }
+    $start = if ($hasBom) { 3 } else { 0 }
+    $text = $encoding.GetString($bytes, $start, $bytes.Length - $start)
+    $text = $text.Replace("\`r\`n", "\`n").Replace("\`r", "\`n").Trim()
+    Get-WddSha256 ((New-Object System.Text.UTF8Encoding($false)).GetBytes($text))
+}
+
+&lt;#
+    Checks files under $Root against the manifest.
+      Raw   exact bytes (a package folder copied from the ZIP).
+      Text  the text hash (files extracted from the answer file, and the staged copy of either).
+    $Paths limits the check to these manifest paths. A JSON file without a text hash (non-ASCII
+    content in the system code page) must at least parse.
+#&gt;
+function Test-WddFiles {
+    param([string] $Root, [hashtable] $Manifest, [ValidateSet('Raw', 'Text')] [string] $Mode, [string[]] $Only = $null)
+    $missing = @(); $mismatched = @(); $checked = 0
+    foreach ($f in @($Manifest.files)) {
+        if ($null -ne $Only -and $f.path -notin $Only) { continue }
+        $p = Join-Path $Root ($f.path -replace '/', '\\')
+        if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { $missing += $f.path; continue }
+        $checked++
+        if ($Mode -eq 'Raw') {
+            if ((Get-WddRawHash $p) -ne $f.sha256) { $mismatched += $f.path }
+        } elseif ($f.textSha256) {
+            if ((Get-WddTextHash $p) -ne $f.textSha256) { $mismatched += $f.path }
+        } elseif ($p -like '*.json') {
+            try { Get-Content -LiteralPath $p -Raw | ConvertFrom-Json | Out-Null } catch { $mismatched += $f.path }
+        }
+    }
+    @{ Ok = ($missing.Count -eq 0 -and $mismatched.Count -eq 0); Missing = $missing; Mismatched = $mismatched; Checked = $checked }
+}
+
+# ------------------------------------------------------------------------------------------------
+# Single instance
+# ------------------------------------------------------------------------------------------------
+
+function Enter-WddMutex {
+    param([int] $TimeoutSeconds = 0)
+    $created = $false
+    $m = New-Object System.Threading.Mutex($false, $script:MutexName, [ref] $created)
+    try { if ($m.WaitOne([TimeSpan]::FromSeconds($TimeoutSeconds))) { return $m } } catch [System.Threading.AbandonedMutexException] { return $m }
+    $m.Dispose()
+    return $null
+}
+
+function Exit-WddMutex { param($Mutex) if ($Mutex) { try { $Mutex.ReleaseMutex() } catch { }; $Mutex.Dispose() } }
+
+# ------------------------------------------------------------------------------------------------
+# Deployment state and stage snapshot
+# ------------------------------------------------------------------------------------------------
+
+function Get-WddStage { param([hashtable] $Manifest, [string] $Id) @($Manifest.stages) | Where-Object { $_.id -eq $Id } | Select-Object -First 1 }
+
+function Get-WddEngineStages { param([hashtable] $Manifest) @(@($Manifest.stages) | Where-Object { $_.id -in 'windowsUpdate', 'applications' -and $_.enabled } | Sort-Object { [int] $_.order }) }
+
+function ConvertTo-WddDate {
+    param($Value)
+    if (-not $Value) { return $null }
+    try { [DateTime]::Parse([string] $Value, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime() } catch { $null }
+}
+
+function Get-WddOutcome {
+    param([string] $Status)
+    switch ($Status) {
+        'Succeeded' { 'ok' }
+        'CompletedWithFollowUp' { 'followUp' }
+        'CompletedWithFailures' { 'failures' }
+        'Failed' { 'failed' }
+        'Offline' { 'offline' }
+        default { 'unknown' }
+    }
+}
+
+function Test-WddRestartPending {
+    param([hashtable] $Paths)
+    $m = Read-WddJson $Paths.RestartMarker
+    if (-not $m) { return $false }
+    $written = ConvertTo-WddDate $m.writtenUtc
+    if (-not $written -or ((Get-WddNow) - $written).TotalMinutes -gt 30) { return $false }
+    try { $boot = Get-WddBootTime } catch { return $true }
+    return $written -ge $boot
+}
+
+&lt;#
+    Snapshot of one engine stage, from what the engine itself wrote:
+      Final       result.json exists (its status is the real outcome; a marker alone is never trusted)
+      Running     the engine has checked in (status.json)
+      Pending     launched, its task exists, not started yet
+      Stalled     launched, but no task, no status and no result after the grace period, or the
+                  task has gone while the stage is not final: needs manual attention
+      NotStarted  not launched (yet)
+      LaunchFailed the installer could not register the task
+#&gt;
+function Get-WddStageSnapshot {
+    param([hashtable] $Stage, [hashtable] $Paths, [hashtable] $State)
+    $root = $Paths.Root
+    $launch = if ($State -and $State.stages -and $State.stages.ContainsKey($Stage.id)) { $State.stages[$Stage.id] } else { $null }
+    $o = [ordered]@{ id = $Stage.id; name = $Stage.name; enabled = [bool] $Stage.enabled; context = $Stage.context; state = 'NotStarted'; status = ''; outcome = ''; detail = ''; reboots = 0; updatedUtc = $null; current = ''; done = $null; total = $null; result = $null }
+    $result = Read-WddJson (Join-Path $root $Stage.result)
+    if ($result -and $result.status -in $script:FinalStageStatuses) {
+        $o.state = 'Final'; $o.status = $result.status; $o.outcome = Get-WddOutcome $result.status; $o.detail = [string] $result.reason
+        $o.reboots = [int] $result.reboots; $o.updatedUtc = $result.finishedUtc; $o.result = $result
+        return $o
+    }
+    $status = Read-WddJson (Join-Path $root $Stage.status)
+    $taskExists = Get-WddTask $Stage.task.path $Stage.task.name
+    if ($status) {
+        $o.status = [string] $status.phase; $o.detail = [string] $status.detail; $o.updatedUtc = $status.updatedUtc
+        if ($status.ContainsKey('reboots')) { $o.reboots = [int] $status.reboots }
+        if ($status.ContainsKey('done')) { $o.done = [int] $status.done; $o.total = [int] $status.total }
+        if ($status.phase -eq 'Installing' -and $status.detail) { $o.current = [string] $status.detail }
+    }
+    if (-not $launch) { return $o }
+    if ($launch.launchResult -eq 'LaunchFailed') { $o.state = 'LaunchFailed'; $o.detail = [string] $launch.message; return $o }
+    $since = ConvertTo-WddDate $launch.launchedUtc
+    $age = if ($since) { ((Get-WddNow) - $since).TotalMinutes } else { 0 }
+    if ($taskExists) { $o.state = $(if ($status) { 'Running' } else { 'Pending' }); return $o }
+    # No task and no result: the engine removed its task without a result, or the task was deleted.
+    if ($age -ge [int] $State.stalledAfterMinutes) { $o.state = 'Stalled'; if (-not $o.detail) { $o.detail = 'The scheduled task is missing and there is no result. Run Resume-Deployment.ps1.' } }
+    else { $o.state = $(if ($status) { 'Running' } else { 'Pending' }) }
+    return $o
+}
+
+function Get-WddSnapshot {
+    param([hashtable] $Manifest, [hashtable] $Paths, [hashtable] $State)
+    $stages = @()
+    foreach ($s in Get-WddEngineStages $Manifest) { $stages += , (Get-WddStageSnapshot $s $Paths $State) }
+    $drivers = Get-WddStage $Manifest 'drivers'
+    $engine = @($stages)
+    $allFinal = ($engine.Count -eq 0) -or (@($engine | Where-Object { $_.state -ne 'Final' }).Count -eq 0)
+    $blocked = @($engine | Where-Object { $_.state -in 'Stalled', 'LaunchFailed' })
+    $current = @($engine | Where-Object { $_.state -in 'Running', 'Pending' } | Select-Object -First 1)
+    [ordered]@{
+        packageId       = $Manifest.packageId
+        updatedUtc      = (Get-WddNow).ToString('o')
+        deploymentState = $(if ($State) { [string] $State.status } else { 'NotInitialized' })
+        currentStage    = $(if ($current.Count) { $current[0].id } else { '' })
+        stages          = $stages
+        drivers         = [ordered]@{ id = 'drivers'; state = 'NotImplemented'; detail = $(if ($drivers) { [string] $drivers.note } else { '' }) }
+        allFinal        = $allFinal
+        restartPending  = (Test-WddRestartPending $Paths)
+        needsAttention  = @($blocked | ForEach-Object { "$($_.name): $($_.state). $($_.detail)" })
+        overall         = $(if ($allFinal) { Get-WddOverall $engine } else { 'InProgress' })
+    }
+}
+
+&lt;#
+    Overall result, from the worst stage:
+      Succeeded              every enabled stage Succeeded (or nothing to do)
+      CompletedWithFollowUp  finished; some items need a person (interaction, sign-in, restart)
+      CompletedWithFailures  finished; some updates or packages failed or were unavailable
+      Incomplete             a stage ended Offline, stalled, or the deadline passed first
+      Failed                 a stage Failed (or staging/integrity failed before any stage ran)
+#&gt;
+function Get-WddOverall {
+    param([object[]] $Stages, [switch] $DeadlineReached)
+    $rank = @{ ok = 0; followUp = 1; failures = 2; offline = 3; incomplete = 3; failed = 4 }
+    $worst = 'ok'
+    foreach ($s in @($Stages)) {
+        $o = if ($s.state -eq 'Final') { $s.outcome } else { 'incomplete' }
+        if (-not $rank.ContainsKey($o)) { $o = 'failed' }
+        if ($rank[$o] -gt $rank[$worst]) { $worst = $o }
+    }
+    if ($DeadlineReached -and $worst -ne 'failed' -and @($Stages | Where-Object { $_.state -ne 'Final' }).Count -gt 0) { $worst = 'incomplete' }
+    switch ($worst) { 'ok' { 'Succeeded' } 'followUp' { 'CompletedWithFollowUp' } 'failures' { 'CompletedWithFailures' } 'failed' { 'Failed' } default { 'Incomplete' } }
+}
+
+function Save-WddState { param([hashtable] $Paths, [hashtable] $State) Write-WddJson $Paths.State $State }
+		</File>
+		<File path="C:\\Windows\\Setup\\Scripts\\Deployment\\scripts\\bootstrap\\Stage-Deployment.ps1">
+#Requires -Version 5.1
+&lt;#
+.SYNOPSIS
+    Verifies the deployment files and copies them to the protected package folder.
+
+.DESCRIPTION
+    Called by Initialize-Deployment.ps1 (and by Resume-Deployment.ps1 for a re-check). Run by hand
+    it only verifies a package and changes nothing.
+
+    Sources:
+      Embedded  The files the answer file extracted during specialize under C:\\Windows\\Setup\\Scripts
+                (Administrators-only). Used at the first sign-in of a USB installation, so nothing
+                depends on the USB drive still being attached or on its drive letter.
+      Package   A WindowsDeployment folder (from the ZIP, on a USB drive or a local disk), identified
+                by the location of the script that was started, never by guessing a drive letter.
+
+    Every file is checked against deployment-manifest.json before anything is copied, copied to
+    &lt;dataRoot&gt;\\Package, and checked again there. Nothing is executed from the source location.
+#&gt;
+[CmdletBinding()]
+param(
+    [ValidateSet('Embedded', 'Package')]
+    [string] $SourceMode = 'Embedded',
+    [string] $SourceRoot = '',
+    [string] $EmbeddedRoot = 'C:\\Windows\\Setup\\Scripts'
+)
+
+$script:StageMain = $MyInvocation.InvocationName -ne '.'
+. (Join-Path $PSScriptRoot '..\\common\\DeploymentCommon.ps1')
+
+# Files the orchestrator needs before it can launch anything (both modes).
+$script:RequiredForStart = @(
+    'scripts/common/DeploymentCommon.ps1',
+    'scripts/bootstrap/Initialize-Deployment.ps1',
+    'scripts/orchestrator/DeploymentOrchestrator.ps1',
+    'scripts/finalization/Complete-Deployment.ps1'
+)
+
+function Set-WddAcl {
+    param([string] $Root)
+    # SYSTEM and Administrators full control, Users read and execute, no inherited entries (the
+    # same rule as the engine installers). Elevated tasks run scripts from here.
+    &amp; icacls.exe $Root /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' /T /C /Q | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "icacls failed with exit code $LASTEXITCODE; refusing to run elevated scripts from an unprotected folder." }
+}
+
+# Where a manifest file comes from in each mode.
+function Get-WddSourcePath {
+    param([hashtable] $File, [string] $SourceMode, [string] $SourceRoot, [string] $EmbeddedRoot)
+    if ($SourceMode -eq 'Package') { return Join-Path $SourceRoot ($File.path -replace '/', '\\') }
+    if (-not $File.embedded) { return $null }
+    return Join-Path $EmbeddedRoot $File.embedded
+}
+
+&lt;#
+    Returns @{ Ok; Message; Files (staged manifest paths); Missing; Mismatched }.
+#&gt;
+function Invoke-WddStage {
+    param([hashtable] $Manifest, [string] $ManifestPath, [string] $SourceMode, [string] $SourceRoot, [string] $EmbeddedRoot, [hashtable] $Paths, [switch] $VerifyOnly)
+    $files = @(@($Manifest.files) | Where-Object { $SourceMode -eq 'Package' -or $_.embedded })
+    $relPaths = @($files | ForEach-Object { $_.path })
+    foreach ($r in $script:RequiredForStart) {
+        if ($r -notin $relPaths) { return @{ Ok = $false; Message = "The manifest does not list the required file $r."; Files = @(); Missing = @($r); Mismatched = @() } }
+    }
+
+    # 1. Verify the source.
+    $missing = @(); $mismatched = @()
+    foreach ($f in $files) {
+        $src = Get-WddSourcePath $f $SourceMode $SourceRoot $EmbeddedRoot
+        if (-not $src -or -not (Test-Path -LiteralPath $src -PathType Leaf)) { $missing += $f.path; continue }
+        if ($SourceMode -eq 'Package') {
+            if ((Get-WddRawHash $src) -ne $f.sha256) { $mismatched += $f.path }
+        } elseif ($f.textSha256) {
+            if ((Get-WddTextHash $src) -ne $f.textSha256) { $mismatched += $f.path }
+        } elseif ($src -like '*.json') {
+            try { Get-Content -LiteralPath $src -Raw | ConvertFrom-Json | Out-Null } catch { $mismatched += $f.path }
+        }
+    }
+    if ($missing.Count -or $mismatched.Count) {
+        $msg = "Package verification failed ($SourceMode): $($missing.Count) missing, $($mismatched.Count) modified."
+        Write-WddLog $msg 'ERROR'
+        foreach ($m in $missing) { Write-WddLog "  missing   $m" 'ERROR' }
+        foreach ($m in $mismatched) { Write-WddLog "  modified  $m" 'ERROR' }
+        return @{ Ok = $false; Message = $msg; Files = @(); Missing = $missing; Mismatched = $mismatched }
+    }
+    Write-WddLog "Verified $($files.Count) file(s) from the $SourceMode source against manifest $($Manifest.packageId)."
+    if ($VerifyOnly) { return @{ Ok = $true; Message = 'Verified (no changes made).'; Files = $relPaths; Missing = @(); Mismatched = @() } }
+
+    # 2. Copy into a fresh package folder; the previous one (from an earlier run) is kept aside.
+    $target = $Paths.Package
+    if (Test-Path -LiteralPath $target) {
+        $previous = "$target.previous"
+        if (Test-Path -LiteralPath $previous) { Remove-Item -LiteralPath $previous -Recurse -Force }
+        Move-Item -LiteralPath $target -Destination $previous -Force
+    }
+    New-Item -ItemType Directory -Path $target -Force | Out-Null
+    foreach ($f in $files) {
+        $src = Get-WddSourcePath $f $SourceMode $SourceRoot $EmbeddedRoot
+        $dst = Join-Path $target ($f.path -replace '/', '\\')
+        $dir = Split-Path -Parent $dst
+        if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        Copy-Item -LiteralPath $src -Destination $dst -Force
+    }
+    Copy-Item -LiteralPath $ManifestPath -Destination (Join-Path $target 'deployment-manifest.json') -Force
+
+    # 3. Verify the copies (text hash works for both sources).
+    $check = Test-WddFiles $target $Manifest 'Text' $relPaths
+    if (-not $check.Ok) {
+        $msg = "Staged copy failed verification: $($check.Missing.Count) missing, $($check.Mismatched.Count) modified."
+        Write-WddLog $msg 'ERROR'
+        return @{ Ok = $false; Message = $msg; Files = @(); Missing = $check.Missing; Mismatched = $check.Mismatched }
+    }
+    Write-WddLog "Staged $($files.Count) file(s) to $target and verified them."
+    @{ Ok = $true; Message = "Staged $($files.Count) file(s)."; Files = $relPaths; Missing = @(); Mismatched = @() }
+}
+
+# Dot-sourcing (tests, Initialize-Deployment.ps1) only defines the functions.
+if ($script:StageMain) {
+    $root = if ($SourceRoot) { $SourceRoot } else { Split-Path -Parent (Split-Path -Parent $PSScriptRoot) }
+    $manifestPath = Join-Path $root 'deployment-manifest.json'
+    $manifest = Read-WddManifest $manifestPath
+    $paths = Get-WddPaths $manifest.dataRoot
+    $r = Invoke-WddStage $manifest $manifestPath $SourceMode $root $EmbeddedRoot $paths -VerifyOnly
+    $r.Message
+    foreach ($m in $r.Missing) { "  missing   $m" }
+    foreach ($m in $r.Mismatched) { "  modified  $m" }
+    if (-not $r.Ok) { exit 1 }
+    exit 0
+}
+		</File>
+		<File path="C:\\Windows\\Setup\\Scripts\\Deployment\\scripts\\bootstrap\\Initialize-Deployment.ps1">
+#Requires -Version 5.1
+&lt;#
+.SYNOPSIS
+    Starts the post-installation deployment: verifies and stages the package, launches each
+    enabled stage once in its own context and registers the deployment monitor.
+
+.DESCRIPTION
+    The answer file runs this as the last FirstLogon command (elevated, as the user that signs in
+    first). setup.ps1 runs it for a manual deployment from a WindowsDeployment folder.
+
+    1. Refuses Windows PE, non-elevated sessions, and a second concurrent run (mutex).
+    2. Reads deployment-manifest.json and the persistent state (&lt;dataRoot&gt;\\state\\deployment.json).
+       A finished deployment is not started again; a running one is not launched twice.
+    3. Secures &lt;dataRoot&gt;, verifies the package and copies it to &lt;dataRoot&gt;\\Package
+       (Stage-Deployment.ps1). Nothing is launched if verification fails.
+    4. Launches each enabled stage once, in manifest order, by running that engine's own installer
+       from the staged copy:
+         windowsUpdate  Install-UpdateEngine.ps1      registers a SYSTEM task
+         applications   Install-ApplicationEngine.ps1 registers a task for this user (WinGet is not
+                        supported as SYSTEM, so this script must run as the user, not SYSTEM)
+       Each launch is recorded before it starts, so a crash cannot launch a stage twice.
+    5. Registers \\WindowsDeploymentBuilder\\Deployment (SYSTEM; at startup and every 15 minutes),
+       which follows the engines, writes status.json and, at the end, the deployment report.
+    6. Opens a progress window for the signed-in user (unless -NoConsole).
+#&gt;
+[CmdletBinding()]
+param(
+    [ValidateSet('Embedded', 'Package')]
+    [string] $SourceMode = 'Embedded',
+    [string] $SourceRoot = '',
+    [string] $EmbeddedRoot = 'C:\\Windows\\Setup\\Scripts',
+    [switch] $NoConsole
+)
+
+$script:InitMain = $MyInvocation.InvocationName -ne '.'
+# Captured first: dot-sourcing Stage-Deployment.ps1 binds its own parameters in this scope.
+$script:InitArgs = @{ SourceMode = $SourceMode; SourceRoot = $SourceRoot; EmbeddedRoot = $EmbeddedRoot; NoConsole = [bool] $NoConsole }
+. (Join-Path $PSScriptRoot '..\\common\\DeploymentCommon.ps1')
+. (Join-Path $PSScriptRoot 'Stage-Deployment.ps1')
+
+$script:MonitorTask = @{ path = '\\WindowsDeploymentBuilder\\'; name = 'Deployment' }
+
+# ------------------------------------------------------------------------------------------------
+# Adapters
+# ------------------------------------------------------------------------------------------------
+
+# Runs an engine installer in its own Windows PowerShell process; returns the exit code.
+function Invoke-WddInstaller {
+    param([string] $Path)
+    $ps = Join-Path $env:SystemRoot 'System32\\WindowsPowerShell\\v1.0\\powershell.exe'
+    $out = &amp; $ps -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $Path 2&gt;&amp;1
+    foreach ($line in @($out)) { Write-WddLog "    | $line" }
+    return $LASTEXITCODE
+}
+
+function Register-WddMonitorTask {
+    param([hashtable] $Paths, [hashtable] $Manifest)
+    $script = Join-Path $Paths.Package 'scripts\\orchestrator\\DeploymentOrchestrator.ps1'
+    $ps = Join-Path $env:SystemRoot 'System32\\WindowsPowerShell\\v1.0\\powershell.exe'
+    $action = New-ScheduledTaskAction -Execute $ps -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File \`"$script\`""
+    $atStartup = New-ScheduledTaskTrigger -AtStartup
+    $atStartup.Delay = 'PT3M'
+    $days = [Math]::Ceiling(([double] $Manifest.failureHandling.orchestrator.deadlineHours) / 24) + 1
+    $every = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(2) -RepetitionInterval (New-TimeSpan -Minutes 15) -RepetitionDuration (New-TimeSpan -Days $days)
+    $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 30)
+    Register-ScheduledTask -TaskName $script:MonitorTask.name -TaskPath $script:MonitorTask.path -Action $action -Trigger @($atStartup, $every) -Principal $principal -Settings $settings -Force \`
+        -Description 'Windows Deployment Builder: follows the deployment stages, writes status.json and the final report, then removes itself.' | Out-Null
+}
+
+function Start-WddConsole {
+    param([hashtable] $Paths)
+    $show = Join-Path $Paths.Package 'scripts\\orchestrator\\Show-DeploymentStatus.ps1'
+    $ps = Join-Path $env:SystemRoot 'System32\\WindowsPowerShell\\v1.0\\powershell.exe'
+    Start-Process -FilePath $ps -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "\`"$show\`"", '-Watch')
+}
+
+function Get-WddProgressShortcut {
+    param([hashtable] $Paths)
+    $ps = Join-Path $env:SystemRoot 'System32\\WindowsPowerShell\\v1.0\\powershell.exe'
+    @{ Target = $ps; Arguments = "-NoProfile -ExecutionPolicy Bypass -File \`"$(Join-Path $Paths.Package 'scripts\\orchestrator\\Show-DeploymentStatus.ps1')\`" -Watch" }
+}
+
+# ------------------------------------------------------------------------------------------------
+# Initialization
+# ------------------------------------------------------------------------------------------------
+
+function New-WddState {
+    param([hashtable] $Manifest, [string] $SourceMode, [hashtable] $Identity)
+    $now = Get-WddNow
+    @{
+        schemaVersion        = 1
+        packageId            = $Manifest.packageId
+        packageVersion       = $Manifest.packageVersion
+        orchestratorVersion  = $script:DeployVersion
+        sourceMode           = $SourceMode
+        status               = 'Staging'
+        initializedUtc       = $now.ToString('o')
+        initializedBy        = $Identity.Name
+        deadlineUtc          = $now.AddHours([double] $Manifest.failureHandling.orchestrator.deadlineHours).ToString('o')
+        stalledAfterMinutes  = [int] $Manifest.failureHandling.orchestrator.stalledAfterMinutes
+        stagedFiles          = @()
+        stages               = @{}
+        monitorRuns          = 0
+        overall              = ''
+        message              = ''
+    }
+}
+
+&lt;#
+    Launches one engine stage unless it was already launched. Returns its launch record.
+#&gt;
+function Invoke-WddLaunchStage {
+    param([hashtable] $Stage, [hashtable] $Paths, [hashtable] $State, [hashtable] $Identity, [int] $MaxAttempts)
+    $rec = if ($State.stages.ContainsKey($Stage.id)) { $State.stages[$Stage.id] } else { @{ launchResult = ''; attempts = 0; launchedUtc = $null; exitCode = $null; message = '' } }
+    $State.stages[$Stage.id] = $rec
+    if ($rec.launchResult -eq 'Launched') { Write-WddLog "Stage $($Stage.id) was already launched; not launching it again."; return $rec }
+    # Interrupted earlier launch: if its task exists the installer finished registering it.
+    if ($rec.launchResult -eq 'Launching' -and (Get-WddTask $Stage.task.path $Stage.task.name)) {
+        $rec.launchResult = 'Launched'; $rec.message = 'Task found after an interrupted launch.'
+        Write-WddLog "Stage $($Stage.id): task found after an interrupted launch; marked launched."
+        return $rec
+    }
+    if ($Stage.context -eq 'user' -and $Identity.IsSystem) {
+        $rec.launchResult = 'LaunchFailed'
+        $rec.message = 'This stage must be started by the signed-in user (WinGet is not supported as SYSTEM). Sign in and run Resume-Deployment.ps1 -RestartStage applications.'
+        Write-WddLog "Stage $($Stage.id): $($rec.message)" 'ERROR'
+        return $rec
+    }
+    if ([int] $rec.attempts -ge $MaxAttempts) {
+        $rec.launchResult = 'LaunchFailed'
+        if (-not $rec.message) { $rec.message = "Launch attempts exhausted ($MaxAttempts)." }
+        return $rec
+    }
+    $installer = Join-Path $Paths.Package ($Stage.launcher -replace '/', '\\')
+    $rec.attempts = [int] $rec.attempts + 1
+    $rec.launchResult = 'Launching'
+    $rec.launchedUtc = (Get-WddNow).ToString('o')
+    Save-WddState $Paths $State
+    Write-WddLog "Launching stage $($Stage.id) ($($Stage.context)): $installer"
+    $code = $null
+    try { $code = Invoke-WddInstaller $installer } catch { $rec.message = $_.Exception.Message; Write-WddLog "  installer error: $($rec.message)" 'ERROR' }
+    $rec.exitCode = $code
+    if (Get-WddTask $Stage.task.path $Stage.task.name) {
+        $rec.launchResult = 'Launched'
+        if ($code -ne 0) { $rec.message = "The installer returned $code, but the task is registered; it will run at the next start or sign-in." }
+        Write-WddLog "Stage $($Stage.id) launched (task $($Stage.task.path)$($Stage.task.name), installer exit code $code)."
+    } elseif (Test-Path -LiteralPath (Join-Path $Paths.Root $Stage.result)) {
+        $rec.launchResult = 'Launched'; $rec.message = 'Finished during launch.'
+    } else {
+        $rec.launchResult = $(if ([int] $rec.attempts -ge $MaxAttempts) { 'LaunchFailed' } else { 'Launching' })
+        if (-not $rec.message) { $rec.message = "The installer returned $code and registered no task." }
+        Write-WddLog "Stage $($Stage.id): $($rec.message)" 'ERROR'
+    }
+    Save-WddState $Paths $State
+    return $rec
+}
+
+function Invoke-WddInitialize {
+    param([hashtable] $Manifest, [string] $ManifestPath, [string] $SourceMode, [string] $SourceRoot, [string] $EmbeddedRoot, [hashtable] $Paths, [switch] $NoConsole)
+    Initialize-WddLogging $Paths
+    $identity = Get-WddIdentity
+    Write-WddLog "==== Deployment orchestrator $script:DeployVersion: initialize ($SourceMode) as $($identity.Name), package $($Manifest.packageId) ===="
+    if (Test-WddWinPE) { Write-WddLog 'Refusing to run in Windows PE.' 'ERROR'; return 'RefusedWinPE' }
+    if (-not $identity.IsAdmin) { Write-WddLog 'Refusing to run without administrator rights.' 'ERROR'; return 'RefusedNotElevated' }
+
+    $mutex = Enter-WddMutex 120
+    if (-not $mutex) { Write-WddLog 'Another deployment process is running; nothing to do.' 'WARN'; return 'Busy' }
+    try {
+        $state = Read-WddJson $Paths.State
+        if ($state) {
+            if ($state.packageId -ne $Manifest.packageId -and $state.status -notin 'Completed', 'StagingFailed') {
+                Write-WddLog "A different deployment ($($state.packageId)) is still in progress; refusing to start $($Manifest.packageId). Finish or reset it first (see recovery instructions)." 'ERROR'
+                return 'AnotherDeploymentInProgress'
+            }
+            if ($state.packageId -eq $Manifest.packageId -and $state.status -eq 'Completed') {
+                Write-WddLog "This deployment already finished ($($state.overall)). Report: $($Paths.ReportText)"
+                return 'AlreadyCompleted'
+            }
+            if ($state.packageId -ne $Manifest.packageId) { $state = $null }
+        }
+        if (-not $state -or $state.status -eq 'StagingFailed') { $state = New-WddState $Manifest $SourceMode $identity }
+        # A staged copy that failed its integrity check is replaced; launch records are kept, so
+        # stages that were already launched are not launched again.
+        if ($state.status -eq 'IntegrityFailed') { $state.status = 'Staging'; $state.sourceMode = $SourceMode; $state.message = 'Re-staging after an integrity failure.' }
+        foreach ($k in 'stages') { if (-not $state[$k]) { $state[$k] = @{} } }
+
+        # Stage (verify + copy) unless already staged for this package.
+        if ($state.status -eq 'Staging') {
+            Set-WddAcl $Paths.Root
+            $staged = Invoke-WddStage $Manifest $ManifestPath $SourceMode $SourceRoot $EmbeddedRoot $Paths
+            if (-not $staged.Ok) {
+                $state.status = 'StagingFailed'; $state.overall = 'Failed'; $state.message = $staged.Message
+                Save-WddState $Paths $state
+                Write-WddJson $Paths.Status ([ordered]@{ packageId = $Manifest.packageId; updatedUtc = (Get-WddNow).ToString('o'); deploymentState = 'StagingFailed'; overall = 'Failed'; message = $staged.Message; missing = $staged.Missing; modified = $staged.Mismatched })
+                Write-WddEvent 3002 "Deployment not started: $($staged.Message) See $($Paths.Log)." 'Error'
+                return 'StagingFailed'
+            }
+            Set-WddAcl $Paths.Root
+            $state.stagedFiles = $staged.Files
+            $state.status = 'Launching'
+            Save-WddState $Paths $state
+        }
+
+        # Launch each enabled engine stage once.
+        $max = [int] $Manifest.failureHandling.orchestrator.launchAttempts
+        foreach ($stage in Get-WddEngineStages $Manifest) {
+            Invoke-WddLaunchStage $stage $Paths $state $identity $max | Out-Null
+        }
+
+        $state.status = 'InProgress'
+        Save-WddState $Paths $state
+        Register-WddMonitorTask $Paths $Manifest
+        Write-WddLog "Registered $($script:MonitorTask.path)$($script:MonitorTask.name) (SYSTEM; at startup and every 15 minutes)."
+        $snapshot = Get-WddSnapshot $Manifest $Paths $state
+        Write-WddJson $Paths.Status $snapshot
+        try {
+            $sc = Get-WddProgressShortcut $Paths
+            New-WddShortcut 'Deployment progress' $sc.Target $sc.Arguments 'Windows Deployment Builder: deployment progress'
+        } catch { Write-WddLog "Could not create the progress shortcut: $($_.Exception.Message)" 'WARN' }
+        Write-WddEvent 3000 "Deployment $($Manifest.packageId) started. Status: $($Paths.Status)."
+        try { Start-WddTask $script:MonitorTask.path $script:MonitorTask.name } catch { Write-WddLog "Could not start the monitor now; it runs within 15 minutes: $($_.Exception.Message)" 'WARN' }
+        if (-not $NoConsole) { try { Start-WddConsole $Paths } catch { Write-WddLog "Could not open the progress window: $($_.Exception.Message)" 'WARN' } }
+        return 'Initialized'
+    } finally {
+        Exit-WddMutex $mutex
+    }
+}
+
+# Dot-sourcing (tests) only defines the functions.
+if ($script:InitMain) {
+    $a = $script:InitArgs
+    $root = if ($a.SourceRoot) { $a.SourceRoot } else { Split-Path -Parent (Split-Path -Parent $PSScriptRoot) }
+    $manifestPath = Join-Path $root 'deployment-manifest.json'
+    try {
+        $manifest = Read-WddManifest $manifestPath
+    } catch {
+        Write-Output "ERROR: $($_.Exception.Message)"
+        exit 2
+    }
+    $paths = Get-WddPaths $manifest.dataRoot
+    $outcome = Invoke-WddInitialize $manifest $manifestPath $a.SourceMode $root $a.EmbeddedRoot $paths -NoConsole:$a.NoConsole
+    Write-Output "Deployment: $outcome. Log: $($paths.Log)"
+    if ($outcome -in 'Initialized', 'AlreadyCompleted', 'Busy') { exit 0 }
+    exit 1
+}
+		</File>
+		<File path="C:\\Windows\\Setup\\Scripts\\Deployment\\scripts\\orchestrator\\DeploymentOrchestrator.ps1">
+#Requires -Version 5.1
+&lt;#
+.SYNOPSIS
+    Deployment monitor: follows the stages, keeps status.json current and finishes the deployment.
+
+.DESCRIPTION
+    Runs as SYSTEM from \\WindowsDeploymentBuilder\\Deployment (registered by
+    Initialize-Deployment.ps1) at startup and every 15 minutes, so it survives every restart. Each
+    run is short and idempotent:
+
+      1. Single instance (mutex shared with Initialize and Resume).
+      2. Verifies the staged package against its manifest before doing anything else. A modified
+         or missing file stops the deployment monitor (IntegrityFailed); nothing is executed.
+      3. Reads what each engine wrote (result.json, status.json, its task) and writes
+         &lt;dataRoot&gt;\\Deployment\\status.json. Completion markers are not trusted on their own:
+         the final status always comes from result.json.
+      4. When every enabled stage is final, or the deadline has passed, runs
+         Complete-Deployment.ps1 (report, marker, event, cleanup).
+
+    It never launches or re-launches an engine. A stage whose task disappeared without a result is
+    reported as Stalled and needs Resume-Deployment.ps1, so no stage can loop.
+#&gt;
+[CmdletBinding()]
+param()
+
+$script:MonitorMain = $MyInvocation.InvocationName -ne '.'
+. (Join-Path $PSScriptRoot '..\\common\\DeploymentCommon.ps1')
+. (Join-Path $PSScriptRoot '..\\finalization\\Complete-Deployment.ps1')
+
+function Invoke-WddMonitor {
+    param([hashtable] $Paths)
+    Initialize-WddLogging $Paths
+    $mutex = Enter-WddMutex 30
+    if (-not $mutex) { Write-WddLog 'Monitor: another deployment process is running; skipping this run.'; return 'Busy' }
+    try {
+        $state = Read-WddJson $Paths.State
+        if (-not $state) { Write-WddLog 'Monitor: no deployment state; nothing to follow.' 'WARN'; return 'NoState' }
+        if ($state.status -eq 'Completed') { Unregister-WddTask '\\WindowsDeploymentBuilder\\' 'Deployment'; return 'AlreadyCompleted' }
+        if ($state.status -eq 'IntegrityFailed') { return 'IntegrityFailed' }
+
+        $manifestPath = Join-Path $Paths.Package 'deployment-manifest.json'
+        try { $manifest = Read-WddManifest $manifestPath } catch { $manifest = $null; $err = $_.Exception.Message }
+        $check = if ($manifest) { Test-WddFiles $Paths.Package $manifest 'Text' @($state.stagedFiles) } else { @{ Ok = $false; Missing = @('deployment-manifest.json'); Mismatched = @() } }
+        if (-not $check.Ok -or ($manifest -and $manifest.packageId -ne $state.packageId)) {
+            $state.status = 'IntegrityFailed'
+            $state.message = "The staged package was modified or is incomplete ($($check.Missing.Count) missing, $($check.Mismatched.Count) modified). The monitor stopped; nothing more is run by it."
+            Save-WddState $Paths $state
+            Write-WddLog $state.message 'ERROR'
+            foreach ($m in @($check.Missing) + @($check.Mismatched)) { Write-WddLog "  $m" 'ERROR' }
+            Write-WddJson $Paths.Status ([ordered]@{ packageId = $state.packageId; updatedUtc = (Get-WddNow).ToString('o'); deploymentState = 'IntegrityFailed'; overall = 'Failed'; message = $state.message })
+            Write-WddEvent 3003 $state.message 'Error'
+            return 'IntegrityFailed'
+        }
+
+        $state.monitorRuns = [int] $state.monitorRuns + 1
+        $state.lastMonitorUtc = (Get-WddNow).ToString('o')
+        $snapshot = Get-WddSnapshot $manifest $Paths $state
+        Save-WddState $Paths $state
+        Write-WddJson $Paths.Status $snapshot
+        $summary = (@($snapshot.stages) | ForEach-Object { "$($_.id)=$($_.state)$(if ($_.status) { "/$($_.status)" })" }) -join ', '
+        Write-WddLog "Monitor run $($state.monitorRuns): $summary"
+
+        if ($snapshot.allFinal) {
+            $overall = Complete-WddDeployment $manifest $Paths $state $snapshot
+            return "Completed:$overall"
+        }
+        $deadline = ConvertTo-WddDate $state.deadlineUtc
+        if ($deadline -and (Get-WddNow) -ge $deadline) {
+            Write-WddLog "Deadline $($state.deadlineUtc) reached with unfinished stages." 'WARN'
+            $overall = Complete-WddDeployment $manifest $Paths $state $snapshot -DeadlineReached
+            return "Completed:$overall"
+        }
+        return 'InProgress'
+    } finally {
+        Exit-WddMutex $mutex
+    }
+}
+
+if ($script:MonitorMain) {
+    # The monitor lives in &lt;dataRoot&gt;\\Package\\scripts\\orchestrator; dataRoot comes from the manifest.
+    $package = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+    $manifest = Read-WddManifest (Join-Path $package 'deployment-manifest.json')
+    $outcome = Invoke-WddMonitor (Get-WddPaths $manifest.dataRoot)
+    Write-Output $outcome
+    if ($outcome -eq 'IntegrityFailed') { exit 1 }
+    exit 0
+}
+		</File>
+		<File path="C:\\Windows\\Setup\\Scripts\\Deployment\\scripts\\orchestrator\\Show-DeploymentStatus.ps1">
+#Requires -Version 5.1
+&lt;#
+.SYNOPSIS
+    Shows the deployment progress in the console (read-only; no elevation needed).
+
+.DESCRIPTION
+    Reads the deployment state and what each engine wrote, live (it does not wait for the monitor):
+    current stage, finished stages, the application being installed, applications remaining,
+    pending restart, warnings, failures and whether a person needs to act.
+
+    -Watch refreshes every 15 seconds until the deployment has finished. The window that opens
+    after the first sign-in runs this with -Watch; it can be closed at any time without affecting
+    the deployment.
+#&gt;
+[CmdletBinding()]
+param(
+    [switch] $Watch,
+    [int] $IntervalSeconds = 15
+)
+
+$script:ShowMain = $MyInvocation.InvocationName -ne '.'
+$script:ShowArgs = @{ Watch = [bool] $Watch; Interval = $IntervalSeconds }
+. (Join-Path $PSScriptRoot '..\\common\\DeploymentCommon.ps1')
+
+function Format-WddStatus {
+    param([hashtable] $Manifest, [hashtable] $Paths, [hashtable] $State)
+    $s = Get-WddSnapshot $Manifest $Paths $State
+    $l = New-Object System.Collections.Generic.List[string]
+    $l.Add('Windows Deployment Builder - deployment progress')
+    $l.Add('================================================')
+    $overall = if ($State -and $State.status -eq 'Completed') { "Finished: $($State.overall)" } elseif ($State) { $State.status } else { 'Not started' }
+    $l.Add("Deployment     : $overall")
+    if ($State -and $State.message) { $l.Add("                 $($State.message)") }
+    if ($State) { $l.Add("Started (UTC)  : $($State.initializedUtc)   deadline: $($State.deadlineUtc)") }
+    $l.Add("Current stage  : $(if ($s.currentStage) { $s.currentStage } else { '-' })")
+    $l.Add("Restart pending: $(if ($s.restartPending) { 'yes (a restart has been scheduled)' } else { 'no' })")
+    $l.Add('')
+    $l.Add(('{0,-22} {1,-12} {2,-22} {3}' -f 'Stage', 'State', 'Status', 'Detail'))
+    foreach ($st in @($s.stages)) {
+        $l.Add(('{0,-22} {1,-12} {2,-22} {3}' -f $st.name, $st.state, $st.status, $st.detail))
+        if ($st.id -eq 'applications') {
+            if ($st.current) { $l.Add("  installing now: $($st.current)") }
+            if ($null -ne $st.total -and [int] $st.total -gt 0) { $l.Add("  applications: $($st.done) of $($st.total) done, $([int] $st.total - [int] $st.done) remaining") }
+        }
+        if ($st.reboots) { $l.Add("  restarts so far: $($st.reboots)") }
+    }
+    $l.Add(('{0,-22} {1,-12} {2,-22} {3}' -f 'Manufacturer drivers', 'NotImplemented', '', 'Not part of this version'))
+    $l.Add('')
+    if (@($s.needsAttention).Count) {
+        $l.Add('NEEDS ATTENTION')
+        foreach ($n in $s.needsAttention) { $l.Add("  - $n") }
+        $l.Add("  Recovery: run (elevated) $(Join-Path $Paths.Package 'scripts\\orchestrator\\Resume-Deployment.ps1')")
+        $l.Add('')
+    }
+    if ($State -and $State.status -in 'StagingFailed', 'IntegrityFailed') { $l.Add("FAILED: $($State.message)"); $l.Add('') }
+    if (Test-Path -LiteralPath $Paths.ReportText) { $l.Add("Report: $($Paths.ReportText)") }
+    $l.Add("Logs  : $($Paths.Log)")
+    [pscustomobject]@{ Text = ($l -join "\`r\`n"); Done = [bool] ($State -and $State.status -in 'Completed', 'StagingFailed', 'IntegrityFailed') }
+}
+
+if ($script:ShowMain) {
+    $package = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+    $manifest = Read-WddManifest (Join-Path $package 'deployment-manifest.json')
+    $paths = Get-WddPaths $manifest.dataRoot
+    do {
+        $state = Read-WddJson $paths.State
+        $out = Format-WddStatus $manifest $paths $state
+        if ($script:ShowArgs.Watch) { Clear-Host }
+        Write-Output $out.Text
+        if (-not $script:ShowArgs.Watch -or $out.Done) { break }
+        Write-Output ''
+        Write-Output "Refreshing every $($script:ShowArgs.Interval) s. You can close this window; the deployment continues."
+        Start-Sleep -Seconds $script:ShowArgs.Interval
+    } while ($true)
+    if ($script:ShowArgs.Watch) { Write-Output ''; Read-Host 'Press Enter to close' | Out-Null }
+    exit 0
+}
+		</File>
+		<File path="C:\\Windows\\Setup\\Scripts\\Deployment\\scripts\\orchestrator\\Resume-Deployment.ps1">
+#Requires -Version 5.1
+&lt;#
+.SYNOPSIS
+    Manual recovery for a deployment: re-checks the package, re-registers the monitor and, only
+    when asked, restarts a stage.
+
+.DESCRIPTION
+    Run elevated (as the signed-in user when restarting the applications stage):
+
+      Resume-Deployment.ps1
+          Verifies &lt;dataRoot&gt;\\Package, registers the monitor task again and runs it once. Use it
+          after a stalled stage was fixed, after the deadline passed, or if the monitor task was
+          removed. A finished deployment is reopened (its report is rewritten at the end).
+      Resume-Deployment.ps1 -RestartStage windowsUpdate|applications
+          Runs that engine's installer again. The installer archives the previous run and starts
+          a new one; work already done is detected (installed updates are not offered again,
+          installed applications are reported AlreadyInstalled).
+      Resume-Deployment.ps1 -Status
+          Prints the progress and changes nothing.
+
+    It never deletes logs, results or the state file.
+#&gt;
+[CmdletBinding()]
+param(
+    [ValidateSet('', 'windowsUpdate', 'applications')]
+    [string] $RestartStage = '',
+    [switch] $Status
+)
+
+$script:ResumeMain = $MyInvocation.InvocationName -ne '.'
+$script:ResumeArgs = @{ RestartStage = $RestartStage; Status = [bool] $Status }
+. (Join-Path $PSScriptRoot '..\\common\\DeploymentCommon.ps1')
+. (Join-Path $PSScriptRoot '..\\bootstrap\\Initialize-Deployment.ps1')
+. (Join-Path $PSScriptRoot 'Show-DeploymentStatus.ps1')
+
+function Invoke-WddResume {
+    param([hashtable] $Paths, [string] $RestartStage)
+    Initialize-WddLogging $Paths
+    $identity = Get-WddIdentity
+    if (-not $identity.IsAdmin) { return 'RefusedNotElevated' }
+    $mutex = Enter-WddMutex 60
+    if (-not $mutex) { return 'Busy' }
+    try {
+        $state = Read-WddJson $Paths.State
+        if (-not $state) { Write-WddLog 'Resume: no deployment state. Start a deployment with setup.ps1 or Initialize-Deployment.ps1.' 'ERROR'; return 'NoState' }
+        $manifestPath = Join-Path $Paths.Package 'deployment-manifest.json'
+        $manifest = Read-WddManifest $manifestPath
+        $check = Test-WddFiles $Paths.Package $manifest 'Text' @($state.stagedFiles)
+        if (-not $check.Ok) {
+            Write-WddLog "Resume refused: the staged package is modified or incomplete ($($check.Missing.Count) missing, $($check.Mismatched.Count) modified). Run setup.ps1 from the original package to stage it again." 'ERROR'
+            return 'IntegrityFailed'
+        }
+        Write-WddLog "==== Resume requested by $($identity.Name)$(if ($RestartStage) { " (restart stage $RestartStage)" }) ===="
+        if ($state.status -in 'Completed', 'IntegrityFailed') {
+            if (Test-Path -LiteralPath $Paths.Marker) { Move-Item -LiteralPath $Paths.Marker -Destination "$($Paths.Marker).$((Get-WddNow).ToString('yyyyMMddHHmmss')).bak" -Force }
+        }
+        $state.status = 'InProgress'
+        $state.message = 'Resumed manually.'
+        $state.deadlineUtc = (Get-WddNow).AddHours([double] $manifest.failureHandling.orchestrator.deadlineHours).ToString('o')
+        if ($RestartStage) {
+            $stage = Get-WddStage $manifest $RestartStage
+            if (-not $stage -or -not $stage.enabled) { Write-WddLog "Stage $RestartStage is not part of this deployment." 'ERROR'; return 'UnknownStage' }
+            $state.stages[$RestartStage] = @{ launchResult = ''; attempts = 0; launchedUtc = $null; exitCode = $null; message = 'Restarted manually.' }
+            Invoke-WddLaunchStage $stage $Paths $state $identity ([int] $manifest.failureHandling.orchestrator.launchAttempts) | Out-Null
+        }
+        Save-WddState $Paths $state
+        Register-WddMonitorTask $Paths $manifest
+        try { Start-WddTask $script:MonitorTask.path $script:MonitorTask.name } catch { }
+        Write-WddEvent 3001 "Deployment $($manifest.packageId) resumed manually$(if ($RestartStage) { " (stage $RestartStage restarted)" })."
+        return 'Resumed'
+    } finally {
+        Exit-WddMutex $mutex
+    }
+}
+
+if ($script:ResumeMain) {
+    $package = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+    $manifest = Read-WddManifest (Join-Path $package 'deployment-manifest.json')
+    $paths = Get-WddPaths $manifest.dataRoot
+    if ($script:ResumeArgs.Status) { (Format-WddStatus $manifest $paths (Read-WddJson $paths.State)).Text; exit 0 }
+    $outcome = Invoke-WddResume $paths $script:ResumeArgs.RestartStage
+    Write-Output "Resume: $outcome. Log: $($paths.Log)"
+    if ($outcome -eq 'Resumed') { exit 0 }
+    exit 1
+}
+		</File>
+		<File path="C:\\Windows\\Setup\\Scripts\\Deployment\\scripts\\finalization\\Complete-Deployment.ps1">
+#Requires -Version 5.1
+&lt;#
+.SYNOPSIS
+    Writes the final deployment report and cleans up the deployment monitor.
+
+.DESCRIPTION
+    Called by DeploymentOrchestrator.ps1 when every enabled stage has a final result, or when the
+    deployment deadline has passed. Run by hand (elevated) it writes the report for the current
+    state without ending the deployment (-Preview), or ends it now (-Finish).
+
+    Writes &lt;dataRoot&gt;\\reports\\deployment-report.json and deployment-report.txt, the marker
+    &lt;dataRoot&gt;\\state\\deployment.done (with the overall status; a marker is never proof of success
+    on its own), an Application event, and a "Deployment report" shortcut on the public desktop.
+    It removes only the monitor task. Logs, state and the engines' results are kept.
+#&gt;
+[CmdletBinding()]
+param(
+    [switch] $Preview,
+    [switch] $Finish
+)
+
+$script:CompleteMain = $MyInvocation.InvocationName -ne '.'
+$script:CompleteArgs = @{ Preview = [bool] $Preview; Finish = [bool] $Finish }
+. (Join-Path $PSScriptRoot '..\\common\\DeploymentCommon.ps1')
+
+function Get-WddSystemInfo {
+    $os = Get-CimInstance -ClassName Win32_OperatingSystem
+    $cs = Get-CimInstance -ClassName Win32_ComputerSystem
+    $cv = Get-ItemProperty -LiteralPath 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion' -ErrorAction SilentlyContinue
+    [ordered]@{
+        computerName   = $env:COMPUTERNAME
+        windows        = [string] $os.Caption
+        edition        = $(if ($cv) { [string] $cv.EditionID } else { '' })
+        displayVersion = $(if ($cv -and $cv.PSObject.Properties['DisplayVersion']) { [string] $cv.DisplayVersion } else { '' })
+        build          = $(if ($cv) { '{0}.{1}' -f $cv.CurrentBuildNumber, $cv.UBR } else { [string] $os.BuildNumber })
+        installDateUtc = $os.InstallDate.ToUniversalTime().ToString('o')
+        manufacturer   = [string] $cs.Manufacturer
+        model          = [string] $cs.Model
+    }
+}
+
+function New-WddReport {
+    param([hashtable] $Manifest, [hashtable] $Paths, [hashtable] $State, $Snapshot, [string] $Overall, [string] $Reason)
+    $system = try { Get-WddSystemInfo } catch { [ordered]@{ computerName = $env:COMPUTERNAME; error = $_.Exception.Message } }
+    $wu = @($Snapshot.stages | Where-Object { $_.id -eq 'windowsUpdate' }) | Select-Object -First 1
+    $apps = @($Snapshot.stages | Where-Object { $_.id -eq 'applications' }) | Select-Object -First 1
+    $remaining = @(); $errors = @(); $incomplete = @()
+    $wuReport = $null
+    if ($wu) {
+        $r = $wu.result
+        $failed = @(if ($r) { @($r.failed) | Where-Object { $_ } | ForEach-Object { [ordered]@{ kbs = @($_.kbs); title = $_.title; attempts = $_.attempts; lastResult = $_.lastResult; lastHResult = $_.lastHResult } } })
+        $wuReport = [ordered]@{ state = $wu.state; status = $wu.status; reason = $wu.detail; reboots = $wu.reboots
+                                installed = $(if ($r) { @($r.installed).Count } else { $null }); skipped = $(if ($r) { @($r.skipped).Count } else { $null }); failedUpdates = $failed }
+        foreach ($f in $failed) { $remaining += "Windows Update: $((@($f.kbs) -join ', ')) $($f.title) failed after $($f.attempts) attempt(s)." }
+        if ($wu.state -ne 'Final') { $incomplete += "Windows Update ($($wu.state))" }
+        elseif ($wu.status -eq 'Offline') { $incomplete += 'Windows Update (Offline: no network before its runtime limit)' }
+        elseif ($wu.status -eq 'Failed') { $errors += "Windows Update failed: $($wu.detail)" }
+    }
+    $appsReport = $null
+    if ($apps) {
+        $r = $apps.result
+        $pk = @(if ($r) { @($r.packages) | Where-Object { $_ } | ForEach-Object { [ordered]@{ name = $_.name; packageIdentifier = $_.packageIdentifier; source = $_.source; status = $_.status; attempts = $_.attempts; exitCode = $_.exitCode; message = $_.message } } })
+        $add = @(if ($r) { @($r.additionalSoftware) | Where-Object { $_ } })
+        $appsReport = [ordered]@{ state = $apps.state; status = $apps.status; reason = $apps.detail; reboots = $apps.reboots
+                                  counts = $(if ($r) { $r.counts } else { $null }); packages = $pk; additionalSoftware = $add
+                                  requiresInteraction = @($pk | Where-Object { $_.status -eq 'RequiresInteraction' } | ForEach-Object { $_.name })
+                                  bootstrap = $(if ($r) { $r.bootstrap } else { $null }) }
+        foreach ($p in $pk) { if ($p.status -in 'RequiresInteraction', 'RequiresRestart', 'Failed', 'Unavailable', 'Pending') { $remaining += "Application $($p.name) ($($p.source):$($p.packageIdentifier)): $($p.status). $($p.message)" } }
+        foreach ($a in $add) { if ($a.status -ne 'Succeeded') { $remaining += "Additional Software $($a.name): $($a.status). $($a.message)" } }
+        if ($apps.state -ne 'Final') { $incomplete += "Applications ($($apps.state))" }
+        elseif ($apps.status -eq 'Offline') { $incomplete += 'Applications (Offline)' }
+        elseif ($apps.status -eq 'Failed') { $errors += "Application setup failed: $($apps.detail)" }
+    }
+    foreach ($n in @($Snapshot.needsAttention)) { $errors += $n }
+    $remaining += 'Manufacturer drivers: not part of this deployment (driver stage not implemented). Install chipset, graphics and OEM drivers manually if Windows Update did not provide them.'
+    [ordered]@{
+        format             = 'windows-deployment-builder/deployment-report'
+        reportVersion      = 1
+        overall            = $Overall
+        reason             = $Reason
+        generatedUtc       = (Get-WddNow).ToString('o')
+        packageId          = $Manifest.packageId
+        packageVersion     = $Manifest.packageVersion
+        orchestratorVersion = $script:DeployVersion
+        startedUtc         = $State.initializedUtc
+        deadlineUtc        = $State.deadlineUtc
+        system             = $system
+        windowsUpdate      = $wuReport
+        applications       = $appsReport
+        drivers            = [ordered]@{ state = 'NotImplemented'; note = 'No driver was installed or changed by this deployment.' }
+        restarts           = [ordered]@{ windowsUpdate = $(if ($wu) { $wu.reboots } else { 0 }); applications = $(if ($apps) { $apps.reboots } else { 0 }) }
+        incompleteStages   = $incomplete
+        errors             = $errors
+        remainingTasks     = $remaining
+        logs               = [ordered]@{ deployment = $Paths.Log; windowsUpdate = (Join-Path $Paths.Root 'Updates\\logs\\engine.log'); applications = (Join-Path $Paths.Root 'Applications\\logs\\engine.log') }
+        recovery           = "Resume: powershell.exe -ExecutionPolicy Bypass -File \`"$(Join-Path $Paths.Package 'scripts\\orchestrator\\Resume-Deployment.ps1')\`""
+    }
+}
+
+function Format-WddReport {
+    param($Report)
+    $l = New-Object System.Collections.Generic.List[string]
+    $l.Add('Windows Deployment Builder - deployment report')
+    $l.Add('==============================================')
+    $l.Add("Overall result : $($Report.overall)")
+    if ($Report.reason) { $l.Add("               : $($Report.reason)") }
+    $l.Add("Generated (UTC): $($Report.generatedUtc)")
+    $l.Add("Package        : $($Report.packageId) (package $($Report.packageVersion), orchestrator $($Report.orchestratorVersion))")
+    $l.Add('')
+    $l.Add('Computer')
+    foreach ($k in $Report.system.Keys) { $l.Add(('  {0,-15} {1}' -f $k, $Report.system[$k])) }
+    $l.Add('')
+    $l.Add('Windows Update')
+    if ($Report.windowsUpdate) {
+        $w = $Report.windowsUpdate
+        $l.Add("  Result: $($w.status) ($($w.state)). $($w.reason)")
+        $l.Add("  Installed: $($w.installed)  Skipped by policy: $($w.skipped)  Restarts: $($w.reboots)")
+        foreach ($f in @($w.failedUpdates)) { $l.Add("  FAILED  $((@($f.kbs) -join ', ')) $($f.title) ($($f.attempts) attempts, $($f.lastHResult))") }
+    } else { $l.Add('  Not part of this deployment.') }
+    $l.Add('')
+    $l.Add('Applications (WinGet)')
+    if ($Report.applications) {
+        $a = $Report.applications
+        $l.Add("  Result: $($a.status) ($($a.state)). $($a.reason)")
+        $l.Add("  Restarts: $($a.reboots)")
+        foreach ($p in @($a.packages)) { $l.Add(('  {0,-20} {1} ({2}:{3}) {4}' -f $p.status, $p.name, $p.source, $p.packageIdentifier, $p.message)) }
+        foreach ($s in @($a.additionalSoftware)) { $l.Add(('  {0,-20} {1} (Additional Software) {2}' -f $s.status, $s.name, $s.message)) }
+    } else { $l.Add('  Not part of this deployment.') }
+    $l.Add('')
+    $l.Add('Manufacturer drivers')
+    $l.Add('  Not implemented in this version; nothing was installed or changed.')
+    $l.Add('')
+    $l.Add('Incomplete stages')
+    if (@($Report.incompleteStages).Count) { foreach ($x in $Report.incompleteStages) { $l.Add("  - $x") } } else { $l.Add('  None.') }
+    $l.Add('')
+    $l.Add('Errors')
+    if (@($Report.errors).Count) { foreach ($x in $Report.errors) { $l.Add("  - $x") } } else { $l.Add('  None.') }
+    $l.Add('')
+    $l.Add('Remaining tasks')
+    foreach ($x in $Report.remainingTasks) { $l.Add("  - $x") }
+    $l.Add('')
+    $l.Add('Logs')
+    foreach ($k in $Report.logs.Keys) { $l.Add(('  {0,-14} {1}' -f $k, $Report.logs[$k])) }
+    $l.Add('')
+    $l.Add("Recovery: $($Report.recovery)")
+    return ($l -join "\`r\`n") + "\`r\`n"
+}
+
+function Write-WddReport {
+    param($Report, [hashtable] $Paths)
+    Write-WddJson $Paths.ReportJson $Report
+    [System.IO.File]::WriteAllText($Paths.ReportText, (Format-WddReport $Report), (New-Object System.Text.UTF8Encoding($true)))
+}
+
+&lt;#
+    Ends the deployment: report, marker, event, shortcuts, monitor task removal. State is kept.
+#&gt;
+function Complete-WddDeployment {
+    param([hashtable] $Manifest, [hashtable] $Paths, [hashtable] $State, $Snapshot, [switch] $DeadlineReached)
+    $overall = Get-WddOverall $Snapshot.stages -DeadlineReached:$DeadlineReached
+    $reason = if ($DeadlineReached -and -not $Snapshot.allFinal) { "The deployment deadline ($($State.deadlineUtc)) passed before every stage finished." } elseif (@($Snapshot.stages).Count -eq 0) { 'No post-installation stage was enabled.' } else { 'Every enabled stage has a final result.' }
+    $report = New-WddReport $Manifest $Paths $State $Snapshot $overall $reason
+    Write-WddReport $report $Paths
+    $now = (Get-WddNow).ToString('o')
+    Write-WddJson $Paths.Marker ([ordered]@{ status = $overall; finishedUtc = $now; report = $Paths.ReportJson })
+    $State.status = 'Completed'; $State.overall = $overall; $State.completedUtc = $now; $State.message = $reason
+    Save-WddState $Paths $State
+    $Snapshot.deploymentState = 'Completed'
+    $Snapshot.overall = $overall
+    Write-WddJson $Paths.Status $Snapshot
+    Write-WddLog "FINISHED: $overall. $reason Report: $($Paths.ReportText)" $(if ($overall -eq 'Succeeded') { 'INFO' } else { 'WARN' })
+    $eventId = switch ($overall) { 'Succeeded' { 3100 } 'CompletedWithFollowUp' { 3101 } 'CompletedWithFailures' { 3102 } 'Failed' { 3103 } default { 3104 } }
+    Write-WddEvent $eventId "Deployment $($Manifest.packageId) finished: $overall. $reason Report: $($Paths.ReportText)" $(if ($overall -eq 'Succeeded') { 'Information' } elseif ($overall -eq 'Failed') { 'Error' } else { 'Warning' })
+    try {
+        Remove-WddShortcut 'Deployment progress'
+        New-WddShortcut 'Deployment report' (Join-Path $env:SystemRoot 'System32\\notepad.exe') "\`"$($Paths.ReportText)\`"" 'Windows Deployment Builder: deployment report'
+    } catch { Write-WddLog "Could not update the desktop shortcuts: $($_.Exception.Message)" 'WARN' }
+    try { Unregister-WddTask '\\WindowsDeploymentBuilder\\' 'Deployment' } catch { Write-WddLog "Could not remove the monitor task: $($_.Exception.Message)" 'WARN' }
+    return $overall
+}
+
+if ($script:CompleteMain) {
+    $package = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+    $manifest = Read-WddManifest (Join-Path $package 'deployment-manifest.json')
+    $paths = Get-WddPaths $manifest.dataRoot
+    Initialize-WddLogging $paths
+    $state = Read-WddJson $paths.State
+    if (-not $state) { Write-Output 'No deployment state found.'; exit 1 }
+    $snapshot = Get-WddSnapshot $manifest $paths $state
+    if ($script:CompleteArgs.Finish) {
+        $overall = Complete-WddDeployment $manifest $paths $state $snapshot -DeadlineReached
+        Write-Output "Deployment ended: $overall. Report: $($paths.ReportText)"
+    } else {
+        $report = New-WddReport $manifest $paths $state $snapshot $snapshot.overall 'Preview of the current state (the deployment continues).'
+        Format-WddReport $report
+    }
+    exit 0
+}
+		</File>
+		<File path="C:\\Windows\\Setup\\Scripts\\Deployment\\config\\orchestration.json">
+{
+  "schemaVersion": 1,
+  "dataRoot": "C:\\\\ProgramData\\\\WindowsDeploymentBuilder",
+  "coordination": {
+    "policy": "updatesFirst",
+    "description": "updatesFirst: preparation (network, WinGet check, package availability) may run while Windows Update works; application installation starts only after the Windows Update stage is final. Installing anything and scheduling a restart both require the install lock.",
+    "installLock": "C:\\\\ProgramData\\\\WindowsDeploymentBuilder\\\\state\\\\install.lock",
+    "restartMarker": "C:\\\\ProgramData\\\\WindowsDeploymentBuilder\\\\state\\\\restart-pending.json",
+    "lockSemantics": "Exclusive file handle; released by Windows when the holder exits. restart-pending.json is valid only in the boot it was written in (and for 30 minutes)."
+  },
+  "stages": [
+    {
+      "id": "windowsUpdate",
+      "order": 1,
+      "enabled": true,
+      "implemented": true,
+      "runsAs": "SYSTEM",
+      "task": "\\\\WindowsDeploymentBuilder\\\\WindowsUpdate",
+      "result": "C:\\\\ProgramData\\\\WindowsDeploymentBuilder\\\\Updates\\\\result.json",
+      "marker": "C:\\\\ProgramData\\\\WindowsDeploymentBuilder\\\\state\\\\windows-update.done",
+      "finalStatuses": [
+        "Succeeded",
+        "CompletedWithFailures",
+        "Failed",
+        "Offline"
+      ],
+      "markerStatuses": [
+        "Succeeded",
+        "CompletedWithFailures"
+      ],
+      "waitsFor": []
+    },
+    {
+      "id": "applications",
+      "order": 2,
+      "enabled": false,
+      "implemented": true,
+      "runsAs": "Signed-in user, elevated (WinGet is not supported as SYSTEM)",
+      "task": "\\\\WindowsDeploymentBuilder\\\\Applications",
+      "result": "C:\\\\ProgramData\\\\WindowsDeploymentBuilder\\\\Applications\\\\result.json",
+      "marker": "C:\\\\ProgramData\\\\WindowsDeploymentBuilder\\\\state\\\\applications.done",
+      "finalStatuses": [
+        "Succeeded",
+        "CompletedWithFollowUp",
+        "CompletedWithFailures",
+        "Failed",
+        "Offline"
+      ],
+      "markerStatuses": [
+        "Succeeded",
+        "CompletedWithFollowUp",
+        "CompletedWithFailures"
+      ],
+      "waitsFor": [
+        "windowsUpdate"
+      ],
+      "includes": [
+        "winget packages",
+        "additionalSoftware"
+      ]
+    },
+    {
+      "id": "drivers",
+      "order": 3,
+      "enabled": false,
+      "implemented": false,
+      "phase": 4,
+      "runsAs": "SYSTEM",
+      "inventory": "C:\\\\ProgramData\\\\WindowsDeploymentBuilder\\\\Drivers\\\\inventory.json",
+      "plan": "C:\\\\ProgramData\\\\WindowsDeploymentBuilder\\\\Drivers\\\\plan.json",
+      "result": "C:\\\\ProgramData\\\\WindowsDeploymentBuilder\\\\Drivers\\\\result.json",
+      "marker": "C:\\\\ProgramData\\\\WindowsDeploymentBuilder\\\\state\\\\drivers.done",
+      "waitsFor": [
+        "windowsUpdate"
+      ],
+      "note": "Interface only (src/engine/drivers/contract.ts). No driver is installed by this version."
+    }
+  ]
+}
+		</File>
+		<File path="C:\\Windows\\Setup\\Scripts\\Deployment\\deployment-manifest.json">
+{
+  "format": "windows-deployment-builder/deployment-manifest",
+  "manifestVersion": 1,
+  "packageVersion": "1.0.0",
+  "packageId": "D428DC2BC0534AAA",
+  "scope": "answerFile",
+  "generator": {
+    "name": "Windows Deployment Builder",
+    "orchestrator": "1.0.0",
+    "windowsUpdateEngine": "1.1.0",
+    "applicationEngine": "1.0.0"
+  },
+  "dataRoot": "C:\\\\ProgramData\\\\WindowsDeploymentBuilder",
+  "packageFolder": "WindowsDeployment",
+  "answerFile": {
+    "fileName": "autounattend.xml",
+    "location": "Root of the Windows installation USB drive",
+    "foundAutomatically": true,
+    "containsSecrets": false,
+    "startsDeployment": true
+  },
+  "windows": {
+    "edition": "Windows 11 Pro",
+    "editionMode": "genericKey",
+    "computerName": "Alex-Computer",
+    "architectures": [
+      "amd64",
+      "arm64"
+    ],
+    "diskSelection": "interactive"
+  },
+  "stages": [
+    {
+      "id": "staging",
+      "order": 0,
+      "name": "Verify and stage the package",
+      "enabled": true,
+      "implemented": true,
+      "context": "user",
+      "when": "Last FirstLogon command (or setup.cmd)",
+      "launcher": "scripts/bootstrap/Initialize-Deployment.ps1",
+      "requiresInternet": false
+    },
+    {
+      "id": "windowsUpdate",
+      "order": 1,
+      "name": "Windows Update",
+      "enabled": true,
+      "implemented": true,
+      "context": "SYSTEM",
+      "launcher": "scripts/windows-update/Install-UpdateEngine.ps1",
+      "task": {
+        "path": "\\\\WindowsDeploymentBuilder\\\\",
+        "name": "WindowsUpdate"
+      },
+      "result": "Updates\\\\result.json",
+      "status": "Updates\\\\status.json",
+      "marker": "state\\\\windows-update.done",
+      "finalStatuses": [
+        "Succeeded",
+        "CompletedWithFailures",
+        "Failed",
+        "Offline"
+      ],
+      "waitsFor": [],
+      "requiresInternet": true
+    },
+    {
+      "id": "applications",
+      "order": 2,
+      "name": "Applications (WinGet)",
+      "enabled": false,
+      "implemented": true,
+      "context": "user",
+      "launcher": "scripts/applications/Install-ApplicationEngine.ps1",
+      "task": {
+        "path": "\\\\WindowsDeploymentBuilder\\\\",
+        "name": "Applications"
+      },
+      "result": "Applications\\\\result.json",
+      "status": "Applications\\\\status.json",
+      "marker": "state\\\\applications.done",
+      "finalStatuses": [
+        "Succeeded",
+        "CompletedWithFollowUp",
+        "CompletedWithFailures",
+        "Failed",
+        "Offline"
+      ],
+      "waitsFor": [
+        "windowsUpdate"
+      ],
+      "coordination": "updatesFirst",
+      "requiresInternet": true
+    },
+    {
+      "id": "drivers",
+      "order": 3,
+      "name": "Manufacturer drivers",
+      "enabled": false,
+      "implemented": false,
+      "status": "NotImplemented",
+      "context": "SYSTEM",
+      "waitsFor": [
+        "windowsUpdate"
+      ],
+      "note": "Not implemented in this version. Nothing installs or changes drivers. Interface: src/engine/drivers/contract.ts.",
+      "requiresInternet": true
+    },
+    {
+      "id": "finalization",
+      "order": 4,
+      "name": "Report and cleanup",
+      "enabled": true,
+      "implemented": true,
+      "context": "SYSTEM",
+      "launcher": "scripts/finalization/Complete-Deployment.ps1",
+      "requiresInternet": false
+    }
+  ],
+  "applications": {
+    "enabled": false,
+    "selectedProfiles": [],
+    "packages": [],
+    "removedFromProfiles": [],
+    "additionalSoftware": []
+  },
+  "restartPolicy": {
+    "windowsUpdate": {
+      "maxReboots": 10,
+      "rebootWarningSeconds": 60
+    },
+    "applications": {
+      "restartPolicy": "whenRequired",
+      "maxReboots": 3,
+      "rebootWarningSeconds": 60
+    }
+  },
+  "failureHandling": {
+    "windowsUpdate": {
+      "maxAttemptsPerUpdate": 2,
+      "maxRuntimeHours": 6,
+      "networkWaitMinutes": 15,
+      "drivers": "exclude"
+    },
+    "applications": {
+      "maxAttemptsPerPackage": 2,
+      "packageTimeoutMinutes": 30,
+      "maxRuntimeHours": 4,
+      "waitForUpdatesHours": 8,
+      "networkWaitMinutes": 15
+    },
+    "orchestrator": {
+      "launchAttempts": 2,
+      "stalledAfterMinutes": 120,
+      "monitorIntervalMinutes": 15,
+      "graceHours": 24,
+      "deadlineHours": 30
+    }
+  },
+  "drivers": {
+    "implemented": false,
+    "preferences": {
+      "mode": "notConfigured"
+    },
+    "note": "Reserved for a later phase (vendor packages matched by hardware ID)."
+  },
+  "customScripts": {
+    "managedBy": "answer file",
+    "firstLogon": 0,
+    "system": 0,
+    "defaultUser": 0,
+    "userOnce": 0
+  },
+  "paths": {
+    "package": "C:\\\\ProgramData\\\\WindowsDeploymentBuilder\\\\Package",
+    "state": "C:\\\\ProgramData\\\\WindowsDeploymentBuilder\\\\state\\\\deployment.json",
+    "status": "C:\\\\ProgramData\\\\WindowsDeploymentBuilder\\\\Deployment\\\\status.json",
+    "marker": "C:\\\\ProgramData\\\\WindowsDeploymentBuilder\\\\state\\\\deployment.done",
+    "report": "C:\\\\ProgramData\\\\WindowsDeploymentBuilder\\\\reports\\\\deployment-report.txt",
+    "monitorTask": "\\\\WindowsDeploymentBuilder\\\\Deployment"
+  },
+  "files": [
+    {
+      "path": "scripts/common/DeploymentCommon.ps1",
+      "role": "orchestrator",
+      "size": 21027,
+      "sha256": "F627E6A147A4C296A89079AF58C970BA3EDF338780829C5AB3C6C4DFAA9CD1E5",
+      "textSha256": "8463AF9084D3E4D8F631FF5EF50B04E165C1E2F738B5B4F10FC508DF25CF4D79",
+      "embedded": "Deployment\\\\scripts\\\\common\\\\DeploymentCommon.ps1"
+    },
+    {
+      "path": "scripts/bootstrap/Stage-Deployment.ps1",
+      "role": "orchestrator",
+      "size": 6904,
+      "sha256": "25A7286842970981A18CD42C42B915DBCD4A0BB396E9142C439D0A03B983C8B6",
+      "textSha256": "5222A19B267E3C90447D944470DF552D783DEBA02839B5C5C17F394FDDEB4991",
+      "embedded": "Deployment\\\\scripts\\\\bootstrap\\\\Stage-Deployment.ps1"
+    },
+    {
+      "path": "scripts/bootstrap/Initialize-Deployment.ps1",
+      "role": "orchestrator",
+      "size": 14786,
+      "sha256": "C596E8516C5773FB915B6719829820F99AB956C33967A96889B680FAA35A5B7A",
+      "textSha256": "27FFB14FD54CA415DA12C7AAAEA344E569289CA7C661DBD97BF3AB406CF56C7E",
+      "embedded": "Deployment\\\\scripts\\\\bootstrap\\\\Initialize-Deployment.ps1"
+    },
+    {
+      "path": "scripts/orchestrator/DeploymentOrchestrator.ps1",
+      "role": "orchestrator",
+      "size": 4837,
+      "sha256": "427A6488968AD887C487D38773204C493289ABDCC1E0D0C111E8EBB6DF203A16",
+      "textSha256": "56751C8C5336AE86FE85BBEC9084D89B75FE73C9C6D2F0392D286077BAA88726",
+      "embedded": "Deployment\\\\scripts\\\\orchestrator\\\\DeploymentOrchestrator.ps1"
+    },
+    {
+      "path": "scripts/orchestrator/Show-DeploymentStatus.ps1",
+      "role": "orchestrator",
+      "size": 4126,
+      "sha256": "7C08AAB007CB4AB275A833D6B9B3AF7C37E57D91C022F0F249336A4A13F36F88",
+      "textSha256": "CABF382F6EEA3E83FD74B9B95DD84273727578FB98C51D20395EB62735819D18",
+      "embedded": "Deployment\\\\scripts\\\\orchestrator\\\\Show-DeploymentStatus.ps1"
+    },
+    {
+      "path": "scripts/orchestrator/Resume-Deployment.ps1",
+      "role": "orchestrator",
+      "size": 4659,
+      "sha256": "1D6D0F3E5CEE874A9C8CC2C12D7D0D988FDB57F2BF6BC90A38658332693CE610",
+      "textSha256": "5C07C6F3A1328F3BB08EC36BD2C884A631D8CFE3866A7BCEB4E3271633F9574C",
+      "embedded": "Deployment\\\\scripts\\\\orchestrator\\\\Resume-Deployment.ps1"
+    },
+    {
+      "path": "scripts/finalization/Complete-Deployment.ps1",
+      "role": "orchestrator",
+      "size": 12755,
+      "sha256": "C77FF013E69D85214B7BF2FDBADDE983EF2803BCAC8BADA4F905F32B8A28058D",
+      "textSha256": "1BFA977A8061BC39CD92FF8878CF1086FC9CE68046E55D18AFD758B8193166A9",
+      "embedded": "Deployment\\\\scripts\\\\finalization\\\\Complete-Deployment.ps1"
+    },
+    {
+      "path": "scripts/windows-update/WindowsUpdateEngine.ps1",
+      "role": "engine",
+      "size": 41954,
+      "sha256": "42A83478250AA880D9AFD562B58F72DADE34B3956F6A1DDF2AA587F1CB8B9886",
+      "textSha256": "86CBE17D1C6D671CB4983F7D0F6309E46738B4978E2F07FE2DBA11D61A31FDA1",
+      "embedded": "WindowsUpdate\\\\WindowsUpdateEngine.ps1"
+    },
+    {
+      "path": "scripts/windows-update/Install-UpdateEngine.ps1",
+      "role": "engine",
+      "size": 6113,
+      "sha256": "FFC9568EFA033AA1984FCAC106471D45EFFD0956877E861F573C1881CC60F872",
+      "textSha256": "B3029F3929F389CF777A282F15F0B8417849065FCCE21739173E95C39E850C06",
+      "embedded": "WindowsUpdate\\\\Install-UpdateEngine.ps1"
+    },
+    {
+      "path": "scripts/windows-update/config.json",
+      "role": "configuration",
+      "size": 552,
+      "sha256": "D67A1145DFB78214E73D06C94E94AC101A4371C9BD9A62FB387ED32F6B0C1EDB",
+      "textSha256": "4B49AFBC73BDF9D3D1FDE663B8531B75FDD13C8024CB0957514B15C1CE2760EE",
+      "embedded": "WindowsUpdate\\\\config.json"
+    },
+    {
+      "path": "config/orchestration.json",
+      "role": "configuration",
+      "size": 2955,
+      "sha256": "0A153F244EE393360C0F35AA5B82072217B316F1AC6EFD8E02C70E74151A03C2",
+      "textSha256": "6E0033602351035FBAD129336579F0E947548FDA9CAFAF8FFA1EF22A57D05860",
+      "embedded": "Deployment\\\\config\\\\orchestration.json"
+    }
+  ]
 }
 		</File>
 	</Extensions>

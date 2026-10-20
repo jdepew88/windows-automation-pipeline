@@ -76,8 +76,9 @@ describe('owner-default answer file', () => {
     const cl = commandLines(r.root);
     expect(cl.firstLogon).toEqual([
       'powershell.exe -WindowStyle "Normal" -ExecutionPolicy "Unrestricted" -NoProfile -File "C:\\Windows\\Setup\\Scripts\\FirstLogon.ps1"',
-      // Phase 2: the Windows Update engine is installed last, after every M1 FirstLogon step.
-      'powershell.exe -WindowStyle "Normal" -ExecutionPolicy "Unrestricted" -NoProfile -File "C:\\Windows\\Setup\\Scripts\\WindowsUpdate\\Install-UpdateEngine.ps1"',
+      // Phase 4: the deployment orchestrator starts last, after every M1 FirstLogon step. It runs
+      // the Windows Update engine installer (Phase 2) from its verified copy of the package.
+      'powershell.exe -WindowStyle "Normal" -ExecutionPolicy "Unrestricted" -NoProfile -File "C:\\Windows\\Setup\\Scripts\\Deployment\\scripts\\bootstrap\\Initialize-Deployment.ps1"',
     ]);
     expect(cl.specialize[0]).toContain('$xml.unattend.Extensions.ExtractScript');
     expect(cl.specialize.slice(1)).toEqual([
