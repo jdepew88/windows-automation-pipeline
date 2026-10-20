@@ -10,7 +10,7 @@ function leafPaths(obj: Record<string, unknown>, prefix = ''): string[] {
   for (const [k, v] of Object.entries(obj)) {
     const p = prefix ? `${prefix}.${k}` : k;
     if (['schemaVersion', 'profileName'].includes(p)) continue;
-    if (['bloatware', 'desktop.icons', 'start.folders'].includes(p) || Array.isArray(v) || typeof v !== 'object' || v === null) out.push(p);
+    if (['bloatware', 'desktop.icons', 'start.folders', 'applications.selection'].includes(p) || Array.isArray(v) || typeof v !== 'object' || v === null) out.push(p);
     else out.push(...leafPaths(v as Record<string, unknown>, p));
   }
   return out;

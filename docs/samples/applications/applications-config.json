@@ -1,0 +1,86 @@
+{
+  "schemaVersion": 1,
+  "engineVersion": "1.0.0",
+  "dataRoot": "C:\\ProgramData\\WindowsDeploymentBuilder",
+  "taskPath": "\\WindowsDeploymentBuilder\\",
+  "taskName": "Applications",
+  "packagesFile": "winget-packages.json",
+  "coordination": {
+    "policy": "updatesFirst",
+    "windowsUpdate": {
+      "enabled": true,
+      "stateFile": "C:\\ProgramData\\WindowsDeploymentBuilder\\Updates\\state.json",
+      "resultFile": "C:\\ProgramData\\WindowsDeploymentBuilder\\Updates\\result.json",
+      "taskPath": "\\WindowsDeploymentBuilder\\",
+      "taskName": "WindowsUpdate"
+    }
+  },
+  "restartPolicy": "whenRequired",
+  "registerAppInstaller": true,
+  "onlineRepair": false,
+  "minimumWinGetVersion": "1.6.0",
+  "maxReboots": 3,
+  "maxAttemptsPerPackage": 2,
+  "packageTimeoutMinutes": 30,
+  "networkWaitMinutes": 15,
+  "maxRuntimeHours": 4,
+  "waitForUpdatesHours": 8,
+  "lockWaitMinutes": 60,
+  "rebootWarningSeconds": 60,
+  "packages": [
+    {
+      "key": "winget:git.git",
+      "packageIdentifier": "Git.Git",
+      "source": "winget",
+      "displayName": "Git",
+      "version": "",
+      "scope": "",
+      "interaction": "unknown",
+      "after": []
+    },
+    {
+      "key": "winget:7zip.7zip",
+      "packageIdentifier": "7zip.7zip",
+      "source": "winget",
+      "displayName": "7-Zip",
+      "version": "",
+      "scope": "",
+      "interaction": "unknown",
+      "after": []
+    },
+    {
+      "key": "winget:microsoft.wsl",
+      "packageIdentifier": "Microsoft.WSL",
+      "source": "winget",
+      "displayName": "Windows Subsystem for Linux",
+      "version": "",
+      "scope": "",
+      "interaction": "unknown",
+      "after": []
+    },
+    {
+      "key": "winget:docker.dockerdesktop",
+      "packageIdentifier": "Docker.DockerDesktop",
+      "source": "winget",
+      "displayName": "Docker Desktop",
+      "version": "",
+      "scope": "",
+      "interaction": "unknown",
+      "after": [
+        "winget:microsoft.wsl"
+      ]
+    },
+    {
+      "key": "msstore:9mspc6mp8fm4",
+      "packageIdentifier": "9MSPC6MP8FM4",
+      "source": "msstore",
+      "displayName": "Microsoft Whiteboard",
+      "version": "",
+      "scope": "",
+      "interaction": "unknown",
+      "after": []
+    }
+  ],
+  "unresolved": [],
+  "additionalSoftware": []
+}

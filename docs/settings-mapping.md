@@ -107,6 +107,30 @@ Validation rules live next to each setting in `src/features/<section>/index.ts` 
 | Restart warning in seconds (0-600) | `windowsUpdate.rebootWarningSeconds` | 60 | Advanced | firstLogon | config.json › rebootWarningSeconds | Windows 10/11 (Windows PowerShell 5.1, Windows Update Agent API) |  | unverified |
 | Never install these KB numbers | `windowsUpdate.excludedKbs` | (empty) | Advanced | firstLogon | config.json › excludedKbs | Windows 10/11 (Windows PowerShell 5.1, Windows Update Agent API) |  | documented |
 
+## Application provisioning
+
+| Setting | Path | Owner default | View | Stage | Mapping | Applies to | Caveat | Status |
+|---|---|---|---|---|---|---|---|---|
+| Install the selected applications after setup | `applications.enabled` | true | Basic | specialize, firstLogon | Embeds ApplicationEngine.ps1, WinGetBootstrap.ps1, Install-ApplicationEngine.ps1, applications-config.json, winget-packages.json in C:\Windows\Setup\Scripts\Applications. The last FirstLogon command runs Install-ApplicationEngine.ps1, which registers \WindowsDeploymentBuilder\Applications for the signed-in user (highest privileges, at sign-in + hourly). Result: C:\ProgramData\WindowsDeploymentBuilder\Applications\result.json; marker: C:\ProgramData\WindowsDeploymentBuilder\state\applications.done. | Windows 10 1809+ / Windows 11 with Microsoft App Installer (WinGet); Windows PowerShell 5.1 | Installers run with administrator rights. Only select software you trust. Not yet validated in a VM. | unverified |
+| Applications | `applications.selection` | (map) | Basic | firstLogon | winget-packages.json (Microsoft packages schema 2.0) + applications-config.json › packages | Windows 10 1809+ / Windows 11 with Microsoft App Installer (WinGet); Windows PowerShell 5.1 |  | documented |
+| Coordination with Windows Update | `applications.coordination` | updatesFirst | Advanced | firstLogon | applications-config.json › coordination; orchestration.json | Windows 10 1809+ / Windows 11 with Microsoft App Installer (WinGet); Windows PowerShell 5.1 |  | unverified |
+| Restarts for applications | `applications.restartPolicy` | whenRequired | Advanced | firstLogon | applications-config.json › restartPolicy, maxReboots | Windows 10 1809+ / Windows 11 with Microsoft App Installer (WinGet); Windows PowerShell 5.1 |  | unverified |
+| Register App Installer if WinGet is not available yet | `applications.registerAppInstaller` | true | Advanced | firstLogon | applications-config.json › registerAppInstaller | Windows 10 1809+ / Windows 11 with Microsoft App Installer (WinGet); Windows PowerShell 5.1 |  | documented |
+| Allow online repair from the PowerShell Gallery | `applications.onlineRepair` | false | Advanced | firstLogon | applications-config.json › onlineRepair | Windows 10 1809+ / Windows 11 with Microsoft App Installer (WinGet); Windows PowerShell 5.1 | Downloads and installs a PowerShell module and the NuGet provider from the internet. | documented |
+| Maximum restarts for applications (0-10) | `applications.maxReboots` | 3 | Advanced | firstLogon | applications-config.json › maxReboots | Windows 10 1809+ / Windows 11 with Microsoft App Installer (WinGet); Windows PowerShell 5.1 |  | unverified |
+| Attempts per package (1-5) | `applications.maxAttemptsPerPackage` | 2 | Advanced | firstLogon | applications-config.json › maxAttemptsPerPackage | Windows 10 1809+ / Windows 11 with Microsoft App Installer (WinGet); Windows PowerShell 5.1 |  | unverified |
+| Timeout per installation in minutes (5-180) | `applications.packageTimeoutMinutes` | 30 | Advanced | firstLogon | applications-config.json › packageTimeoutMinutes | Windows 10 1809+ / Windows 11 with Microsoft App Installer (WinGet); Windows PowerShell 5.1 |  | unverified |
+| Network wait per start in minutes (1-60) | `applications.networkWaitMinutes` | 15 | Advanced | firstLogon | applications-config.json › networkWaitMinutes | Windows 10 1809+ / Windows 11 with Microsoft App Installer (WinGet); Windows PowerShell 5.1 |  | unverified |
+| Maximum installation time in hours (1-24) | `applications.maxRuntimeHours` | 4 | Advanced | firstLogon | applications-config.json › maxRuntimeHours | Windows 10 1809+ / Windows 11 with Microsoft App Installer (WinGet); Windows PowerShell 5.1 |  | unverified |
+| Maximum wait for Windows Update in hours (1-48) | `applications.waitForUpdatesHours` | 8 | Advanced | firstLogon | applications-config.json › waitForUpdatesHours | Windows 10 1809+ / Windows 11 with Microsoft App Installer (WinGet); Windows PowerShell 5.1 |  | unverified |
+| Restart warning in seconds (0-600) | `applications.rebootWarningSeconds` | 60 | Advanced | firstLogon | applications-config.json › rebootWarningSeconds | Windows 10 1809+ / Windows 11 with Microsoft App Installer (WinGet); Windows PowerShell 5.1 |  | unverified |
+
+## Additional Software
+
+| Setting | Path | Owner default | View | Stage | Mapping | Applies to | Caveat | Status |
+|---|---|---|---|---|---|---|---|---|
+| Installers not available through WinGet | `additionalSoftware.items` | (empty) | Basic | firstLogon | applications-config.json › additionalSoftware; supplied files in C:\ProgramData\WindowsDeploymentBuilder\Applications\installers; follow-up in C:\ProgramData\WindowsDeploymentBuilder\Applications\follow-up.txt | Windows 10/11; runs in the application stage (signed-in user, elevated) |  | unverified |
+
 ## System tweaks
 
 | Setting | Path | Owner default | View | Stage | Mapping | Applies to | Caveat | Status |
@@ -297,5 +321,4 @@ Validation rules live next to each setting in `src/features/<section>/index.ts` 
 
 | Setting | Path | Owner default | View | Stage | Mapping | Applies to | Caveat | Status |
 |---|---|---|---|---|---|---|---|---|
-| Install PowerShell 7 (planned) | `deferred.installPowerShell7` | true | Basic | deferred | None in M1 (recorded in profile JSON) | Later milestone (WinGet / staged installers) |  | documented |
-| WinGet packages (planned) | `deferred.wingetPackages` | (empty) | Advanced | deferred | None in M1 | Later milestone |  | documented |
+| Install PowerShell 7 (planned) | `deferred.installPowerShell7` | true | Basic | deferred | None (recorded in profile JSON) | Recorded for the deployment bundle milestone |  | documented |

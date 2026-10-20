@@ -6,7 +6,8 @@ import { resolveIdentity } from '../engine/naming';
 import { lookup } from '../data';
 import { SETTINGS_BY_PATH } from '../features';
 import { isEffective, PHASES } from '../features/scripts';
-import { resolveDrivers } from '../engine/windows-update';
+import { resolveDrivers, type DeploymentAsset } from '../engine/windows-update';
+import { resolveSelection } from '../engine/applications/selection';
 import { clear, download, h } from './dom';
 
 function labelFor(path: string): string {
@@ -51,6 +52,8 @@ function summaryRows(p: Profile): [string, string][] {
         ? `On: drivers ${resolveDrivers(p) === 'include' ? 'included' : 'excluded'}, feature updates ${p.windowsUpdate.featureUpdates === 'install' ? 'installed' : 'skipped'}, at most ${p.windowsUpdate.maxReboots} restarts / ${p.windowsUpdate.maxRuntimeHours} h`
         : 'Off',
     ],
+    ['Applications', applicationsSummary(p)],
+    ['Additional software', p.additionalSoftware.items.length ? `${p.additionalSoftware.items.length} installer(s), listed for manual follow-up` : 'None'],
     ['Wi-Fi', p.wifi.mode],
     ['Apps removed', String(removed)],
     ['Custom scripts', scripts],
@@ -58,6 +61,21 @@ function summaryRows(p: Profile): [string, string][] {
     ['File name', p.output.answerFileName],
   ];
 }
+
+function applicationsSummary(p: Profile): string {
+  if (!p.applications.enabled) return 'Off';
+  const r = resolveSelection(p.applications.selection);
+  const ok = r.packages.filter((x) => x.resolution !== 'unresolved').length;
+  if (r.packages.length === 0) return 'On, nothing selected (nothing is generated)';
+  const profiles = p.applications.selection.selectedProfiles.map((id) => p.applications.selection.profiles.find((x) => x.id === id)?.name ?? id);
+  return `${ok} package(s) via WinGet${profiles.length ? ` from ${profiles.join(' + ')}` : ''}${r.packages.length > ok ? `, ${r.packages.length - ok} unresolved` : ''}; installed after Windows Update as the signed-in user`;
+}
+
+const GROUP_TITLES: Record<DeploymentAsset['group'], string> = {
+  'windows-update': 'Windows Update engine',
+  applications: 'Application provisioning',
+  orchestration: 'Orchestration',
+};
 
 export interface ReviewHandle {
   el: HTMLElement;
@@ -155,18 +173,20 @@ export function renderReview(): ReviewHandle {
       if (!result.ok) {
         assets.append(h('p', { class: 'empty' }, 'Available once the errors above are fixed.'));
       } else if (result.assets.length === 0) {
-        assets.append(h('p', { class: 'empty' }, 'None. Turn on Windows Update automation to get the update engine scripts.'));
+        assets.append(h('p', { class: 'empty' }, 'None. Turn on Windows Update automation or select applications to get the engine scripts.'));
       } else {
         assets.append(
           h(
             'p',
             { class: 'desc' },
-            'Already embedded in the answer file and installed automatically. Download them to inspect, or to run the engine by hand on an installed PC (see the README).',
+            'The engine scripts and their configuration are already embedded in the answer file and installed automatically. Download them to inspect, to run an engine by hand on an installed PC (see each README), or for the future deployment bundle.',
           ),
+          ...(Object.keys(GROUP_TITLES) as DeploymentAsset['group'][]).filter((g) => result.assets.some((a) => a.group === g)).flatMap((g) => [
+          h('h4', { class: 'asset-group' }, GROUP_TITLES[g]),
           h(
             'ul',
-            { class: 'asset-list' },
-            result.assets.map((a) =>
+            { class: 'asset-list', 'data-asset-group': g },
+            result.assets.filter((a) => a.group === g).map((a) =>
               h(
                 'li',
                 { 'data-asset': a.name },
@@ -176,6 +196,7 @@ export function renderReview(): ReviewHandle {
               ),
             ),
           ),
+          ]),
         );
       }
 

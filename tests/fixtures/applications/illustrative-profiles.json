@@ -1,0 +1,45 @@
+{
+  "format": "windows-deployment-builder/app-profiles",
+  "formatVersion": 1,
+  "exportedUtc": "2026-10-19T12:00:00.000Z",
+  "profiles": [
+    {
+      "id": "fixture-everyday",
+      "name": "Fixture: Everyday (illustrative)",
+      "category": "everyday",
+      "description": "TEST FIXTURE ONLY. Illustrates a populated profile; it is not an owner default or a recommendation.",
+      "builtin": false,
+      "inherits": [],
+      "packages": [
+        { "packageIdentifier": "Mozilla.Firefox", "source": "winget", "displayName": "Mozilla Firefox", "version": "", "scope": "" },
+        { "packageIdentifier": "VideoLAN.VLC", "source": "winget", "displayName": "VLC media player", "version": "", "scope": "" },
+        { "packageIdentifier": "7zip.7zip", "source": "winget", "displayName": "7-Zip", "version": "", "scope": "" }
+      ]
+    },
+    {
+      "id": "fixture-gaming",
+      "name": "Fixture: Gaming (illustrative)",
+      "category": "gaming",
+      "description": "TEST FIXTURE ONLY.",
+      "builtin": false,
+      "inherits": [],
+      "packages": [
+        { "packageIdentifier": "Valve.Steam", "source": "winget", "displayName": "Steam", "version": "", "scope": "" },
+        { "packageIdentifier": "Playnite.Playnite", "source": "winget", "displayName": "Playnite", "version": "", "scope": "" },
+        { "packageIdentifier": "7ZIP.7ZIP", "source": "winget", "displayName": "7-Zip (duplicate, different case)", "version": "", "scope": "" }
+      ]
+    },
+    {
+      "id": "fixture-laptop-touch",
+      "name": "Fixture: Laptop + touch (illustrative)",
+      "category": "touch",
+      "description": "TEST FIXTURE ONLY. Inherits the everyday fixture.",
+      "builtin": false,
+      "inherits": ["fixture-everyday"],
+      "packages": [
+        { "packageIdentifier": "Xournal++.Xournal++", "source": "winget", "displayName": "Xournal++", "version": "", "scope": "" },
+        { "packageIdentifier": "9MSPC6MP8FM4", "source": "msstore", "displayName": "Microsoft Whiteboard", "version": "", "scope": "" }
+      ]
+    }
+  ]
+}

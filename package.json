@@ -2,7 +2,7 @@
   "name": "windows-deployment-builder",
   "version": "0.1.0",
   "private": true,
-  "description": "Local TypeScript generator for Windows 11 Pro autounattend.xml (Milestone 1)",
+  "description": "Local TypeScript generator for Windows 11 Pro autounattend.xml with Windows Update and WinGet provisioning engines",
   "type": "module",
   "license": "MIT",
   "scripts": {
@@ -15,7 +15,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
-    "test:ps": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/powershell/Engine.Tests.ps1",
+    "test:ps": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/powershell/Engine.Tests.ps1 && powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/powershell/Applications.Tests.ps1",
     "generate:sample": "vite-node scripts/generate-sample.ts",
     "docs:settings": "vite-node scripts/generate-settings-doc.ts",
     "check": "npm run typecheck && npm run lint && npm test"

@@ -1,4 +1,4 @@
-# Windows Deployment Builder (Milestone 1 + Phase 2 Windows Update automation)
+# Windows Deployment Builder (Milestone 1 + Phase 2 Windows Update + Phase 3 WinGet provisioning)
 
 A local, offline, browser-based generator for **Windows 11 Pro `autounattend.xml`** answer files,
 written entirely in TypeScript. It is built on the option model and XML patterns of
@@ -16,7 +16,8 @@ behind an **Advanced** view.
 npm install
 npm run dev        # http://localhost:5173
 npm run build      # typecheck + production build in dist/
-npm test           # unit and snapshot tests
+npm test           # unit and snapshot tests (on Windows also the PowerShell engine scenarios)
+npm run test:ps    # only the PowerShell engine scenarios (simulated; installs nothing)
 npx playwright install chromium && npm run test:e2e   # browser smoke tests
 npm run lint
 ```
@@ -72,6 +73,17 @@ saved automatically.
   `CompletedWithFailures`, `Failed` or `Offline`. It is built only on documented Windows APIs. The
   scripts are also offered as separate downloads under **Review & download → Deployment assets**.
   ⚠️ **Not yet validated in a VM.**
+- **Application provisioning (Phase 3), on but empty.** Six profiles (Everyday Essentials, Gaming,
+  Developer / Power User, Laptop, Touchscreen / 2-in-1, Custom) start **empty**, and nothing is
+  selected, so nothing is generated until you choose applications.
+  - **Choosing applications:** combine profiles, add from a catalog of 48 apps whose WinGet
+    identifiers were checked on 2026-10-19, or import a native `winget export` file.
+  - **What happens on the PC:** after Windows Update has finished, a task running as the signed-in
+    user (elevated) checks WinGet, installs each package once with its exact identifier and source,
+    restarts when a package needs it, and records a result for every package.
+  - **Additional Software:** records installers that WinGet does not cover, as a manual follow-up.
+    Nothing is downloaded.
+  - ⚠️ **Not yet validated in a VM.**
 
 The full per-setting mapping is in [docs/settings-mapping.md](docs/settings-mapping.md) (generated
 from code).
@@ -88,9 +100,15 @@ from code).
 - [docs/samples/autounattend.sample.xml](docs/samples/autounattend.sample.xml): owner defaults with the name "Alex" (`npm run generate:sample`), and the update engine assets in [docs/samples/windows-update/](docs/samples/windows-update/)
 - [docs/phase-2/review.md](docs/phase-2/review.md): Windows Update engine licensing and architecture review
 - [docs/phase-2/implementation-report.md](docs/phase-2/implementation-report.md): what Phase 2 built, tested and left unverified
+- [docs/phase-3/implementation-report.md](docs/phase-3/implementation-report.md): Phase 3 (WinGet) built, tested, limitations, next steps
+- [docs/phase-3/orchestration.md](docs/phase-3/orchestration.md): stages, Windows Update / WinGet coordination, results, Phase 4 driver interface
+- [docs/phase-3/profile-format.md](docs/phase-3/profile-format.md): builder profile JSON vs Microsoft's WinGet JSON
+- [docs/phase-3/testing.md](docs/phase-3/testing.md): Phase 3 test coverage, read-only real-Windows checks and the VM checklist
 
 ## Not yet implemented
 
-WinGet packages (Phase 3), application installation, the ZIP bundle and `setup.ps1` orchestrator, ISO/boot
-media editing, unattended disk formatting, and background deployment. The profile records
-`deferred.installPowerShell7` and an empty `deferred.wingetPackages` as extension points only.
+Manufacturer driver installation (Phase 4; the interface is defined in
+`src/engine/drivers/contract.ts`), the ZIP bundle and `setup.ps1` orchestrator, automatic
+execution of Additional Software installers, ISO/boot media editing, unattended disk formatting,
+and background deployment. The profile records `deferred.installPowerShell7` as an extension point
+only. To install PowerShell 7, select "PowerShell 7" under Application provisioning.

@@ -642,6 +642,12 @@ $scripts = @(
 
     On Succeeded and CompletedWithFailures the marker &lt;dataRoot&gt;\\state\\windows-update.done is
     written for the deployment orchestrator. The scheduled task is removed on every final state.
+
+    Coordination (1.1.0, Phase 3): updates are installed and restarts are scheduled only while
+    holding the machine-wide install lock shared with the application engine, so Windows Update
+    never restarts the computer during an application installation. When the lock stays busy the
+    engine exits with WaitingForLock or RebootDeferred (not final) and tries again at the next
+    start or hourly trigger. The final states above are unchanged.
 #&gt;
 [CmdletBinding()]
 param(
@@ -653,7 +659,7 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-$script:EngineVersion = '1.0.0'
+$script:EngineVersion = '1.1.0'
 $script:UpgradeCategoryId = '3689bdc8-b205-4af4-8d4b-a63924c5e9d5'   # WUA category "Upgrades"
 $script:MicrosoftUpdateServiceId = '7971f918-a847-4430-9279-4a52d1efe18d'
 $script:EventSource = 'WindowsDeploymentBuilder'
@@ -742,6 +748,7 @@ function Get-WduConfig {
         resetComponentsOnce  = $true
         rebootWarningSeconds = 60
         initialDelaySeconds  = 60
+        lockWaitMinutes      = 60
         excludedKbs          = @()
     }
     foreach ($k in @($defaults.Keys)) { if (-not $raw.ContainsKey($k)) { $raw[$k] = $defaults[$k] } }
@@ -1036,6 +1043,92 @@ function Unregister-WduTask {
 }
 
 # ------------------------------------------------------------------------------------------------
+# Coordination with the application engine
+# ------------------------------------------------------------------------------------------------
+
+# region WDB coordination
+# Shared by WindowsUpdateEngine.ps1 and ApplicationEngine.ps1; both copies must stay identical
+# (tests/unit/applications-engine.test.ts checks this).
+#
+# install.lock         Machine-wide installation lock: a file opened exclusively. Windows releases
+#                      it when the owning process ends, so a crash can never leave a stale lock.
+#                      Whoever installs something or restarts the computer holds it.
+# restart-pending.json Written just before an engine schedules a restart. Valid only in the boot
+#                      it was written in (and for 30 minutes), so it disappears with the restart.
+
+function Get-WdbBootTime {
+    try { return (Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ') }
+    catch { return 'unknown' }
+}
+
+function Wait-WdbLockPoll { Start-Sleep -Seconds 5 }
+
+function Get-WdbCoordinationPaths {
+    param([string] $DataRoot)
+    $dir = Join-Path $DataRoot 'state'
+    @{ Dir = $dir; Lock = (Join-Path $dir 'install.lock'); Restart = (Join-Path $dir 'restart-pending.json') }
+}
+
+function Enter-WdbInstallLock {
+    param([string] $DataRoot, [string] $Owner, [int] $TimeoutSeconds = 0)
+    $p = Get-WdbCoordinationPaths $DataRoot
+    if (-not (Test-Path -LiteralPath $p.Dir)) { New-Item -ItemType Directory -Path $p.Dir -Force | Out-Null }
+    $polls = [int] [Math]::Ceiling([Math]::Max(0, $TimeoutSeconds) / 5)
+    for ($i = 0; ; $i++) {
+        try {
+            $fs = [System.IO.File]::Open($p.Lock, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::Read)
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes(('{{"owner":"{0}","pid":{1},"sinceUtc":"{2}"}}' -f $Owner, $PID, [DateTime]::UtcNow.ToString('o')))
+            $fs.SetLength(0)
+            $fs.Write($bytes, 0, $bytes.Length)
+            $fs.Flush()
+            return $fs
+        } catch [System.IO.IOException] {
+            if ($i -ge $polls) { return $null }
+            Wait-WdbLockPoll
+        }
+    }
+}
+
+function Exit-WdbInstallLock {
+    param($Lock)
+    if ($Lock) { try { $Lock.Dispose() } catch { } }
+}
+
+function Get-WdbInstallLockOwner {
+    param([string] $DataRoot)
+    $p = Get-WdbCoordinationPaths $DataRoot
+    try {
+        $fs = [System.IO.File]::Open($p.Lock, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        try { return (New-Object System.IO.StreamReader($fs)).ReadToEnd() } finally { $fs.Dispose() }
+    } catch { return '' }
+}
+
+function Set-WdbRestartPending {
+    param([string] $DataRoot, [string] $Owner, [string] $Reason)
+    $p = Get-WdbCoordinationPaths $DataRoot
+    if (-not (Test-Path -LiteralPath $p.Dir)) { New-Item -ItemType Directory -Path $p.Dir -Force | Out-Null }
+    $o = [ordered]@{ owner = $Owner; reason = $Reason; requestedUtc = [DateTime]::UtcNow.ToString('o'); bootTimeUtc = (Get-WdbBootTime) }
+    [System.IO.File]::WriteAllText($p.Restart, ($o | ConvertTo-Json), (New-Object System.Text.UTF8Encoding($false)))
+}
+
+function Test-WdbRestartPending {
+    param([string] $DataRoot)
+    $p = Get-WdbCoordinationPaths $DataRoot
+    if (-not (Test-Path -LiteralPath $p.Restart)) { return $false }
+    $m = $null
+    try { $m = Get-Content -LiteralPath $p.Restart -Raw | ConvertFrom-Json } catch { }
+    if ($m -and ([string] $m.bootTimeUtc) -eq (Get-WdbBootTime)) {
+        $age = [DateTime]::UtcNow - [DateTime]::Parse([string] $m.requestedUtc, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()
+        if ($age.TotalMinutes -lt 30) { return $true }
+    }
+    # Written before the last restart, unreadable or abandoned: the restart is no longer pending.
+    Remove-Item -LiteralPath $p.Restart -Force -ErrorAction SilentlyContinue
+    return $false
+}
+
+# endregion WDB coordination
+
+# ------------------------------------------------------------------------------------------------
 # Single instance
 # ------------------------------------------------------------------------------------------------
 
@@ -1136,12 +1229,26 @@ function Request-WduReboot {
     if ([int] $State.reboots -ge [int] $Config.maxReboots) {
         return Complete-Wdu $Config $Paths $State 'Failed' "Reboot limit ($($Config.maxReboots)) reached while a restart is still required ($Reason)." $Plan
     }
-    $State.reboots = [int] $State.reboots + 1
-    Save-WduState $State $Paths
-    Write-WduLog "Restart $($State.reboots)/$($Config.maxReboots): $Reason. Resuming after boot."
-    Set-WduStatus 'Rebooting' $Reason $State
-    Write-WduEvent 1001 "Restarting to continue Windows Update ($Reason)."
-    Invoke-WduReboot -WarningSeconds ([int] $Config.rebootWarningSeconds) -Reason $Reason
+    # Never restart while an application is being installed.
+    $lock = Enter-WdbInstallLock $Config.dataRoot 'WindowsUpdate' ([int] $Config.lockWaitMinutes * 60)
+    if (-not $lock) {
+        Write-WduLog "Restart deferred ($Reason): another installation holds the install lock. Trying again at the next start." 'WARN'
+        Set-WduStatus 'RebootDeferred' $Reason $State
+        return 'RebootDeferred'
+    }
+    try {
+        $State.reboots = [int] $State.reboots + 1
+        Save-WduState $State $Paths
+        Write-WduLog "Restart $($State.reboots)/$($Config.maxReboots): $Reason. Resuming after boot."
+        Set-WduStatus 'Rebooting' $Reason $State
+        Write-WduEvent 1001 "Restarting to continue Windows Update ($Reason)."
+        Set-WdbRestartPending $Config.dataRoot 'WindowsUpdate' $Reason
+        Invoke-WduReboot -WarningSeconds ([int] $Config.rebootWarningSeconds) -Reason $Reason
+        # Hold the lock through the warning period so nothing starts installing before the restart.
+        Wait-Wdu ([int] $Config.rebootWarningSeconds + 120)
+    } finally {
+        Exit-WdbInstallLock $lock
+    }
     return 'Rebooting'
 }
 
@@ -1255,6 +1362,14 @@ function Invoke-WduRun {
         }
         $emptyScans = 0
 
+        # Coordination: no update installation while an application is being installed.
+        $lock = Enter-WdbInstallLock $Config.dataRoot 'WindowsUpdate' ([int] $Config.lockWaitMinutes * 60)
+        if (-not $lock) {
+            Write-WduLog 'Another installation holds the install lock; trying again at the next start.' 'WARN'
+            Set-WduStatus 'WaitingForLock' '' $State
+            return 'WaitingForLock'
+        }
+        try {
         # Count the attempt before acting, so a crash or hang mid-install still counts.
         foreach ($u in $plan.Install) {
             $a = $State.attempts[$u.Id]
@@ -1295,6 +1410,9 @@ function Invoke-WduRun {
             }
         }
         Save-WduState $State $Paths
+        } finally {
+            Exit-WdbInstallLock $lock
+        }
 
         # An update about to be given up gets one more chance after a component reset.
         $exhausted = @($plan.Install | Where-Object {
@@ -1494,7 +1612,7 @@ exit 1
 		<File path="C:\\Windows\\Setup\\Scripts\\WindowsUpdate\\config.json">
 {
   "schemaVersion": 1,
-  "engineVersion": "1.0.0",
+  "engineVersion": "1.1.0",
   "dataRoot": "C:\\\\ProgramData\\\\WindowsDeploymentBuilder",
   "taskPath": "\\\\WindowsDeploymentBuilder\\\\",
   "taskName": "WindowsUpdate",
@@ -1509,6 +1627,7 @@ exit 1
   "confirmationScans": 1,
   "resetComponentsOnce": true,
   "rebootWarningSeconds": 60,
+  "lockWaitMinutes": 60,
   "excludedKbs": []
 }
 		</File>

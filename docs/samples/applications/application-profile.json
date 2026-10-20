@@ -1,0 +1,51 @@
+{
+  "format": "windows-deployment-builder/app-profiles",
+  "formatVersion": 1,
+  "profiles": [
+    {
+      "id": "deployment-selection",
+      "name": "Illustrative sample (not an owner default): application selection",
+      "category": "custom",
+      "description": "Combined selection exported with this deployment (no profiles + individual changes).",
+      "builtin": false,
+      "inherits": [],
+      "packages": [
+        {
+          "packageIdentifier": "Git.Git",
+          "source": "winget",
+          "displayName": "Git",
+          "version": "",
+          "scope": ""
+        },
+        {
+          "packageIdentifier": "7zip.7zip",
+          "source": "winget",
+          "displayName": "7-Zip",
+          "version": "",
+          "scope": ""
+        },
+        {
+          "packageIdentifier": "Microsoft.WSL",
+          "source": "winget",
+          "displayName": "Windows Subsystem for Linux",
+          "version": "",
+          "scope": ""
+        },
+        {
+          "packageIdentifier": "Docker.DockerDesktop",
+          "source": "winget",
+          "displayName": "Docker Desktop",
+          "version": "",
+          "scope": ""
+        },
+        {
+          "packageIdentifier": "9MSPC6MP8FM4",
+          "source": "msstore",
+          "displayName": "Microsoft Whiteboard",
+          "version": "",
+          "scope": ""
+        }
+      ]
+    }
+  ]
+}

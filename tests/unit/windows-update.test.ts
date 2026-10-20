@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { generate } from '../../src/engine/pipeline';
 import { importProfile } from '../../src/engine/profiles';
+import { SCHEMA_VERSION } from '../../src/engine/schema/profile';
 import {
   COMPLETION_MARKER,
   ENGINE_VERSION,
@@ -32,7 +33,7 @@ describe('Milestone 1 output is preserved', () => {
     (v1.accounts as Record<string, unknown>).personName = 'Alex';
     const imported = importProfile(JSON.stringify(v1));
     expect(imported.errors).toEqual([]);
-    expect(imported.profile!.schemaVersion).toBe(2);
+    expect(imported.profile!.schemaVersion).toBe(SCHEMA_VERSION);
     expect(imported.profile!.windowsUpdate.enabled).toBe(false);
     expect(imported.warnings.join(' ')).toMatch(/Windows Update automation .* turned off/);
     expect(generate(imported.profile).xml).toBe(M1_XML);
@@ -116,6 +117,7 @@ describe('engine configuration', () => {
       confirmationScans: 1,
       resetComponentsOnce: true,
       rebootWarningSeconds: 60,
+      lockWaitMinutes: 60,
       excludedKbs: [],
     });
   });
@@ -139,7 +141,8 @@ describe('engine configuration', () => {
       expect(nonAscii, a.name).toEqual([]);
     }
     expect(assets[3]!.content).toContain(COMPLETION_MARKER);
-    expect(generateOk(profile()).assets.map((a) => a.name)).toEqual(assets.map((a) => a.name));
+    // The pipeline adds the orchestration contract next to the engine files (Phase 3).
+    expect(generateOk(profile()).assets.map((a) => a.name)).toEqual([...assets.map((a) => a.name), 'orchestration.json']);
   });
 
   it('keeps the TypeScript and PowerShell engine versions in step', () => {

@@ -9,6 +9,8 @@ import { XmlCharacterError, serialize } from './xml/serialize';
 import { NS, clone, elements, getAttr, setAttr, walk, type XElement } from './xml/tree';
 import * as f from '../features';
 import { updateEngineAssets, type DeploymentAsset } from './windows-update';
+import { applicationAssets } from './applications';
+import { orchestrationContract } from './orchestration';
 
 export interface GenerateResult {
   ok: boolean;
@@ -18,7 +20,7 @@ export interface GenerateResult {
   fileName: string;
   /** Files embedded for extraction during specialize (for review/debugging). */
   embeddedFiles: { path: string; content: string }[];
-  /** Separately downloadable deployment files (Windows Update engine); present only when ok. */
+  /** Separately downloadable deployment files (update and application engines); present only when ok. */
   assets: DeploymentAsset[];
 }
 
@@ -130,11 +132,28 @@ function build(profile: Profile): GenContext {
   f.scripts.modify(ctx);
   emitSequences(ctx);
   f.windowsUpdate.modify(ctx);
+  f.applications.modify(ctx);
 
   const userComponents = f.advancedXml.modify(ctx);
   numberCommands(ctx.root, userComponents);
   fanOutArchitectures(ctx.root, profile.setup.processorArchitectures);
   return ctx;
+}
+
+/** Engine assets plus, when any engine is active, the orchestration contract. */
+export function deploymentAssets(profile: Profile): DeploymentAsset[] {
+  const assets = [...updateEngineAssets(profile), ...applicationAssets(profile)];
+  if (assets.length === 0) return assets;
+  return [
+    ...assets,
+    {
+      name: 'orchestration.json',
+      content: (JSON.stringify(orchestrationContract(profile), null, 2) + '\n').replace(/\r?\n/g, '\r\n'),
+      mime: 'application/json',
+      description: 'Stages, order, coordination locks and result files for the deployment orchestrator',
+      group: 'orchestration',
+    },
+  ];
 }
 
 /**
@@ -160,7 +179,7 @@ export function generate(input: unknown): GenerateResult {
   if (hasErrors(all)) return { ok: false, issues: all, fileName, embeddedFiles: [], assets: [] };
 
   try {
-    return { ok: true, issues: all, xml: serialize(ctx.root), fileName, embeddedFiles: ctx.files, assets: updateEngineAssets(profile) };
+    return { ok: true, issues: all, xml: serialize(ctx.root), fileName, embeddedFiles: ctx.files, assets: deploymentAssets(profile) };
   } catch (e) {
     if (e instanceof XmlCharacterError) {
       return { ok: false, issues: [...all, { severity: 'error', path: '', message: e.message }], fileName, embeddedFiles: [], assets: [] };

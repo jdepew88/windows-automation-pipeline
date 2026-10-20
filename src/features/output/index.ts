@@ -27,24 +27,11 @@ export const deferredSettings: SettingDef[] = [
     label: 'Install PowerShell 7 (planned)',
     control: 'checkbox',
     description:
-      'Recorded for a later milestone only. An XML-only answer file cannot install PowerShell 7 without staged installers or network downloads, so M1 generates nothing for this.',
-    applicability: 'Later milestone (WinGet / staged installers)',
+      'Recorded only; nothing is generated for this switch. To install PowerShell 7, add "PowerShell 7" (Microsoft.PowerShell) under Application provisioning.',
+    applicability: 'Recorded for the deployment bundle milestone',
     stages: ['deferred'],
-    mapping: 'None in M1 (recorded in profile JSON)',
+    mapping: 'None (recorded in profile JSON)',
     advanced: false,
-    verification: 'documented',
-  },
-  {
-    path: 'deferred.wingetPackages',
-    section: 'deferred',
-    label: 'WinGet packages (planned)',
-    control: 'custom',
-    description:
-      'Empty by default. Lists from imported profiles live in memory for this session only and are never saved automatically. M1 does not install, search for or validate packages.',
-    applicability: 'Later milestone',
-    stages: ['deferred'],
-    mapping: 'None in M1',
-    advanced: true,
     verification: 'documented',
   },
 ];

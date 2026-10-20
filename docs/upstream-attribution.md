@@ -70,3 +70,20 @@ original.
 - Deliberately different: no Deep Freeze support; feature updates detected by category instead of
   title text; per-update attempt tracking instead of whole-set fingerprints; explicit reboot,
   runtime and error limits; explicit final states and a completion marker.
+
+## WinGet (Phase 3): formats and documented procedures, no code
+
+- **Package list format:** `packages.schema.2.0.json` from
+  [microsoft/winget-cli](https://github.com/microsoft/winget-cli) (MIT). The schema is implemented
+  as validation rules in `src/engine/applications/winget-json.ts`; the schema file is not copied.
+- **Exit codes:** HRESULT values and symbol names from winget-cli's
+  `src/AppInstallerSharedLib/Public/AppInstallerErrors.h` (MIT), used as constants for mapping
+  (`results.ts`, `ApplicationEngine.ps1`).
+- **Bootstrap steps:** Microsoft Learn, "Use WinGet to install and manage applications"
+  (`Add-AppxPackage -RegisterByFamilyName …`, `Repair-WinGetPackageManager` from
+  `Microsoft.WinGet.Client`). The procedure is followed; no code is copied.
+- **Source details** (`winget`, `msstore`): the values printed by `winget source export`
+  (winget 1.29.250).
+- **Catalog identifiers:** checked with `winget show` against the public winget and msstore
+  sources on 2026-10-19. Only identifiers and public metadata (name, publisher, homepage, licence
+  name) are recorded; no manifests are copied.

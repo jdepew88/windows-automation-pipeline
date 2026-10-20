@@ -7,7 +7,7 @@
 | `npm run typecheck` | `tsc --noEmit`, strict mode |
 | `npm run lint` | ESLint + typescript-eslint |
 | `npm test` | Vitest unit/snapshot tests (`tests/unit`). On Windows this also parses every generated `.ps1` with the PowerShell parser and runs `tests/powershell/Engine.Tests.ps1` |
-| `npm run test:ps` | Only the Windows Update engine scenarios (Windows PowerShell 5.1, simulated Windows Update Agent; nothing is installed) |
+| `npm run test:ps` | Only the engine scenarios: `Engine.Tests.ps1` (Windows Update, simulated Windows Update Agent) and `Applications.Tests.ps1` (application engine and WinGet bootstrap, simulated WinGet). Windows PowerShell 5.1; nothing is installed |
 | `npm run test:e2e` | Playwright smoke tests on desktop and mobile Chromium (`tests/e2e`). Builds and serves on port 5179. First run `npx playwright install chromium`. Set `E2E_BASE_URL=<url>` to run against a deployed site instead |
 | `npm run check` | typecheck + lint + unit tests |
 
@@ -36,6 +36,10 @@ Unit test coverage by acceptance criterion:
   - scan failures, unexpected errors → `Failed`, a crash counted as an attempt;
   - busy installer, already finished, pending restart, corrupt state;
   - single instance (mutex across processes), log content, config defaults.
+
+- **Phase 3 (WinGet provisioning)**: see [phase-3/testing.md](phase-3/testing.md) for the coverage
+  table, the read-only checks done on real Windows, and the VM checklist (section D below points
+  there).
 
 ## Not automated: must be done on Windows (status: UNVERIFIED)
 
@@ -127,3 +131,8 @@ Run in the same disposable VM as B, using an ISO that is a few months old so upd
    - [ ] `maxReboots` = 1 on an old ISO: ends `Failed` with "Reboot limit (1) reached".
    - [ ] Network connected only after the first hour: the engine resumes at the hourly trigger.
 4. Record the results and the ISO build in `docs/validation-log.md`.
+
+### D. Application provisioning (Phase 3; status: UNVERIFIED)
+
+Follow the checklist in [phase-3/testing.md](phase-3/testing.md) ("Not tested: needs a disposable
+VM") in the same VM, with a small selection of applications.

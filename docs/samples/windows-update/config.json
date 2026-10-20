@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "engineVersion": "1.0.0",
+  "engineVersion": "1.1.0",
   "dataRoot": "C:\\ProgramData\\WindowsDeploymentBuilder",
   "taskPath": "\\WindowsDeploymentBuilder\\",
   "taskName": "WindowsUpdate",
@@ -15,5 +15,6 @@
   "confirmationScans": 1,
   "resetComponentsOnce": true,
   "rebootWarningSeconds": 60,
+  "lockWaitMinutes": 60,
   "excludedKbs": []
 }

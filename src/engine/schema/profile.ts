@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { AdditionalSoftwareSchema, ApplicationsSchema } from './applications';
 
 /**
  * The typed deployment profile. One flat object per section; "mode" fields choose between
@@ -7,7 +8,7 @@ import { z } from 'zod';
  *
  * Bump {@link SCHEMA_VERSION} and add a migration in `migrations.ts` for any breaking change.
  */
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 export const ScriptTypeSchema = z.enum(['ps1', 'cmd', 'reg', 'vbs']);
 export type ScriptType = z.infer<typeof ScriptTypeSchema>;
@@ -157,6 +158,12 @@ export const ProfileSchema = z
       })
       .strict(),
 
+    /** Phase 3: WinGet application provisioning (runs as the signed-in user after Windows Update). */
+    applications: ApplicationsSchema,
+
+    /** Phase 3: installers that WinGet does not cover (data model; manual follow-up by default). */
+    additionalSoftware: AdditionalSoftwareSchema,
+
     system: z
       .object({
         disableFastStartup: bool,
@@ -272,12 +279,12 @@ export const ProfileSchema = z
       .strict(),
 
     /**
-     * Extension points for later milestones. Recorded and round-tripped, never executed by M1.
+     * Extension points for later milestones. Recorded and round-tripped, never executed.
+     * (v3 moved the former `wingetPackages` list into `applications`; see migrations.ts.)
      */
     deferred: z
       .object({
         installPowerShell7: bool,
-        wingetPackages: z.array(z.string().max(200)),
       })
       .strict(),
   })

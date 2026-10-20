@@ -35,7 +35,7 @@ function Reset-Sim {
         Now = [DateTime]::new(2026, 10, 19, 12, 0, 0, [DateTimeKind]::Utc)
         Updates = @($Updates); Boots = 0; Online = $Online; OnlineAfterBoot = $OnlineAfterBoot
         RebootPending = $false; RebootRequested = $false; Resets = 0; Events = @(); TaskRemoved = $false
-        ScanThrows = 0; InstallThrows = $false; UnexpectedThrows = $false; Busy = 0
+        ScanThrows = 0; InstallThrows = $false; UnexpectedThrows = $false; Busy = 0; LockPolls = 0
     }
 }
 
@@ -48,6 +48,8 @@ function Write-WduEvent { param([int] $EventId, [string] $Message, [string] $Ent
 function Unregister-WduTask { param([hashtable] $Config) $script:Sim.TaskRemoved = $true }
 function Reset-WduComponents { $script:Sim.Resets++ }
 function Invoke-WduReboot { param([int] $WarningSeconds, [string] $Reason) $script:Sim.RebootRequested = $true }
+function Wait-WdbLockPoll { $script:Sim.LockPolls++ }
+function Get-WdbBootTime { "boot-$($script:Sim.Boots)" }
 
 function Get-WduAvailableUpdates {
     param([hashtable] $Config)
@@ -90,7 +92,7 @@ function New-TestConfig {
         drivers = 'exclude'; featureUpdates = 'skip'; optionalUpdates = 'skip'; microsoftUpdate = $false
         maxReboots = 10; maxAttemptsPerUpdate = 2; maxRuntimeHours = 6; maxErrors = 5; networkWaitMinutes = 15
         confirmationScans = 1; confirmationDelaySeconds = 60; resetComponentsOnce = $true; rebootWarningSeconds = 60
-        initialDelaySeconds = 60; excludedKbs = @()
+        initialDelaySeconds = 60; excludedKbs = @(); lockWaitMinutes = 1
     }
     foreach ($k in $Overrides.Keys) { $c[$k] = $Overrides[$k] }
     $c
@@ -341,12 +343,67 @@ $tests['log records progress and failures'] = {
     }
 }
 
+$tests['coordination: no update installation while the application engine holds the install lock'] = {
+    Reset-Sim @((New-SimUpdate KB9000001 'ok'))
+    $c = New-TestConfig
+    $held = Enter-WdbInstallLock $c.dataRoot 'Applications' 0
+    try {
+        Assert-Equal (Invoke-WduMain $c) 'WaitingForLock' 'waits instead of installing'
+        Assert-Equal $script:Sim.Updates[0].InstallCalls 0 'nothing installed while locked'
+        Assert-True ($script:Sim.LockPolls -ge 12) 'polled for the configured wait'
+        $s = Get-Content -LiteralPath (Join-Path $c.dataRoot 'Updates\state.json') -Raw | ConvertFrom-Json
+        Assert-True ($null -eq $s.final) 'not final'
+        Assert-Equal (@($s.attempts.PSObject.Properties).Count) 0 'no attempt counted'
+    } finally { Exit-WdbInstallLock $held }
+    Assert-Equal (Invoke-WduMain $c) 'Finished:Succeeded' 'installs once the lock is free'
+}
+
+$tests['coordination: restart deferred while an application installs, then taken'] = {
+    Reset-Sim @((New-SimUpdate KB9100001 'ok-reboot'))
+    $c = New-TestConfig
+    $script:HeldLock = $null
+    # The application engine grabs the lock right after the update installed (between install and restart).
+    # Functions defined inside a test block shadow the simulation only for that block.
+    function Invoke-WduInstall {
+        param([object[]] $Updates)
+        $u = $Updates[0]; $u.InstallCalls++; $u.Installed = $true; $script:Sim.RebootPending = $true
+        @{ RebootRequired = $true; Results = @{ $u.Id = @{ Result = 'Succeeded'; HResult = 0 } } }
+    }
+    function Exit-WdbInstallLock { param($Lock) if ($Lock) { $Lock.Dispose() }; if (-not $script:HeldLock) { $script:HeldLock = Enter-WdbInstallLock $c.dataRoot 'Applications' 0 } }
+    try {
+        Assert-Equal (Invoke-WduMain $c) 'RebootDeferred' 'restart deferred'
+        Assert-True (-not $script:Sim.RebootRequested) 'no restart requested while locked'
+        $s = Get-Content -LiteralPath (Join-Path $c.dataRoot 'Updates\state.json') -Raw | ConvertFrom-Json
+        Assert-Equal $s.reboots 0 'deferred restart is not counted'
+    } finally { if ($script:HeldLock) { $script:HeldLock.Dispose() } }
+}
+
+$tests['coordination: restart marker written and lock held through the warning'] = {
+    Reset-Sim @((New-SimUpdate KB9200001 'ok-reboot'))
+    $c = New-TestConfig
+    $script:SeenDuringReboot = $null
+    function Invoke-WduReboot { param([int] $WarningSeconds, [string] $Reason)
+        $script:Sim.RebootRequested = $true
+        $other = Enter-WdbInstallLock $c.dataRoot 'Applications' 0
+        $script:SeenDuringReboot = @{ LockFree = [bool] $other; Marker = (Test-WdbRestartPending $c.dataRoot) }
+        Exit-WdbInstallLock $other
+    }
+    try {
+        Assert-Equal (Invoke-WduMain $c) 'Rebooting' 'restarts'
+        Assert-True (-not $script:SeenDuringReboot.LockFree) 'lock held while the restart is pending'
+        Assert-True $script:SeenDuringReboot.Marker 'restart marker visible to the other engine'
+        $script:Sim.Boots++
+        Assert-True (-not (Test-WdbRestartPending $c.dataRoot)) 'marker is stale after the restart'
+    } finally { $script:SeenDuringReboot = $null }
+}
+
 $tests['Get-WduConfig fills defaults and normalises KB numbers'] = {
     $p = Join-Path ([IO.Path]::GetTempPath()) ("wdu-cfg-" + [Guid]::NewGuid().ToString('N') + '.json')
     Set-Content -LiteralPath $p -Value '{ "maxReboots": 4, "excludedKbs": ["kb5000001"] }'
     $cfg = Get-WduConfig $p
     Assert-Equal $cfg.maxReboots 4 'explicit value'
     Assert-Equal $cfg.maxAttemptsPerUpdate 2 'default value'
+    Assert-Equal $cfg.lockWaitMinutes 60 'coordination default for configs written before 1.1.0'
     Assert-Equal ($cfg.excludedKbs -join ',') 'KB5000001' 'normalised KB'
     Remove-Item -LiteralPath $p
 }

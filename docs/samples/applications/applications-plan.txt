@@ -1,0 +1,31 @@
+Windows Deployment Builder - application installation plan (preview)
+=====================================================================
+Nothing has been installed. This is what ApplicationEngine.ps1 will do, in this order.
+
+Runs as:       the signed-in user, elevated (scheduled task \WindowsDeploymentBuilder\Applications)
+Coordination:  updates first - waits for the Windows Update stage to finish
+WinGet:        checked first; App Installer registration is attempted if needed
+Restarts:      when a package requires one (at most 3)
+Attempts:      2 per package, 30 min timeout each, 4 h in total
+
+For every package: "winget list" first (already installed = left unchanged), then:
+
+  1. Git  [winget: Git.Git]
+     winget install --id Git.Git --exact --source winget --silent --no-upgrade --accept-package-agreements --accept-source-agreements --disable-interactivity
+  2. 7-Zip  [winget: 7zip.7zip]
+     winget install --id 7zip.7zip --exact --source winget --silent --no-upgrade --accept-package-agreements --accept-source-agreements --disable-interactivity
+  3. Windows Subsystem for Linux  [winget: Microsoft.WSL]
+     may need a restart
+     winget install --id Microsoft.WSL --exact --source winget --silent --no-upgrade --accept-package-agreements --accept-source-agreements --disable-interactivity
+  4. Docker Desktop  [winget: Docker.DockerDesktop]
+     needs an account sign-in after installation; may need a restart; after winget:microsoft.wsl
+     winget install --id Docker.DockerDesktop --exact --source winget --silent --no-upgrade --accept-package-agreements --accept-source-agreements --disable-interactivity
+  5. Microsoft Whiteboard  [msstore: 9MSPC6MP8FM4]
+     needs an account sign-in after installation
+     winget install --id 9MSPC6MP8FM4 --exact --source msstore --silent --no-upgrade --accept-package-agreements --accept-source-agreements --disable-interactivity
+
+Additional Software (after WinGet):
+  (none)
+
+Results: C:\ProgramData\WindowsDeploymentBuilder\Applications\result.json
+Marker:  C:\ProgramData\WindowsDeploymentBuilder\state\applications.done (Succeeded, CompletedWithFollowUp, CompletedWithFailures)

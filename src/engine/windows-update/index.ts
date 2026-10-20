@@ -9,7 +9,7 @@ import type { Profile } from '../schema/profile';
  * profile can change goes into config.json, which both scripts read at run time.
  */
 
-export const ENGINE_VERSION = '1.0.0';
+export const ENGINE_VERSION = '1.1.0';
 export const DATA_ROOT = 'C:\\ProgramData\\WindowsDeploymentBuilder';
 /** Where the answer file extracts the assets during specialize (Administrators-only by default). */
 export const STAGING_DIR = 'C:\\Windows\\Setup\\Scripts\\WindowsUpdate';
@@ -50,6 +50,8 @@ export interface EngineConfig {
   confirmationScans: number;
   resetComponentsOnce: boolean;
   rebootWarningSeconds: number;
+  /** Phase 3 coordination: how long to wait for the shared install lock before trying later. */
+  lockWaitMinutes: number;
   excludedKbs: string[];
 }
 
@@ -58,6 +60,8 @@ export interface DeploymentAsset {
   content: string;
   mime: string;
   description: string;
+  /** Folder/group in the downloads panel and the future deployment ZIP. */
+  group: 'windows-update' | 'applications' | 'orchestration';
 }
 
 /** Splits a free-text KB list. Accepts "KB5034441", "5034441", commas, spaces or new lines. */
@@ -98,6 +102,7 @@ export function engineConfig(p: Profile): EngineConfig {
     confirmationScans: w.confirmationScans,
     resetComponentsOnce: w.resetComponentsOnce,
     rebootWarningSeconds: w.rebootWarningSeconds,
+    lockWaitMinutes: 60,
     excludedKbs: parseKbList(w.excludedKbs).kbs,
   };
 }
@@ -130,7 +135,9 @@ What happens
   Agent API, restarts when required (with a warning to signed-in users) and resumes after each
   restart, until nothing applicable remains. It stops at the configured limits instead of
   looping: maximum restarts, attempts per update, total runtime and unexpected errors. Updates
-  that keep failing are given up and reported.
+  that keep failing are given up and reported. Installing updates and scheduling a restart both
+  take the install lock (${DATA_ROOT}\\state\\install.lock) shared with the
+  application engine, so a restart never interrupts an application installation.
 
 Results
   Log:     ${DATA_ROOT}\\Updates\\logs\\engine.log
@@ -150,9 +157,9 @@ Status: not yet validated on a Windows installation in a VM. Test before relying
 export function updateEngineAssets(p: Profile): DeploymentAsset[] {
   if (!p.windowsUpdate.enabled) return [];
   return [
-    { name: ENGINE_FILE, content: crlf(engineSource), mime: 'text/plain', description: 'Update engine (runs as SYSTEM from the scheduled task)' },
-    { name: INSTALLER_FILE, content: crlf(installerSource), mime: 'text/plain', description: 'Installs the engine, registers the task and confirms it starts' },
-    { name: CONFIG_FILE, content: crlf(JSON.stringify(engineConfig(p), null, 2) + '\n'), mime: 'application/json', description: 'Policy and limits from this profile' },
-    { name: README_FILE, content: crlf(readme()), mime: 'text/plain', description: 'How to use the files and read the results' },
+    { name: ENGINE_FILE, content: crlf(engineSource), mime: 'text/plain', description: 'Update engine (runs as SYSTEM from the scheduled task)', group: 'windows-update' },
+    { name: INSTALLER_FILE, content: crlf(installerSource), mime: 'text/plain', description: 'Installs the engine, registers the task and confirms it starts', group: 'windows-update' },
+    { name: CONFIG_FILE, content: crlf(JSON.stringify(engineConfig(p), null, 2) + '\n'), mime: 'application/json', description: 'Policy and limits from this profile', group: 'windows-update' },
+    { name: README_FILE, content: crlf(readme()), mime: 'text/plain', description: 'How to use the files and read the results', group: 'windows-update' },
   ];
 }

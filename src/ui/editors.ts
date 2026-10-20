@@ -1,11 +1,10 @@
-import type { SettingDef } from '../engine/settings/types';
 import type { Architecture, BloatwareAction, ComponentEntry, Pass, Profile, Script, ScriptPhase, ScriptType } from '../engine/schema/profile';
 import { BLOATWARE, BLOATWARE_GROUP_LABELS, appliesToWindows11, type BloatwareGroup } from '../features/bloatware/catalog';
 import { PHASES } from '../features/scripts';
 import { COMPONENTS } from '../data';
 import { clear, h, uid } from './dom';
-import { choicesOf, customShell, type CustomRenderer, type FieldHandle } from './form';
-import type { Store } from './store';
+import { choicesOf, customShell, type CustomRenderer } from './form';
+import { additionalSoftwareEditor, applicationsEditor } from './applications';
 
 const newId = () => (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`).slice(0, 36);
 
@@ -229,29 +228,6 @@ const components: CustomRenderer = (def, store) => {
   return { el, sync: render };
 };
 
-const winget: CustomRenderer = (def: SettingDef, store: Store): FieldHandle => {
-  const body = h('div', {});
-  const el = customShell(def, body);
-  return {
-    el,
-    sync: (p) => {
-      clear(body);
-      const pk = p.deferred.wingetPackages;
-      body.append(
-        pk.length === 0
-          ? h('p', { class: 'empty' }, 'No packages (default). Package selection arrives in a later milestone.')
-          : h(
-              'div',
-              {},
-              h('p', {}, `${pk.length} package ID(s) from the imported profile, kept for this session only and not used by M1:`),
-              h('ul', { class: 'ids-list' }, pk.map((id) => h('li', {}, h('code', {}, id)))),
-              h('button', { type: 'button', class: 'btn', onclick: () => store.update((q) => (q.deferred.wingetPackages = []), true) }, 'Clear list'),
-            ),
-      );
-    },
-  };
-};
-
 export const CUSTOM_RENDERERS: Record<string, CustomRenderer> = {
   'setup.processorArchitectures': architectures,
   'desktop.icons': booleanMap((p) => p.desktop.icons),
@@ -262,5 +238,6 @@ export const CUSTOM_RENDERERS: Record<string, CustomRenderer> = {
   'scripts.defaultUser': scriptList('defaultUser'),
   'scripts.userOnce': scriptList('userOnce'),
   'advancedXml.components': components,
-  'deferred.wingetPackages': winget,
+  'applications.selection': applicationsEditor,
+  'additionalSoftware.items': additionalSoftwareEditor,
 };

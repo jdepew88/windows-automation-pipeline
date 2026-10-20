@@ -1,0 +1,40 @@
+{
+  "$schema": "https://aka.ms/winget-packages.schema.2.0.json",
+  "Sources": [
+    {
+      "Packages": [
+        {
+          "PackageIdentifier": "Git.Git"
+        },
+        {
+          "PackageIdentifier": "7zip.7zip"
+        },
+        {
+          "PackageIdentifier": "Microsoft.WSL"
+        },
+        {
+          "PackageIdentifier": "Docker.DockerDesktop"
+        }
+      ],
+      "SourceDetails": {
+        "Name": "winget",
+        "Identifier": "Microsoft.Winget.Source_8wekyb3d8bbwe",
+        "Argument": "https://cdn.winget.microsoft.com/cache",
+        "Type": "Microsoft.PreIndexed.Package"
+      }
+    },
+    {
+      "Packages": [
+        {
+          "PackageIdentifier": "9MSPC6MP8FM4"
+        }
+      ],
+      "SourceDetails": {
+        "Name": "msstore",
+        "Identifier": "StoreEdgeFD",
+        "Argument": "https://storeedgefd.dsx.mp.microsoft.com/v9.0",
+        "Type": "Microsoft.Rest"
+      }
+    }
+  ]
+}

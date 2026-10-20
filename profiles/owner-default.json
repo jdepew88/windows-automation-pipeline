@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "profileName": "Owner default",
   "setup": {
     "languageMode": "unattended",
@@ -83,6 +83,36 @@
     "resetComponentsOnce": true,
     "rebootWarningSeconds": 60,
     "excludedKbs": ""
+  },
+  "applications": {
+    "enabled": true,
+    "selection": {
+      "profiles": [
+        { "id": "everyday", "name": "Everyday Essentials", "category": "everyday", "description": "Browsers, email, documents, PDFs, photo viewing and basic productivity for home users.", "builtin": true, "inherits": [], "packages": [] },
+        { "id": "gaming", "name": "Gaming", "category": "gaming", "description": "Game launchers, library managers and optional emulator frontends.", "builtin": true, "inherits": [], "packages": [] },
+        { "id": "developer", "name": "Developer / Power User", "category": "developer", "description": "Editors, terminals, Git, virtualization, networking and related tools.", "builtin": true, "inherits": [], "packages": [] },
+        { "id": "laptop", "name": "Laptop", "category": "laptop", "description": "Battery-management and optional manufacturer utilities for portable devices.", "builtin": true, "inherits": [], "packages": [] },
+        { "id": "touch", "name": "Touchscreen / 2-in-1", "category": "touch", "description": "Pen, handwriting, note-taking and touch-oriented apps for convertibles.", "builtin": true, "inherits": [], "packages": [] },
+        { "id": "custom", "name": "Custom", "category": "custom", "description": "Any combination you choose.", "builtin": true, "inherits": [], "packages": [] }
+      ],
+      "selectedProfiles": [],
+      "added": [],
+      "removed": []
+    },
+    "coordination": "updatesFirst",
+    "restartPolicy": "whenRequired",
+    "registerAppInstaller": true,
+    "onlineRepair": false,
+    "maxReboots": 3,
+    "maxAttemptsPerPackage": 2,
+    "packageTimeoutMinutes": 30,
+    "networkWaitMinutes": 15,
+    "maxRuntimeHours": 4,
+    "waitForUpdatesHours": 8,
+    "rebootWarningSeconds": 60
+  },
+  "additionalSoftware": {
+    "items": []
   },
   "system": {
     "disableFastStartup": true,
@@ -253,7 +283,6 @@
     "answerFileName": "autounattend.xml"
   },
   "deferred": {
-    "installPowerShell7": true,
-    "wingetPackages": []
+    "installPowerShell7": true
   }
 }

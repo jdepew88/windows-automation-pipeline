@@ -1,0 +1,274 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://windows-deployment-builder.local/schemas/applications-result.v1.json",
+  "title": "Windows Deployment Builder application stage result",
+  "description": "Written by ApplicationEngine.ps1 to C:\\ProgramData\\WindowsDeploymentBuilder\\Applications\\result.json when the stage reaches a final status. Every selected package appears in \"packages\" with a terminal status, or \"Pending\" when it was not attempted (Failed/Offline runs; run the installer again to resume).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "stage",
+    "status",
+    "reason",
+    "engineVersion",
+    "finishedUtc",
+    "starts",
+    "reboots",
+    "bootstrap",
+    "counts",
+    "packages",
+    "additionalSoftware",
+    "followUp"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "stage": {
+      "const": "applications"
+    },
+    "status": {
+      "enum": [
+        "Succeeded",
+        "CompletedWithFollowUp",
+        "CompletedWithFailures",
+        "Failed",
+        "Offline"
+      ],
+      "description": "The completion marker state\\applications.done is written for Succeeded, CompletedWithFollowUp and CompletedWithFailures."
+    },
+    "reason": {
+      "type": "string"
+    },
+    "engineVersion": {
+      "type": "string"
+    },
+    "computer": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "user": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "startedUtc": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "finishedUtc": {
+      "type": "string"
+    },
+    "starts": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "reboots": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "bootstrap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "method",
+        "winGetVersion",
+        "message"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "NotRun",
+            "Healthy",
+            "Repaired",
+            "NeedsRepair",
+            "Unsupported",
+            "Failed"
+          ]
+        },
+        "method": {
+          "type": "string"
+        },
+        "winGetVersion": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      }
+    },
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "total",
+        "succeeded",
+        "alreadyInstalled",
+        "skipped",
+        "requiresInteraction",
+        "requiresRestart",
+        "failed",
+        "unavailable",
+        "pending"
+      ],
+      "properties": {
+        "total": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "succeeded": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "alreadyInstalled": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "skipped": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "requiresInteraction": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "requiresRestart": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unavailable": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "pending": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "packages": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "key",
+          "name",
+          "packageIdentifier",
+          "source",
+          "status",
+          "attempts",
+          "exitCode",
+          "message",
+          "timestampUtc"
+        ],
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "packageIdentifier": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "Pending",
+              "Installing",
+              "Succeeded",
+              "AlreadyInstalled",
+              "Skipped",
+              "RequiresInteraction",
+              "RequiresRestart",
+              "Failed",
+              "Unavailable"
+            ]
+          },
+          "attempts": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "exitCode": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "timestampUtc": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "additionalSoftware": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "name",
+          "status",
+          "attempts",
+          "exitCode",
+          "message",
+          "timestampUtc"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "Pending",
+              "Installing",
+              "Succeeded",
+              "AlreadyInstalled",
+              "Skipped",
+              "RequiresInteraction",
+              "RequiresRestart",
+              "Failed",
+              "Unavailable"
+            ]
+          },
+          "attempts": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "exitCode": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "timestampUtc": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "followUp": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

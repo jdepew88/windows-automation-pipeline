@@ -7,6 +7,8 @@ import * as security from './security';
 import * as privacy from './privacy';
 import * as updates from './updates';
 import * as windowsUpdate from './windows-update';
+import * as applications from './applications';
+import * as additionalSoftware from './additional-software';
 import * as system from './system';
 import * as explorer from './explorer';
 import * as taskbar from './taskbar';
@@ -31,6 +33,16 @@ export const SECTIONS: SectionDef[] = [
     title: 'Windows Update automation',
     intro: 'Installs all applicable updates after setup, restarting and resuming until none remain. Uses only built-in Windows components.',
   },
+  {
+    id: 'applications',
+    title: 'Application provisioning',
+    intro: 'Choose applications to install with WinGet after Windows Update has finished. Profiles combine; each package is installed once. Nothing is selected by default.',
+  },
+  {
+    id: 'additionalSoftware',
+    title: 'Additional Software',
+    intro: 'Installers that WinGet does not cover. Recorded with their official source and checksum; this version lists them for manual follow-up and never downloads anything.',
+  },
   { id: 'system', title: 'System tweaks' },
   { id: 'explorer', title: 'File Explorer' },
   { id: 'taskbar', title: 'Taskbar' },
@@ -53,6 +65,8 @@ export const ALL_SETTINGS: SettingDef[] = [
   ...privacy.settings,
   ...updates.settings,
   ...windowsUpdate.settings,
+  ...applications.settings,
+  ...additionalSoftware.settings,
   ...system.settings,
   ...explorer.settings,
   ...taskbar.settings,
@@ -76,6 +90,8 @@ export const VALIDATORS: ((p: Profile, issues: Issue[]) => void)[] = [
   security.validate,
   updates.validate,
   windowsUpdate.validate,
+  applications.validate,
+  additionalSoftware.validate,
   desktop.validate,
   start.validate,
   bloatware.validate,
@@ -84,4 +100,4 @@ export const VALIDATORS: ((p: Profile, issues: Issue[]) => void)[] = [
   advancedXml.validate,
 ];
 
-export { setup, accounts, security, privacy, updates, windowsUpdate, system, explorer, taskbar, desktop, start, personalization, bloatware, virtualization, wifi, scripts, advancedXml, output };
+export { setup, accounts, security, privacy, updates, windowsUpdate, applications, additionalSoftware, system, explorer, taskbar, desktop, start, personalization, bloatware, virtualization, wifi, scripts, advancedXml, output };

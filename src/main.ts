@@ -64,8 +64,7 @@ const fileInput = h('input', {
       return;
     }
     store.replace(r.profile);
-    const extra = r.profile.deferred.wingetPackages.length ? [`${r.profile.deferred.wingetPackages.length} WinGet package(s) kept for this session only (not used by M1).`] : [];
-    showNotice('info', `Imported ${file.name}`, [...r.warnings, ...extra]);
+    showNotice('info', `Imported ${file.name}`, r.warnings);
   },
 });
 
@@ -85,7 +84,7 @@ for (const v of ['basic', 'advanced'] as View[]) {
 const header = h(
   'header',
   { class: 'top' },
-  h('div', { class: 'brand' }, h('h1', {}, 'Windows Deployment Builder'), h('p', {}, 'autounattend.xml generator for Windows 11 Pro · Milestone 1 · runs entirely offline in this browser')),
+  h('div', { class: 'brand' }, h('h1', {}, 'Windows Deployment Builder'), h('p', {}, 'autounattend.xml, Windows Update and WinGet provisioning for Windows 11 Pro · runs entirely offline in this browser')),
   h(
     'div',
     { class: 'toolbar' },

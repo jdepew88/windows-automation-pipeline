@@ -16,12 +16,18 @@ src/
     resources/upstream.ts        verbatim upstream script/task resources (generated)
     windows-update/              Phase 2 update engine: config.json builder, downloadable assets
       scripts/*.ps1              WindowsUpdateEngine.ps1 + Install-UpdateEngine.ps1 (static, tested directly)
+    applications/                Phase 3: ids, catalog, WinGet JSON, selection/composition, profile format,
+                                 engine config, plan preview, assets, results contract
+      scripts/*.ps1              ApplicationEngine.ps1, WinGetBootstrap.ps1, Install-ApplicationEngine.ps1
+    orchestration.ts             orchestration.json: stages, coordination lock/marker, result files
+    drivers/contract.ts          Phase 4 driver hand-off (types only; nothing installs drivers)
   features/<section>/index.ts    settings: SettingDef[]  +  validate(profile, issues)  +  modify(ctx)
   data/                          upstream reference data (locales, keyboards, editions, components, …)
   ui/                            vanilla-TS DOM UI rendered from the registry
   main.ts                        app shell (header actions, sections, issue routing, review)
 tests/unit, tests/e2e            Vitest and Playwright
-tests/powershell                 engine scenarios against a simulated Windows Update Agent (run by Vitest on Windows)
+tests/powershell                 engine scenarios against simulated Windows Update / WinGet (run by Vitest on Windows)
+src/data/apps/catalog.json       manually maintained application catalog (data only)
 scripts/                         sample generator, settings-doc generator
 ```
 
@@ -97,10 +103,44 @@ engine       mutex → state.json → limits → wait for network → wait while
 - With the engine **off**, the answer file is byte-identical to Milestone 1. This is enforced by
   `tests/unit/windows-update.test.ts` against a frozen fixture.
 
+## Application provisioning (Phase 3)
+
+Enabled by `applications.enabled` (owner default: on). Nothing is generated while the selection
+is empty, which is the owner default: six built-in profiles, all empty. Details:
+`docs/phase-3/orchestration.md` and `docs/phase-3/profile-format.md`.
+
+```
+UI          profiles (+inherit) ∪ added − removed ─► resolveSelection ─► ordered, de-duplicated queue
+            (identity = source + PackageIdentifier)     (catalog deps first, interaction-required and unresolved last)
+generate    winget-packages.json (Microsoft schema 2.0) + applications-config.json + 3 scripts
+            → embedded to C:\Windows\Setup\Scripts\Applications; LAST FirstLogon command:
+            Install-ApplicationEngine.ps1 → task \WindowsDeploymentBuilder\Applications
+            (signed-in user, interactive, highest privileges; at sign-in + hourly)
+engine      mutex → state → network → WinGet check → winget show (preparation, parallel to WU)
+            → gate: Windows Update final → WinGet repair if needed (🔒) → per package (🔒):
+              winget list → winget install --id --exact --source --silent … → status
+            → Additional Software → restart if required (🔒) → result.json, marker, remove task
+🔒          C:\ProgramData\WindowsDeploymentBuilder\state\install.lock (shared with the WU engine 1.1.0)
+```
+
+- **Two JSON formats:** Microsoft's package list is the portable specification. It is what the
+  engine reads, and it works with `winget import`. The builder's profile format carries names,
+  categories and inheritance.
+- **Safety:**
+  - strict identifier patterns, enforced in TypeScript and again in PowerShell;
+  - commands are built from validated tokens only, with no `Invoke-Expression`;
+  - imported installer arguments are dropped;
+  - strict import schemas mean credentials cannot be carried;
+  - no downloads of user-entered URLs.
+- **Testability:** like Phase 2, every system touchpoint is an adapter function, and the scenario
+  tests replace them. TypeScript and PowerShell parity (commands, exit codes, the coordination
+  block) is enforced by tests.
+
 ## Extension points for later milestones
 
-- `profile.deferred` (`installPowerShell7`, `wingetPackages`) is recorded and round-tripped.
-  Nothing reads it during generation.
+- `profile.deferred.installPowerShell7` is recorded and round-tripped. Nothing reads it during
+  generation. (v3 moved the former `deferred.wingetPackages` into an unselected application
+  profile.)
 - A future `bundle/` module can call `generate()` and use `embeddedFiles` plus the profile to build
   `Windows-Deployment.zip` (`setup.ps1`, WinGet JSON, README) without changes to the engine.
 - New settings: add a schema field, an owner default, a `SettingDef` and a `modify`/`validate`
@@ -108,8 +148,11 @@ engine       mutex → state.json → limits → wait for network → wait while
 - Schema changes: bump `SCHEMA_VERSION` and register a step in `profiles/migrations.ts`. v1→v2 adds
   `windowsUpdate` with the engine **off**, so profiles exported by Milestone 1 keep producing the
   same answer file.
-- A Phase 3 orchestrator waits for `windows-update.done` (or reads `result.json`) before installing
-  applications. The engine needs no changes for that.
+- The application engine already waits for the Windows Update stage. The future bundle orchestrator
+  reads `orchestration.json`, the markers and both `result.json` files. Phase 4 (drivers)
+  implements `drivers/contract.ts` as stage 3 under the same install lock.
+- v2→v3 adds `applications` and `additionalSoftware` with an empty selection. Profiles from
+  Milestone 1 and Phase 2 keep producing the same answer file.
 
 ## Key decisions
 

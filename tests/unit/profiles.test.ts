@@ -33,7 +33,18 @@ describe('owner-default profile', () => {
     expect(p.scripts).toEqual({ system: [], defaultUser: [], firstLogon: [], userOnce: [], restartExplorer: false });
     expect(p.advancedXml.components).toEqual([]);
     expect(p.output.answerFileName).toBe('autounattend.xml');
-    expect(p.deferred).toEqual({ installPowerShell7: true, wingetPackages: [] });
+    expect(p.deferred).toEqual({ installPowerShell7: true });
+  });
+
+  it('starts application provisioning empty: six empty profiles, nothing selected', () => {
+    const sel = p.applications.selection;
+    expect(sel.profiles.map((x) => x.id)).toEqual(['everyday', 'gaming', 'developer', 'laptop', 'touch', 'custom']);
+    expect(sel.profiles.every((x) => x.builtin && x.packages.length === 0 && x.inherits.length === 0)).toBe(true);
+    expect(sel.selectedProfiles).toEqual([]);
+    expect(sel.added).toEqual([]);
+    expect(sel.removed).toEqual([]);
+    expect(p.additionalSoftware.items).toEqual([]);
+    expect(p.applications).toMatchObject({ enabled: true, coordination: 'updatesFirst', restartPolicy: 'whenRequired', registerAppInstaller: true, onlineRepair: false });
   });
 
   it('has an explicit decision for every catalog app, icon and Start folder', () => {
@@ -72,7 +83,9 @@ describe('import/export', () => {
     p.advancedXml.components.push({ id: 'c1', enabled: true, component: 'Microsoft-Windows-TCPIP', pass: 'specialize', markup: '<IcmpRedirectsEnabled>false</IcmpRedirectsEnabled>' });
     p.bloatware.Calculator = 'remove';
     p.desktop.icons.ThisPC = true;
-    p.deferred.wingetPackages = ['Git.Git'];
+    p.applications.selection.added.push({ packageIdentifier: 'Git.Git', source: 'winget', displayName: 'Git', version: '', scope: '' });
+    p.applications.selection.selectedProfiles = ['developer'];
+    p.additionalSoftware.items.push({ id: 'a1', name: 'Tool', publisher: 'Pub', downloadUrl: 'https://example.org/tool', installerType: 'exe', fileName: 'tool.exe', sha256: '', silentArgs: '/S', prerequisites: '', interaction: 'unknown', manualSupply: true, license: 'Freeware', redistribution: 'unknown', execution: 'manual', notes: '' });
     return p;
   };
 

@@ -157,7 +157,7 @@ test('Windows Update automation: on by default, assets downloadable, policy conf
   await expect(preview(page)).toContainText('WindowsUpdate\\Install-UpdateEngine.ps1');
 
   const assets = page.getByTestId('assets');
-  await expect(assets.locator('[data-asset]')).toHaveCount(4);
+  await expect(assets.locator('[data-asset]')).toHaveCount(5); // 4 engine files + orchestration.json
   const [dl] = await Promise.all([page.waitForEvent('download'), assets.locator('[data-asset="config.json"] [data-action="download-asset"]').click()]);
   expect(dl.suggestedFilename()).toBe('config.json');
   const config = JSON.parse(await readFile((await dl.path())!, 'utf8'));
@@ -179,4 +179,177 @@ test('Windows Update automation: on by default, assets downloadable, policy conf
   await expect(assets).toContainText('None');
   await expect(preview(page)).not.toContainText('Install-UpdateEngine');
   await expect(page.getByTestId('summary')).toContainText('Off');
+});
+
+// Phase 3 ----------------------------------------------------------------------------------------
+
+const apps = (page: Page) => field(page, 'applications.selection');
+const catalogAdd = (page: Page, id: string) => page.locator(`[data-catalog="${id}"] [data-action="app-add"]`);
+const wingetExport = JSON.stringify({
+  $schema: 'https://aka.ms/winget-packages.schema.2.0.json',
+  CreationDate: '2026-10-19T09:41:12.512-00:00',
+  WinGetVersion: '1.29.250',
+  Sources: [
+    {
+      SourceDetails: { Name: 'winget', Identifier: 'Microsoft.Winget.Source_8wekyb3d8bbwe', Argument: 'https://cdn.winget.microsoft.com/cache', Type: 'Microsoft.PreIndexed.Package' },
+      Packages: [{ PackageIdentifier: 'Git.Git' }, { PackageIdentifier: 'VideoLAN.VLC' }, { PackageIdentifier: 'Not A Valid Id' }],
+    },
+  ],
+});
+
+test('application provisioning: empty by default, nothing generated until something is selected', async ({ page }) => {
+  await setName(page, 'Alex');
+  await expect(checkbox(page, 'applications.enabled')).toBeChecked();
+  await expect(apps(page).locator('[data-profile]')).toHaveCount(6);
+  for (const id of ['everyday', 'gaming', 'developer', 'laptop', 'touch', 'custom']) {
+    await expect(apps(page).locator(`[data-profile="${id}"]`)).toContainText('Empty');
+  }
+  await expect(page.getByTestId('app-count')).toHaveText('0 selected');
+  await expect(page.getByTestId('summary')).toContainText('On, nothing selected');
+  await expect(preview(page)).not.toContainText('Install-ApplicationEngine');
+  await expect(page.getByTestId('assets').locator('[data-asset-group="applications"]')).toHaveCount(0);
+});
+
+test('application provisioning (Basic): search, filter, add, remove, count, duplicates and generated assets', async ({ page }) => {
+  await setName(page, 'Alex');
+  await page.getByTestId('app-search').fill('pdf');
+  await expect(page.getByTestId('app-catalog').locator('[data-catalog="sumatrapdf"]')).toBeVisible();
+  await expect(page.getByTestId('app-catalog').locator('[data-catalog="steam"]')).toHaveCount(0);
+  await catalogAdd(page, 'sumatrapdf').click();
+  await expect(page.getByTestId('app-count')).toHaveText('1 selected');
+  await expect(catalogAdd(page, 'sumatrapdf')).toBeDisabled();
+
+  await page.getByTestId('app-search').fill('');
+  await page.getByTestId('app-category').selectOption('gaming');
+  await expect(page.getByTestId('app-catalog').locator('[data-catalog="git"]')).toHaveCount(0);
+  await catalogAdd(page, 'steam').click();
+  await expect(catalogAdd(page, 'launchbox')).toBeDisabled();
+  await expect(page.locator('[data-catalog="launchbox"]')).toContainText('unresolved');
+
+  // Populate the empty Gaming profile explicitly, then combine it: Steam is selected twice but installed once.
+  await page.getByTestId('app-target').selectOption('gaming');
+  await catalogAdd(page, 'steam').click();
+  await catalogAdd(page, 'playnite').click();
+  await checkbox(page, 'applications.profile.gaming').check();
+  await expect(apps(page).locator('[data-profile="gaming"]')).toContainText('2 packages');
+  await expect(page.getByTestId('app-count')).toHaveText('3 selected');
+  await expect(page.getByTestId('app-warnings').locator('[data-kind="duplicate"]')).toContainText('Steam');
+
+  await apps(page).locator('[data-package="winget:sumatrapdf.sumatrapdf"] [data-action="app-remove"]').click();
+  await expect(page.getByTestId('app-count')).toHaveText('2 selected');
+
+  await expect(page.getByTestId('summary')).toContainText('2 package(s) via WinGet from Gaming');
+  await expect(preview(page)).toContainText('Applications\\Install-ApplicationEngine.ps1');
+  const group = page.getByTestId('assets').locator('[data-asset-group="applications"]');
+  await expect(group.locator('[data-asset]')).toHaveCount(9);
+  const [dl] = await Promise.all([page.waitForEvent('download'), group.locator('[data-asset="winget-packages.json"] [data-action="download-asset"]').click()]);
+  const native = JSON.parse(await readFile((await dl.path())!, 'utf8'));
+  expect(native.Sources[0].Packages.map((p: { PackageIdentifier: string }) => p.PackageIdentifier)).toEqual(['Valve.Steam', 'Playnite.Playnite']);
+});
+
+test('application provisioning: WinGet import adds a profile without overwriting, export is valid WinGet JSON', async ({ page }) => {
+  await setName(page, 'Alex');
+  await catalogAdd(page, '7zip').click();
+  await page.getByTestId('app-import-input').setInputFiles({ name: 'office.json', mimeType: 'application/json', buffer: Buffer.from(wingetExport) });
+  await expect(page.getByTestId('app-import-status')).toContainText('Imported office.json as profile "Imported: office"');
+  await expect(page.getByTestId('app-import-status')).toContainText('Not A Valid Id');
+  await expect(checkbox(page, 'applications.profile.imported-office')).toBeChecked();
+  await expect(page.getByTestId('app-count')).toHaveText('3 selected');
+  await expect(apps(page).locator('[data-package="winget:7zip.7zip"]')).toBeVisible();
+
+  const [dl] = await Promise.all([page.waitForEvent('download'), page.locator('[data-action="app-export-winget"]').click()]);
+  expect(dl.suggestedFilename()).toBe('winget-packages.json');
+  const out = JSON.parse(await readFile((await dl.path())!, 'utf8'));
+  expect(out.$schema).toBe('https://aka.ms/winget-packages.schema.2.0.json');
+  expect(out.Sources[0].SourceDetails.Identifier).toBe('Microsoft.Winget.Source_8wekyb3d8bbwe');
+  expect(out.Sources[0].Packages.map((p: { PackageIdentifier: string }) => p.PackageIdentifier).sort()).toEqual(['7zip.7zip', 'Git.Git', 'VideoLAN.VLC']);
+
+  await page.getByTestId('app-import-input').setInputFiles({ name: 'evil.json', mimeType: 'application/json', buffer: Buffer.from('{"Sources":[{"SourceDetails":{"Name":"winget"},"Packages":[]}]}') });
+  await expect(page.getByTestId('app-import-status')).toContainText('Could not import evil.json');
+  await expect(page.getByTestId('app-count')).toHaveText('3 selected');
+});
+
+test('application provisioning (Advanced): profiles, manual IDs, order preview, policies and validation', async ({ page }) => {
+  await setName(page, 'Alex');
+  await expect(page.getByTestId('app-order')).toBeHidden();
+  await page.getByRole('button', { name: 'Advanced' }).click();
+
+  page.once('dialog', (d) => d.accept('Family PC'));
+  await page.locator('[data-action="app-new-profile"]').click();
+  await expect(checkbox(page, 'applications.profile.family-pc')).toBeChecked();
+  await expect(page.getByTestId('app-target')).toHaveValue('family-pc');
+  await catalogAdd(page, 'docker-desktop').click();
+  await catalogAdd(page, 'wsl').click();
+  await expect(page.getByTestId('app-order').locator('li').first()).toContainText('Windows Subsystem for Linux');
+  await expect(page.getByTestId('app-order')).toContainText('winget install --id Docker.DockerDesktop --exact --source winget --silent');
+
+  page.once('dialog', (d) => d.accept('Kids PC'));
+  await apps(page).locator('[data-profile="family-pc"] [data-action="app-rename-profile"]').click();
+  await expect(apps(page).locator('[data-profile="family-pc"]')).toContainText('Kids PC');
+  await apps(page).locator('[data-profile="family-pc"] [data-action="app-duplicate-profile"]').click();
+  await expect(apps(page).locator('[data-profile]')).toHaveCount(8);
+  await expect(apps(page).locator('[data-profile="gaming"] [data-action="app-delete-profile"]')).toHaveCount(0);
+
+  await page.getByText('Add by package identifier').click();
+  await page.getByTestId('app-manual-id').fill('Foo Bar');
+  await page.locator('[data-action="app-add-manual"]').click();
+  await expect(page.getByTestId('app-manual-message')).toContainText('Not a valid winget identifier');
+  await page.getByTestId('app-manual-id').fill('Microsoft.VisualStudioCode');
+  await page.getByTestId('app-manual-version').fill('1.95.0');
+  await page.locator('[data-action="app-add-manual"]').click();
+  await expect(page.getByTestId('app-manual-message')).toContainText('Added');
+  await expect(page.getByTestId('app-order')).toContainText('--version 1.95.0');
+
+  await radio(page, 'applications.restartPolicy', 'never').check();
+  await page.locator('input[name="applications.maxAttemptsPerPackage"]').fill('9');
+  await expect(field(page, 'applications.maxAttemptsPerPackage').locator('.issues .error')).toContainText('between 1 and 5');
+  await page.locator('input[name="applications.maxAttemptsPerPackage"]').fill('3');
+  await expect(page.getByTestId('status')).toContainText('Ready');
+
+  await radio(page, 'accounts.accountGroup', 'Users').check();
+  await expect(field(page, 'applications.enabled').locator('.issues .error')).toContainText('administrator account');
+  await radio(page, 'accounts.accountGroup', 'Administrators').check();
+
+  const [dl] = await Promise.all([page.waitForEvent('download'), page.getByTestId('assets').locator('[data-asset="applications-config.json"] [data-action="download-asset"]').click()]);
+  const cfg = JSON.parse(await readFile((await dl.path())!, 'utf8'));
+  expect(cfg).toMatchObject({ restartPolicy: 'never', maxAttemptsPerPackage: 3 });
+  expect(cfg.packages.map((p: { packageIdentifier: string }) => p.packageIdentifier)).toEqual(['Microsoft.WSL', 'Docker.DockerDesktop', 'Microsoft.VisualStudioCode']);
+});
+
+test('application selection survives Basic/Advanced switches, profile export/import, and reset', async ({ page }) => {
+  await setName(page, 'Alex');
+  await catalogAdd(page, 'git').click();
+  await page.getByRole('button', { name: 'Advanced' }).click();
+  await page.getByRole('button', { name: 'Basic' }).click();
+  await expect(page.getByTestId('app-count')).toHaveText('1 selected');
+
+  const [dl] = await Promise.all([page.waitForEvent('download'), page.locator('[data-action="export"]').click()]);
+  const json = await readFile((await dl.path())!, 'utf8');
+  expect(JSON.parse(json).applications.selection.added[0].packageIdentifier).toBe('Git.Git');
+
+  page.once('dialog', (d) => d.accept());
+  await page.locator('[data-action="reset"]').click();
+  await expect(page.getByTestId('app-count')).toHaveText('0 selected');
+
+  await page.getByTestId('import-input').setInputFiles({ name: 'p.json', mimeType: 'application/json', buffer: Buffer.from(json) });
+  await expect(page.getByTestId('app-count')).toHaveText('1 selected');
+});
+
+test('Additional Software: recorded as manual follow-up; unsafe entries are rejected', async ({ page }) => {
+  await setName(page, 'Alex');
+  const add = field(page, 'additionalSoftware.items');
+  await page.locator('[data-action="add-additional"]').click();
+  await add.locator('input[name="additionalSoftware.items.0.name"]').fill('Vendor Tool');
+  await add.locator('input[name="additionalSoftware.items.0.downloadUrl"]').fill('http://vendor.example/setup.exe');
+  await expect(add.locator('.issues .error').filter({ hasText: 'https://' })).toBeVisible();
+  await add.locator('input[name="additionalSoftware.items.0.downloadUrl"]').fill('https://vendor.example/setup.exe');
+  await add.locator('input[name="additionalSoftware.items.0.silentArgs"]').fill('/S & calc');
+  await expect(add.locator('.issues .error').filter({ hasText: 'must not contain &' })).toBeVisible();
+  await add.locator('input[name="additionalSoftware.items.0.silentArgs"]').fill('/S');
+  await add.locator('select[name="additionalSoftware.items.0.execution"]').selectOption('automatic');
+  await expect(add.locator('.issues .error').filter({ hasText: 'reviewed list' })).toBeVisible();
+  await add.locator('select[name="additionalSoftware.items.0.execution"]').selectOption('manual');
+  await expect(page.getByTestId('status')).toContainText('Ready');
+  await expect(page.getByTestId('summary')).toContainText('1 installer(s), listed for manual follow-up');
+  await expect(page.getByTestId('assets').locator('[data-asset="applications-plan.txt"]')).toContainText('Vendor Tool: manual follow-up');
 });
