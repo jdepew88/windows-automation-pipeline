@@ -1,6 +1,7 @@
 import type { Choice, SettingDef } from '../engine/settings/types';
 import type { Profile } from '../engine/schema/profile';
 import { h, uid } from './dom';
+import { icon } from './icons';
 import { getPath, setPath, type Store } from './store';
 
 export interface FieldHandle {
@@ -28,7 +29,7 @@ function meta(def: SettingDef): HTMLElement {
   return h(
     'details',
     { class: 'meta' },
-    h('summary', {}, 'How this is applied'),
+    h('summary', {}, icon('info'), 'Technical details'),
     h(
       'dl',
       {},
@@ -44,16 +45,28 @@ function meta(def: SettingDef): HTMLElement {
   );
 }
 
+/** Layout of a field: toggles and inline controls sit beside their text, the rest below it. */
+const LAYOUT: Record<SettingDef['control'], 'toggle' | 'inline' | 'stack'> = {
+  checkbox: 'toggle',
+  select: 'inline',
+  number: 'inline',
+  text: 'inline',
+  password: 'inline',
+  radio: 'stack',
+  textarea: 'stack',
+  custom: 'stack',
+};
+
 function shell(def: SettingDef, control: HTMLElement, labelFor?: string): HTMLElement {
   const isGroup = def.control === 'radio' || def.control === 'custom';
-  const title = isGroup ? h('legend', {}, def.label) : h('label', { for: labelFor }, def.label);
+  const layout = LAYOUT[def.control];
+  const title = isGroup ? h('legend', { class: 'field-label' }, def.label) : h('label', { class: 'field-label', for: labelFor }, def.label);
+  const text = h('div', { class: 'field-text' }, title, def.description ? h('p', { class: 'desc' }, def.description) : null);
   const wrap = h(
     isGroup ? 'fieldset' : 'div',
-    { class: `field field-${def.control}${def.advanced ? ' advanced' : ''}`, 'data-path': def.path },
-    def.control === 'checkbox' ? null : title,
-    control,
-    def.description ? h('p', { class: 'desc' }, def.description) : null,
-    def.risk ? h('p', { class: 'risk' }, h('strong', {}, 'Caveat: '), def.risk) : null,
+    { class: `field field-${def.control} layout-${layout}${def.advanced ? ' advanced' : ''}`, 'data-path': def.path },
+    layout === 'stack' ? [isGroup ? title : null, isGroup ? h('div', { class: 'field-text' }, def.description ? h('p', { class: 'desc' }, def.description) : null) : text, control] : h('div', { class: 'field-main' }, text, h('div', { class: 'field-control' }, control)),
+    def.risk ? h('p', { class: 'risk' }, icon('alert'), h('span', {}, h('strong', {}, 'Caveat: '), def.risk)) : null,
     h('div', { class: 'issues', 'data-issues-for': def.path, 'aria-live': 'polite' }),
     meta(def),
   );
@@ -79,15 +92,15 @@ function renderStandard(def: SettingDef, store: Store): FieldHandle {
 
   switch (def.control) {
     case 'checkbox': {
-      const input = h('input', { type: 'checkbox', id, name: def.path, onchange: () => set(input.checked) });
-      const el = shell(def, h('div', { class: 'check' }, input, h('label', { for: id }, def.label)));
+      const input = h('input', { type: 'checkbox', class: 'switch', role: 'switch', id, name: def.path, onchange: () => set(input.checked) });
+      const el = shell(def, input, id);
       return { el, sync: (p) => (input.checked = Boolean(getPath(p, def.path))) };
     }
     case 'radio': {
       const inputs = choicesOf(def).map((c) => {
         const rid = uid('r');
         const input = h('input', { type: 'radio', id: rid, name: def.path, value: c.value, onchange: () => input.checked && set(c.value) });
-        return { input, row: h('div', { class: 'choice' }, input, h('label', { for: rid }, c.label, c.description ? h('span', { class: 'choice-desc' }, c.description) : null)) };
+        return { input, row: h('label', { class: 'choice', for: rid }, input, h('span', { class: 'choice-text' }, h('span', { class: 'choice-label' }, c.label), c.description ? h('span', { class: 'choice-desc' }, c.description) : null)) };
       });
       const el = shell(def, h('div', { class: 'choices', role: 'radiogroup' }, inputs.map((i) => i.row)));
       return { el, sync: (p) => inputs.forEach((i) => (i.input.checked = i.input.value === getPath(p, def.path))) };

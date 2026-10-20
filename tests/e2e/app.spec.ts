@@ -6,7 +6,21 @@ const radio = (page: Page, path: string, value: string) => page.locator(`input[t
 const checkbox = (page: Page, path: string) => page.locator(`input[type=checkbox][name="${path}"]`);
 const preview = (page: Page) => page.getByTestId('xml-preview');
 
+/** Opens a section through the sidebar (through the navigation drawer on narrow screens). */
+async function go(page: Page, id: string) {
+  const target = id.startsWith('section-') || id.includes('-') ? id : `section-${id}`;
+  const link = page.locator(`.sidebar a.nav-item[data-target="${target}"]`);
+  const menu = page.locator('.menu-btn.in-bar');
+  if ((await menu.isVisible()) && (await menu.getAttribute('aria-expanded')) !== 'true') {
+    await menu.click();
+    await expect(page.locator('body')).toHaveClass(/nav-open/);
+  }
+  await link.click();
+  await expect(page.locator(`#${target}`)).toBeVisible();
+}
+
 async function setName(page: Page, name: string) {
+  await go(page, 'accounts');
   await page.locator('input[name="accounts.personName"]').fill(name);
 }
 
@@ -35,12 +49,14 @@ test('loads the owner profile into the exact controls', async ({ page }) => {
   await expect(radio(page, 'bloatware.Calculator', 'keep')).toBeChecked();
   await expect(radio(page, 'bloatware.Cortana', 'untouched')).toBeChecked();
   await expect(radio(page, 'bloatware.WindowsBackup', 'remove')).toBeDisabled();
+  await go(page, 'accounts');
   await expect(page.getByTestId('autologon-warning')).toBeVisible();
 });
 
 test('requires a name, then derives username and computer name live', async ({ page }) => {
   await expect(page.getByTestId('status')).toContainText('Cannot generate');
   await expect(field(page, 'accounts.personName').locator('.issues .error')).toContainText("person's name");
+  await go(page, 'review');
   await expect(page.getByRole('button', { name: 'Download answer file' })).toBeDisabled();
 
   await setName(page, 'Alex');
@@ -58,13 +74,17 @@ test('requires a name, then derives username and computer name live', async ({ p
 
 test('Basic/Advanced toggle hides rare settings without resetting values', async ({ page }) => {
   await setName(page, 'Kim');
+  await go(page, 'scripts');
   await expect(field(page, 'scripts.firstLogon')).toBeVisible();
   await expect(field(page, 'scripts.system')).toBeHidden();
   await expect(field(page, 'advancedXml.components')).toBeHidden();
+  await expect(page.locator('.sidebar a.nav-item[data-target="section-advancedXml"]')).toBeHidden();
 
   await page.getByRole('button', { name: 'Advanced' }).click();
   await expect(field(page, 'scripts.system')).toBeVisible();
+  await go(page, 'system');
   await checkbox(page, 'system.enableLongPaths').check();
+  await go(page, 'taskbar');
   await radio(page, 'taskbar.search', 'hide').check();
 
   await page.getByRole('button', { name: 'Basic' }).click();
@@ -79,6 +99,7 @@ test('Basic/Advanced toggle hides rare settings without resetting values', async
 test('FirstLogon script is escaped into the XML; blank scripts add nothing', async ({ page }) => {
   await setName(page, 'Alex');
   const before = await preview(page).textContent();
+  await go(page, 'scripts');
   await page.locator('[data-action="add-script-firstLogon"]').click();
   await expect(page.getByTestId('status')).toContainText('warning');
   expect(await preview(page).textContent()).toBe(before);
@@ -91,19 +112,29 @@ test('FirstLogon script is escaped into the XML; blank scripts add nothing', asy
 test('validation errors are shown at the field and block output', async ({ page }) => {
   await setName(page, 'Alex');
   await page.getByRole('button', { name: 'Advanced' }).click();
+  await go(page, 'wifi');
   await radio(page, 'wifi.mode', 'parameters').check();
   await page.locator('input[name="wifi.ssid"]').fill('Home');
   await page.locator('input[name="wifi.password"]').fill('short');
   await expect(field(page, 'wifi.password').locator('.issues .error')).toContainText('8–63');
   await expect(page.getByTestId('status')).toContainText('Cannot generate');
+  // The sidebar flags the section and the overall state.
+  await expect(page.locator('.sidebar a.nav-item[data-target="section-wifi"] .nav-badge.err')).toHaveText('1');
+  await expect(page.getByTestId('nav-status')).toContainText('1 problem to fix');
+  await go(page, 'review');
   await expect(page.getByRole('button', { name: 'Download answer file' })).toBeDisabled();
   await expect(preview(page)).toHaveText('No XML is shown while there are errors.');
+  // The error links straight back to the field.
+  await page.getByTestId('status').getByRole('link', { name: 'Wi-Fi password' }).click();
+  await expect(page.locator('input[name="wifi.password"]')).toBeVisible();
   await page.locator('input[name="wifi.password"]').fill('long enough');
   await expect(page.getByTestId('status')).toContainText('Ready');
+  await expect(page.locator('.sidebar a.nav-item[data-target="section-wifi"] .nav-badge.err')).toHaveCount(0);
 });
 
 test('downloads autounattend.xml matching the preview', async ({ page }) => {
   await setName(page, 'Alex');
+  await go(page, 'review');
   const [dl] = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: 'Download answer file' }).click()]);
   expect(dl.suggestedFilename()).toBe('autounattend.xml');
   const content = await readFile((await dl.path())!, 'utf8');
@@ -114,7 +145,9 @@ test('downloads autounattend.xml matching the preview', async ({ page }) => {
 test('export → change → import round-trips; reset restores owner defaults', async ({ page }) => {
   await setName(page, 'Alex');
   await page.getByRole('button', { name: 'Advanced' }).click();
+  await go(page, 'taskbar');
   await radio(page, 'taskbar.search', 'label').check();
+  await go(page, 'bloatware');
   await radio(page, 'bloatware.Calculator', 'remove').check();
   const [dl] = await Promise.all([page.waitForEvent('download'), page.locator('[data-action="export"]').click()]);
   const json = await readFile((await dl.path())!, 'utf8');
@@ -141,11 +174,16 @@ test('rejects an invalid profile import with messages', async ({ page }) => {
   await expect(radio(page, 'taskbar.search', 'icon')).toBeChecked();
 });
 
-test('no horizontal page scroll', async ({ page }) => {
+test('no horizontal page scroll on any section', async ({ page }) => {
   await setName(page, 'Alex');
   await page.getByRole('button', { name: 'Advanced' }).click();
-  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
-  expect(overflow).toBeLessThanOrEqual(0);
+  const targets = await page.locator('.sidebar a.nav-item').evaluateAll((as) => as.map((a) => (a as HTMLElement).dataset.target!));
+  expect(targets.length).toBeGreaterThanOrEqual(20);
+  for (const t of targets) {
+    await go(page, t);
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+    expect(overflow, t).toBeLessThanOrEqual(0);
+  }
 });
 
 test('Windows Update automation: on by default, assets downloadable, policy conflicts shown', async ({ page }) => {
@@ -157,6 +195,7 @@ test('Windows Update automation: on by default, assets downloadable, policy conf
   await expect(preview(page)).toContainText('WindowsUpdate\\Install-UpdateEngine.ps1');
 
   const assets = page.getByTestId('assets');
+  await go(page, 'review');
   await expect(assets.locator('[data-asset]')).toHaveCount(5); // 4 engine files + orchestration.json
   const [dl] = await Promise.all([page.waitForEvent('download'), assets.locator('[data-asset="config.json"] [data-action="download-asset"]').click()]);
   expect(dl.suggestedFilename()).toBe('config.json');
@@ -164,11 +203,14 @@ test('Windows Update automation: on by default, assets downloadable, policy conf
   expect(config).toMatchObject({ drivers: 'exclude', featureUpdates: 'skip', maxReboots: 10 });
 
   await page.getByRole('button', { name: 'Advanced' }).click();
+  await go(page, 'windowsUpdate');
   await page.locator('input[name="windowsUpdate.maxReboots"]').fill('3');
   await page.locator('input[name="windowsUpdate.excludedKbs"]').fill('KB5034441');
+  await go(page, 'review');
   const [dl2] = await Promise.all([page.waitForEvent('download'), assets.locator('[data-asset="config.json"] [data-action="download-asset"]').click()]);
   expect(JSON.parse(await readFile((await dl2.path())!, 'utf8'))).toMatchObject({ maxReboots: 3, excludedKbs: ['KB5034441'] });
 
+  await go(page, 'windowsUpdate');
   await radio(page, 'windowsUpdate.drivers', 'include').check();
   await expect(field(page, 'windowsUpdate.drivers').locator('.issues .error')).toContainText('conflicts');
   await expect(page.getByTestId('status')).toContainText('Cannot generate');
@@ -212,6 +254,7 @@ test('application provisioning: empty by default, nothing generated until someth
 
 test('application provisioning (Basic): search, filter, add, remove, count, duplicates and generated assets', async ({ page }) => {
   await setName(page, 'Alex');
+  await go(page, 'applications');
   await page.getByTestId('app-search').fill('pdf');
   await expect(page.getByTestId('app-catalog').locator('[data-catalog="sumatrapdf"]')).toBeVisible();
   await expect(page.getByTestId('app-catalog').locator('[data-catalog="steam"]')).toHaveCount(0);
@@ -220,7 +263,8 @@ test('application provisioning (Basic): search, filter, add, remove, count, dupl
   await expect(catalogAdd(page, 'sumatrapdf')).toBeDisabled();
 
   await page.getByTestId('app-search').fill('');
-  await page.getByTestId('app-category').selectOption('gaming');
+  await page.getByTestId('app-category').locator('[data-category="gaming"]').click();
+  await expect(page.getByTestId('app-category').locator('[data-category="gaming"]')).toHaveAttribute('aria-pressed', 'true');
   await expect(page.getByTestId('app-catalog').locator('[data-catalog="git"]')).toHaveCount(0);
   await catalogAdd(page, 'steam').click();
   await expect(catalogAdd(page, 'launchbox')).toBeDisabled();
@@ -240,6 +284,7 @@ test('application provisioning (Basic): search, filter, add, remove, count, dupl
 
   await expect(page.getByTestId('summary')).toContainText('2 package(s) via WinGet from Gaming');
   await expect(preview(page)).toContainText('Applications\\Install-ApplicationEngine.ps1');
+  await go(page, 'review');
   const group = page.getByTestId('assets').locator('[data-asset-group="applications"]');
   await expect(group.locator('[data-asset]')).toHaveCount(9);
   const [dl] = await Promise.all([page.waitForEvent('download'), group.locator('[data-asset="winget-packages.json"] [data-action="download-asset"]').click()]);
@@ -249,6 +294,7 @@ test('application provisioning (Basic): search, filter, add, remove, count, dupl
 
 test('application provisioning: WinGet import adds a profile without overwriting, export is valid WinGet JSON', async ({ page }) => {
   await setName(page, 'Alex');
+  await go(page, 'applications');
   await catalogAdd(page, '7zip').click();
   await page.getByTestId('app-import-input').setInputFiles({ name: 'office.json', mimeType: 'application/json', buffer: Buffer.from(wingetExport) });
   await expect(page.getByTestId('app-import-status')).toContainText('Imported office.json as profile "Imported: office"');
@@ -273,6 +319,7 @@ test('application provisioning (Advanced): profiles, manual IDs, order preview, 
   await setName(page, 'Alex');
   await expect(page.getByTestId('app-order')).toBeHidden();
   await page.getByRole('button', { name: 'Advanced' }).click();
+  await go(page, 'applications');
 
   page.once('dialog', (d) => d.accept('Family PC'));
   await page.locator('[data-action="app-new-profile"]').click();
@@ -306,9 +353,12 @@ test('application provisioning (Advanced): profiles, manual IDs, order preview, 
   await page.locator('input[name="applications.maxAttemptsPerPackage"]').fill('3');
   await expect(page.getByTestId('status')).toContainText('Ready');
 
+  await go(page, 'accounts');
   await radio(page, 'accounts.accountGroup', 'Users').check();
   await expect(field(page, 'applications.enabled').locator('.issues .error')).toContainText('administrator account');
+  await expect(page.locator('.sidebar a.nav-item[data-target="section-applications"] .nav-badge.err')).toBeVisible();
   await radio(page, 'accounts.accountGroup', 'Administrators').check();
+  await go(page, 'review');
 
   const [dl] = await Promise.all([page.waitForEvent('download'), page.getByTestId('assets').locator('[data-asset="applications-config.json"] [data-action="download-asset"]').click()]);
   const cfg = JSON.parse(await readFile((await dl.path())!, 'utf8'));
@@ -318,6 +368,7 @@ test('application provisioning (Advanced): profiles, manual IDs, order preview, 
 
 test('application selection survives Basic/Advanced switches, profile export/import, and reset', async ({ page }) => {
   await setName(page, 'Alex');
+  await go(page, 'applications');
   await catalogAdd(page, 'git').click();
   await page.getByRole('button', { name: 'Advanced' }).click();
   await page.getByRole('button', { name: 'Basic' }).click();
@@ -337,6 +388,7 @@ test('application selection survives Basic/Advanced switches, profile export/imp
 
 test('Additional Software: recorded as manual follow-up; unsafe entries are rejected', async ({ page }) => {
   await setName(page, 'Alex');
+  await go(page, 'additionalSoftware');
   const add = field(page, 'additionalSoftware.items');
   await page.locator('[data-action="add-additional"]').click();
   await add.locator('input[name="additionalSoftware.items.0.name"]').fill('Vendor Tool');
@@ -352,4 +404,99 @@ test('Additional Software: recorded as manual follow-up; unsafe entries are reje
   await expect(page.getByTestId('status')).toContainText('Ready');
   await expect(page.getByTestId('summary')).toContainText('1 installer(s), listed for manual follow-up');
   await expect(page.getByTestId('assets').locator('[data-asset="applications-plan.txt"]')).toContainText('Vendor Tool: manual follow-up');
+});
+
+// UI redesign: navigation, state across pages, themes, code viewer ------------------------------
+
+test('sections are separate pages: current section highlighted, Previous/Next, values kept across navigation', async ({ page }) => {
+  await expect(page.locator('#section-setup')).toBeVisible();
+  await expect(page.locator('#section-accounts')).toBeHidden();
+  await expect(page.locator('.sidebar a.nav-item[aria-current="page"]')).toHaveAttribute('data-target', 'section-setup');
+
+  await page.locator('#section-setup [data-pager="next"]').click();
+  await expect(page.locator('#section-accounts')).toBeVisible();
+  await expect(page.locator('.sidebar a.nav-item[aria-current="page"]')).toHaveAttribute('data-target', 'section-accounts');
+  await page.locator('input[name="accounts.personName"]').fill('Robin');
+
+  await go(page, 'privacy');
+  await checkbox(page, 'privacy.disableLocation').uncheck();
+  await page.locator('#section-privacy [data-pager="prev"]').click();
+  await expect(page.locator('#section-security')).toBeVisible();
+  await page.goBack();
+  await expect(page.locator('#section-privacy')).toBeVisible();
+  await expect(checkbox(page, 'privacy.disableLocation')).not.toBeChecked();
+
+  // Basic/Advanced never changes values, and a page hidden in Basic falls back to a visible one.
+  await page.getByRole('button', { name: 'Advanced' }).click();
+  await go(page, 'bloatware');
+  await page.getByRole('button', { name: 'Basic' }).click();
+  await expect(page.locator('#section-setup')).toBeVisible();
+  await go(page, 'accounts');
+  await expect(page.locator('input[name="accounts.personName"]')).toHaveValue('Robin');
+  await expect(checkbox(page, 'privacy.disableLocation')).not.toBeChecked();
+
+  // Sub-anchors open their page at the right place.
+  await go(page, 'app-profiles');
+  await expect(page.locator('#section-applications')).toBeVisible();
+  await go(page, 'deployment-assets');
+  await expect(page.locator('#section-review')).toBeVisible();
+  await expect(page.getByTestId('summary')).toContainText('Robin-Computer');
+});
+
+test('appearance: dark by default, Light and System selectable and remembered', async ({ page }) => {
+  const html = page.locator('html');
+  await expect(html).toHaveAttribute('data-theme', 'dark');
+  const bg = () => page.evaluate(() => getComputedStyle(document.body).backgroundColor);
+  const dark = await bg();
+  await page.getByRole('button', { name: 'Light appearance' }).click();
+  await expect(html).toHaveAttribute('data-theme', 'light');
+  expect(await bg()).not.toBe(dark);
+  await page.reload();
+  await expect(html).toHaveAttribute('data-theme', 'light');
+  await page.getByRole('button', { name: 'System appearance' }).click();
+  await expect(html).toHaveAttribute('data-theme', 'system');
+  await page.getByRole('button', { name: 'Dark appearance' }).click();
+  expect(await bg()).toBe(dark);
+});
+
+test('XML preview shows exactly the generated text, with line numbers kept outside it', async ({ page }) => {
+  await setName(page, 'Alex');
+  await go(page, 'review');
+  const text = (await preview(page).textContent())!;
+  expect(text.startsWith('<?xml')).toBe(true);
+  await expect(preview(page).locator('.x-tag').first()).toBeVisible();
+  const gutter = (await page.locator('.code-view .gutter').textContent())!;
+  expect(gutter.split('\n').length).toBe(text.replace(/\r?\n$/, '').split(/\r?\n/).length);
+  expect(text).not.toMatch(/^1\s*</);
+});
+
+test('mobile navigation drawer opens, navigates and closes without covering the form', async ({ page, isMobile }) => {
+  test.skip(!isMobile, 'drawer is used on narrow screens only');
+  const menu = page.locator('.menu-btn.in-bar');
+  await expect(page.locator('.sidebar')).toBeHidden();
+  await menu.click();
+  await expect(menu).toHaveAttribute('aria-expanded', 'true');
+  await expect(page.locator('.sidebar')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(page.locator('.sidebar')).toBeHidden();
+  await expect(menu).toHaveAttribute('aria-expanded', 'false');
+  await go(page, 'wifi');
+  await expect(page.locator('.sidebar')).toBeHidden();
+  await expect(page.locator('.mobile-title')).toHaveText('Wi-Fi');
+  await radio(page, 'wifi.mode', 'interactive').check();
+});
+
+test('Windows 11 requirement bypass controls are present (Advanced), off by default, and drive the XML', async ({ page }) => {
+  await setName(page, 'Alex');
+  await expect(checkbox(page, 'setup.bypassRequirementsCheck')).not.toBeChecked();
+  await expect(checkbox(page, 'setup.bypassNetworkCheck')).not.toBeChecked();
+  await expect(preview(page)).not.toContainText('LabConfig');
+  await page.getByRole('button', { name: 'Advanced' }).click();
+  await go(page, 'setup');
+  await checkbox(page, 'setup.bypassRequirementsCheck').check();
+  for (const v of ['BypassTPMCheck', 'BypassSecureBootCheck', 'BypassRAMCheck']) await expect(preview(page)).toContainText(v);
+  await checkbox(page, 'setup.bypassNetworkCheck').check();
+  await expect(preview(page)).toContainText('BypassNRO');
+  await checkbox(page, 'setup.bypassRequirementsCheck').uncheck();
+  await expect(preview(page)).not.toContainText('LabConfig');
 });

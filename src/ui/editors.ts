@@ -3,6 +3,7 @@ import { BLOATWARE, BLOATWARE_GROUP_LABELS, appliesToWindows11, type BloatwareGr
 import { PHASES } from '../features/scripts';
 import { COMPONENTS } from '../data';
 import { clear, h, uid } from './dom';
+import { icon } from './icons';
 import { choicesOf, customShell, type CustomRenderer } from './form';
 import { additionalSoftwareEditor, applicationsEditor } from './applications';
 
@@ -125,6 +126,7 @@ function scriptList(phase: ScriptPhase): CustomRenderer {
         'data-action': `add-script-${phase}`,
         onclick: () => mutate((items) => items.push({ id: newId(), name: '', type: 'ps1', enabled: true, content: '' })),
       },
+      icon('plus'),
       `Add ${info.title.replace(/ scripts$/, '')} script`,
     );
     const el = customShell(def, h('div', {}, h('p', { class: 'context' }, h('strong', {}, 'When and how it runs: '), info.context), list, add));
@@ -154,9 +156,9 @@ function scriptList(phase: ScriptPhase): CustomRenderer {
                 info.allowedTypes.map((t) => h('option', { value: t, selected: t === s.type }, TYPE_LABELS[t])),
               ),
               h('span', { class: 'check' }, h('input', { type: 'checkbox', id: enId, checked: s.enabled, onchange: (e: Event) => mutate((it) => (it[i]!.enabled = (e.target as HTMLInputElement).checked)) }), h('label', { for: enId }, 'Enabled')),
-              h('button', { type: 'button', class: 'icon', title: 'Move up', 'aria-label': 'Move up', disabled: i === 0, onclick: () => mutate((it) => it.splice(i - 1, 0, ...it.splice(i, 1))) }, '↑'),
-              h('button', { type: 'button', class: 'icon', title: 'Move down', 'aria-label': 'Move down', disabled: i === items.length - 1, onclick: () => mutate((it) => it.splice(i + 1, 0, ...it.splice(i, 1))) }, '↓'),
-              h('button', { type: 'button', class: 'icon danger', title: 'Delete', 'aria-label': 'Delete script', onclick: () => mutate((it) => it.splice(i, 1)) }, '✕'),
+              h('button', { type: 'button', class: 'icon-btn', title: 'Move up', 'aria-label': 'Move up', disabled: i === 0, onclick: () => mutate((it) => it.splice(i - 1, 0, ...it.splice(i, 1))) }, icon('chevronUp')),
+              h('button', { type: 'button', class: 'icon-btn', title: 'Move down', 'aria-label': 'Move down', disabled: i === items.length - 1, onclick: () => mutate((it) => it.splice(i + 1, 0, ...it.splice(i, 1))) }, icon('chevronDown')),
+              h('button', { type: 'button', class: 'icon-btn danger', title: 'Delete', 'aria-label': 'Delete script', onclick: () => mutate((it) => it.splice(i, 1)) }, icon('trash')),
             ),
             h('label', { for: contentId, class: 'sr-only' }, 'Script content'),
             h('textarea', {
@@ -186,6 +188,7 @@ const components: CustomRenderer = (def, store) => {
   const add = h(
     'button',
     { type: 'button', class: 'btn', 'data-action': 'add-component', onclick: () => mutate((it) => it.push({ id: newId(), enabled: true, component: '', pass: 'specialize', markup: '' })) },
+    icon('plus'),
     'Add component',
   );
   const el = customShell(def, h('div', {}, datalist, list, add));
@@ -210,7 +213,7 @@ const components: CustomRenderer = (def, store) => {
             h('label', { for: passId, class: 'sr-only' }, 'Pass'),
             h('select', { id: passId, onchange: (e: Event) => mutate((it) => (it[i]!.pass = (e.target as HTMLSelectElement).value as Pass)) }, PASS_OPTIONS.map((ps) => h('option', { value: ps, selected: ps === c.pass }, ps))),
             h('span', { class: 'check' }, h('input', { type: 'checkbox', id: enId, checked: c.enabled, onchange: (e: Event) => mutate((it) => (it[i]!.enabled = (e.target as HTMLInputElement).checked)) }), h('label', { for: enId }, 'Enabled')),
-            h('button', { type: 'button', class: 'icon danger', 'aria-label': 'Delete component', title: 'Delete', onclick: () => mutate((it) => it.splice(i, 1)) }, '✕'),
+            h('button', { type: 'button', class: 'icon-btn danger', 'aria-label': 'Delete component', title: 'Delete', onclick: () => mutate((it) => it.splice(i, 1)) }, icon('trash')),
           ),
           h('label', { for: markupId, class: 'sr-only' }, 'Inner XML markup'),
           h('textarea', {

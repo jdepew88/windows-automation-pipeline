@@ -20,6 +20,7 @@ import { exportWinGetJson } from '../engine/applications/winget-json';
 import { planPreview, wingetArguments } from '../engine/applications';
 import { clear, download, h, uid } from './dom';
 import { customShell, type CustomRenderer } from './form';
+import { icon, type IconName } from './icons';
 
 const newId = () => (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`).slice(0, 36);
 const fileSafe = (s: string) => s.replace(/[^\w.-]+/g, '-').replace(/^-+|-+$/g, '') || 'profile';
@@ -27,6 +28,14 @@ const fileSafe = (s: string) => s.replace(/[^\w.-]+/g, '-').replace(/^-+|-+$/g, 
 function badge(text: string, kind = '', title?: string): HTMLElement {
   return h('span', { class: `badge${kind ? ` ${kind}` : ''}`, title }, text);
 }
+
+/** Initials tile; the colour follows the category so related apps look related. */
+function avatar(name: string, category?: string): HTMLElement {
+  const initials = name.replace(/[^\p{L}\p{N} ]/gu, ' ').split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0]!.toUpperCase()).join('') || '?';
+  return h('span', { class: 'avatar', 'data-cat': category ?? 'other', 'aria-hidden': 'true' }, initials);
+}
+
+const PROFILE_ICONS: Record<string, IconName> = { everyday: 'home', gaming: 'gamepad', developer: 'code', laptop: 'laptop', touch: 'pen', custom: 'sliders' };
 
 function refFromCatalog(e: CatalogEntry): PackageRef {
   return { packageIdentifier: e.packageIdentifier!, source: e.source, displayName: e.displayName, version: '', scope: '' };
@@ -37,7 +46,7 @@ function packageBadges(x: PlannedPackage): HTMLElement[] {
   if (x.resolution === 'verified') out.push(badge('verified ID', 'ok', `Identifier checked with winget show on ${x.catalog?.validation.checkedAt}`));
   else if (x.resolution === 'unverified') out.push(badge('not in catalog', 'warn', 'Well-formed identifier; availability is checked on the device before installing.'));
   else out.push(badge('unresolved', 'err', x.reason));
-  if (x.ref.source === 'msstore') out.push(badge('Microsoft Store'));
+  if (x.ref.source === 'msstore') out.push(badge('Microsoft Store', 'info'));
   if (x.interaction === 'required') out.push(badge('needs interaction', 'warn'));
   if (x.interaction === 'mayPrompt') out.push(badge('may prompt', 'warn'));
   if (x.accountSignIn) out.push(badge('sign-in after install'));
@@ -45,6 +54,8 @@ function packageBadges(x: PlannedPackage): HTMLElement[] {
   if (x.origins.length > 1) out.push(badge(`in ${x.origins.length} sources`, '', 'Selected through more than one profile or addition; installed once.'));
   return out;
 }
+
+const btn = (label: string, ico: IconName | null, attrs: Record<string, string | boolean | ((e: Event) => void)>) => h('button', { type: 'button', class: 'btn', ...attrs }, ico ? icon(ico) : null, label);
 
 export const applicationsEditor: CustomRenderer = (def, store) => {
   // Local view state (never stored in the profile).
@@ -57,17 +68,21 @@ export const applicationsEditor: CustomRenderer = (def, store) => {
   const say = (kind: 'info' | 'error', title: string, lines: string[] = []) => {
     clear(status);
     status.className = `app-status notice ${kind}`;
-    status.append(h('strong', {}, title));
-    if (lines.length) status.append(h('ul', {}, lines.slice(0, 12).map((l) => h('li', {}, l)), lines.length > 12 ? h('li', {}, `… and ${lines.length - 12} more`) : null));
-    status.append(h('button', { type: 'button', class: 'icon', 'aria-label': 'Dismiss', onclick: () => clear(status) }, '✕'));
+    status.append(
+      icon(kind === 'error' ? 'xCircle' : 'info'),
+      h('div', { class: 'notice-body' }, h('strong', {}, title), lines.length ? h('ul', {}, lines.slice(0, 12).map((l) => h('li', {}, l)), lines.length > 12 ? h('li', {}, `… and ${lines.length - 12} more`) : null) : null),
+      h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Dismiss', onclick: () => clear(status) }, icon('x')),
+    );
   };
 
-  // Profiles --------------------------------------------------------------------------------------
+  // Toolbar and profiles -----------------------------------------------------------------------------
+  const stats = h('div', { class: 'app-stats' });
   const profileGrid = h('div', { class: 'profile-grid', 'data-testid': 'app-profiles' });
   const fileInput = h('input', {
     type: 'file',
     accept: '.json,application/json',
     class: 'sr-only',
+    tabindex: -1,
     'data-testid': 'app-import-input',
     onchange: async () => {
       const file = fileInput.files?.[0];
@@ -90,14 +105,14 @@ export const applicationsEditor: CustomRenderer = (def, store) => {
       ]);
     },
   });
-  const profileActions = h(
+  const toolbar = h(
     'div',
-    { class: 'actions' },
+    { class: 'app-toolbar' },
+    stats,
     h(
-      'button',
-      {
-        type: 'button',
-        class: 'btn',
+      'div',
+      { class: 'app-actions' },
+      btn('New profile…', 'plus', {
         'data-action': 'app-new-profile',
         onclick: () => {
           const name = prompt('Name of the new profile:', 'My applications');
@@ -108,30 +123,18 @@ export const applicationsEditor: CustomRenderer = (def, store) => {
             target = p.id;
           });
         },
-      },
-      'New profile…',
-    ),
-    h('button', { type: 'button', class: 'btn', 'data-action': 'app-import', onclick: () => fileInput.click() }, 'Import WinGet or profile JSON…'),
-    fileInput,
-    h(
-      'button',
-      {
-        type: 'button',
-        class: 'btn',
+      }),
+      btn('Import WinGet or profile JSON…', 'importIcon', { 'data-action': 'app-import', onclick: () => fileInput.click() }),
+      fileInput,
+      btn('Export selection as WinGet JSON', 'exportIcon', {
         'data-action': 'app-export-winget',
         onclick: () => download('winget-packages.json', exportWinGetJson(resolveSelection(store.get().applications.selection).packages.map((x) => x.ref)), 'application/json'),
-      },
-      'Export selection as WinGet JSON',
-    ),
-    h(
-      'button',
-      {
-        type: 'button',
+      }),
+      btn('Export all profiles', 'exportIcon', {
         class: 'btn advanced',
         'data-action': 'app-export-profiles',
         onclick: () => download('application-profiles.json', exportAppProfiles(store.get().applications.selection.profiles), 'application/json'),
-      },
-      'Export all profiles',
+      }),
     ),
   );
 
@@ -139,38 +142,39 @@ export const applicationsEditor: CustomRenderer = (def, store) => {
     const id = uid('ap');
     const checked = sel.selectedProfiles.includes(p.id);
     const n = counts.get(p.id) ?? 0;
-    const btn = (label: string, action: string, onclick: () => void, extra: Record<string, string | boolean> = {}) =>
+    const link = (label: string, action: string, onclick: () => void, extra: Record<string, string | boolean> = {}) =>
       h('button', { type: 'button', class: 'linkish', 'data-action': action, onclick, ...extra }, label);
     return h(
       'div',
       { class: `profile-card${checked ? ' on' : ''}`, 'data-profile': p.id },
       h(
-        'div',
-        { class: 'check' },
+        'label',
+        { class: 'profile-main', for: id },
+        h('span', { class: 'profile-icon' }, icon(PROFILE_ICONS[p.category] ?? 'layers')),
+        h('span', { class: 'profile-text' }, h('strong', {}, p.name), h('span', { class: 'choice-desc' }, n === 0 ? 'Empty' : `${n} package${n === 1 ? '' : 's'}`)),
         h('input', { type: 'checkbox', id, name: `applications.profile.${p.id}`, checked, onchange: (e: Event) => mutate((s) => toggleProfile(s, p.id, (e.target as HTMLInputElement).checked)) }),
-        h('label', { for: id }, h('strong', {}, p.name), h('span', { class: 'choice-desc' }, n === 0 ? 'Empty' : `${n} package${n === 1 ? '' : 's'}`)),
       ),
-      p.description ? h('p', { class: 'choice-desc' }, p.description) : null,
+      p.description ? h('p', { class: 'choice-desc profile-desc' }, p.description) : null,
       h(
         'div',
         { class: 'card-actions advanced' },
-        btn('Save selection here', 'app-save-to-profile', () => {
+        link('Save selection here', 'app-save-to-profile', () => {
           if (confirm(`Replace the packages of "${p.name}" with the ${resolveSelection(sel).packages.length} currently selected application(s)?`)) mutate((s) => saveSelectionToProfile(s, p.id));
         }),
-        btn('Duplicate', 'app-duplicate-profile', () => mutate((s) => duplicateProfile(s, p.id))),
+        link('Duplicate', 'app-duplicate-profile', () => mutate((s) => duplicateProfile(s, p.id))),
         p.builtin
           ? null
-          : btn('Rename', 'app-rename-profile', () => {
+          : link('Rename', 'app-rename-profile', () => {
               const name = prompt('New name:', p.name);
               if (name?.trim()) mutate((s) => renameProfile(s, p.id, name));
             }),
-        p.builtin ? null : btn('Delete', 'app-delete-profile', () => confirm(`Delete the profile "${p.name}"?`) && mutate((s) => deleteProfile(s, p.id)), { class: 'linkish danger' }),
-        btn('Export', 'app-export-profile', () => download(`${fileSafe(p.name)}.app-profile.json`, exportAppProfiles([p]), 'application/json')),
+        p.builtin ? null : link('Delete', 'app-delete-profile', () => confirm(`Delete the profile "${p.name}"?`) && mutate((s) => deleteProfile(s, p.id)), { class: 'linkish danger' }),
+        link('Export', 'app-export-profile', () => download(`${fileSafe(p.name)}.app-profile.json`, exportAppProfiles([p]), 'application/json')),
       ),
       p.packages.length
         ? h(
             'details',
-            { class: 'advanced' },
+            { class: 'advanced profile-contents' },
             h('summary', {}, 'Contents'),
             h(
               'ul',
@@ -179,9 +183,7 @@ export const applicationsEditor: CustomRenderer = (def, store) => {
                 h(
                   'li',
                   {},
-                  `${r.displayName || r.packageIdentifier} `,
-                  h('code', {}, `${r.source}:${r.packageIdentifier}`),
-                  ' ',
+                  h('span', {}, `${r.displayName || r.packageIdentifier} `, h('code', {}, `${r.source}:${r.packageIdentifier}`)),
                   h('button', { type: 'button', class: 'linkish danger', 'aria-label': `Remove ${r.displayName} from ${p.name}`, onclick: () => mutate((s) => removeFromProfile(s, p.id, packageKey(r))) }, 'remove'),
                 ),
               ),
@@ -199,7 +201,6 @@ export const applicationsEditor: CustomRenderer = (def, store) => {
 
   // Catalog ---------------------------------------------------------------------------------------
   const searchId = uid('as');
-  const catId = uid('ac');
   const targetId = uid('at');
   const search = h('input', {
     type: 'search',
@@ -212,19 +213,29 @@ export const applicationsEditor: CustomRenderer = (def, store) => {
       renderCatalog();
     },
   });
-  const categorySelect = h(
-    'select',
-    {
-      id: catId,
-      'data-testid': 'app-category',
-      onchange: () => {
-        category = categorySelect.value as CatalogCategory | '';
-        renderCatalog();
-      },
-    },
-    h('option', { value: '' }, 'All categories'),
-    (Object.entries(CATALOG_CATEGORIES) as [CatalogCategory, string][]).map(([k, v]) => h('option', { value: k }, v)),
-  );
+  const chips = h('div', { class: 'chips', role: 'group', 'aria-label': 'Category', 'data-testid': 'app-category' });
+  const categories: [CatalogCategory | '', string][] = [['', 'All'], ...(Object.entries(CATALOG_CATEGORIES) as [CatalogCategory, string][])];
+  for (const [value, label] of categories) {
+    const n = value ? CATALOG.filter((e) => e.category === value).length : CATALOG.length;
+    chips.append(
+      h(
+        'button',
+        {
+          type: 'button',
+          class: 'chip',
+          'data-category': value || 'all',
+          'aria-pressed': String(value === category),
+          onclick: () => {
+            category = value;
+            for (const c of chips.querySelectorAll('button')) c.setAttribute('aria-pressed', String(c.dataset.category === (value || 'all')));
+            renderCatalog();
+          },
+        },
+        label,
+        h('span', { class: 'chip-count' }, String(n)),
+      ),
+    );
+  }
   const targetSelect = h('select', {
     id: targetId,
     'data-testid': 'app-target',
@@ -240,13 +251,13 @@ export const applicationsEditor: CustomRenderer = (def, store) => {
   const manualName = h('input', { type: 'text', placeholder: 'Display name (optional)', 'aria-label': 'Display name', 'data-testid': 'app-manual-name', autocomplete: 'off' });
   const manualVersion = h('input', { type: 'text', placeholder: 'Version (empty = latest)', 'aria-label': 'Version', 'data-testid': 'app-manual-version', autocomplete: 'off', spellcheck: 'false' });
   const manualScope = h('select', { 'aria-label': 'Scope' }, h('option', { value: '' }, 'Default scope'), h('option', { value: 'machine' }, 'Machine'), h('option', { value: 'user' }, 'User'));
-  const manualMsg = h('p', { class: 'issues', 'data-testid': 'app-manual-message' });
+  const manualMsg = h('div', { class: 'issues', 'data-testid': 'app-manual-message' });
   const manual = h(
     'details',
     { class: 'advanced manual-add' },
-    h('summary', {}, 'Add by package identifier'),
+    h('summary', {}, icon('hash'), 'Add by package identifier'),
     h('p', { class: 'desc' }, 'For packages that are not in the catalog. The identifier must be exact (check it with "winget show --id <id> --exact"); it is validated again on the device before installing.'),
-    h('div', { class: 'app-controls' }, manualId, manualSource, manualName, manualVersion, manualScope),
+    h('div', { class: 'manual-grid' }, manualId, manualSource, manualName, manualVersion, manualScope),
     h(
       'button',
       {
@@ -274,6 +285,7 @@ export const applicationsEditor: CustomRenderer = (def, store) => {
           if (added) manualId.value = manualName.value = manualVersion.value = '';
         },
       },
+      icon('plus'),
       'Add package',
     ),
     manualMsg,
@@ -287,34 +299,53 @@ export const applicationsEditor: CustomRenderer = (def, store) => {
     'div',
     { class: 'apps' },
     status,
-    h('h4', {}, 'Profiles'),
-    h('p', { class: 'desc' }, 'Tick one or more profiles to combine them. Every profile starts empty; fill one by adding applications below with "Add to" set to that profile, or with "Save selection here" (Advanced).'),
-    profileGrid,
-    profileActions,
-    h('h4', {}, 'Selected applications ', count),
-    warnings,
-    selected,
-    removedBox,
-    h('h4', {}, 'Add applications'),
+    toolbar,
     h(
       'div',
-      { class: 'app-controls' },
-      h('label', { for: searchId, class: 'sr-only' }, 'Search the catalog'),
-      search,
-      h('label', { for: catId, class: 'sr-only' }, 'Category'),
-      categorySelect,
-      h('span', { class: 'inline-label' }, h('label', { for: targetId }, 'Add to'), targetSelect),
+      { class: 'apps-block', id: 'app-profiles' },
+      h('div', { class: 'block-head' }, h('h4', {}, icon('layers'), 'Application profiles'), h('p', { class: 'desc' }, 'Tick one or more profiles to combine them; each package is installed once. Every profile starts empty: fill one by choosing it under "Add to" in the catalog, or with "Save selection here" (Advanced).')),
+      profileGrid,
     ),
-    h('p', { class: 'desc' }, `Catalog of ${CATALOG.length} applications, identifiers checked on ${CATALOG_UPDATED}. Being listed here installs nothing.`),
-    catalogList,
-    manual,
-    h('h4', { class: 'advanced' }, 'Installation order preview'),
-    h('p', { class: 'desc advanced' }, 'The engine installs in this order, one package at a time, after checking with "winget list" whether each one is already installed.'),
-    h('div', { class: 'advanced' }, order, h('details', {}, h('summary', {}, 'Full plan with every command (applications-plan.txt)'), planText)),
+    h(
+      'div',
+      { class: 'apps-split' },
+      h(
+        'section',
+        { class: 'panel catalog-panel', 'aria-label': 'Application catalog' },
+        h('div', { class: 'panel-head' }, h('h4', {}, icon('package'), 'Catalog'), h('span', { class: 'panel-meta' }, `${CATALOG.length} applications · identifiers checked ${CATALOG_UPDATED}`)),
+        h(
+          'div',
+          { class: 'catalog-controls' },
+          h('label', { for: searchId, class: 'sr-only' }, 'Search the catalog'),
+          h('div', { class: 'search-box' }, icon('search'), search),
+          h('div', { class: 'inline-label' }, h('label', { for: targetId }, 'Add to'), targetSelect),
+        ),
+        chips,
+        h('p', { class: 'desc' }, 'Being listed here installs nothing.'),
+        catalogList,
+        manual,
+      ),
+      h(
+        'section',
+        { class: 'panel selected-panel', 'aria-label': 'Selected applications' },
+        h('div', { class: 'panel-head' }, h('h4', {}, icon('check'), 'Selected applications'), count),
+        warnings,
+        selected,
+        removedBox,
+        h(
+          'div',
+          { class: 'advanced order-block' },
+          h('h5', {}, 'Installation order preview'),
+          h('p', { class: 'desc' }, 'The engine installs in this order, one package at a time, after checking with "winget list" whether each one is already installed.'),
+          order,
+          h('details', {}, h('summary', {}, 'Full plan with every command (applications-plan.txt)'), planText),
+        ),
+      ),
+    ),
     h(
       'details',
       { class: 'advanced troubleshooting' },
-      h('summary', {}, 'Troubleshooting'),
+      h('summary', {}, icon('info'), 'Troubleshooting'),
       h(
         'ul',
         {},
@@ -342,22 +373,26 @@ export const applicationsEditor: CustomRenderer = (def, store) => {
       catalogList.append(
         h(
           'li',
-          { class: 'catalog-item', 'data-catalog': e.id },
+          { class: `catalog-item${there ? ' added' : ''}${unresolved ? ' unresolved' : ''}`, 'data-catalog': e.id },
+          avatar(e.displayName, e.category),
           h(
             'div',
             { class: 'catalog-main' },
-            h('strong', {}, e.displayName),
-            ' ',
-            badge(CATALOG_CATEGORIES[e.category], 'muted'),
-            unresolved ? badge('unresolved', 'err', 'No verified WinGet identifier; cannot be installed.') : null,
-            e.source === 'msstore' ? badge('Microsoft Store') : null,
-            e.accountSignIn ? badge('sign-in after install') : null,
-            e.interaction === 'mayPrompt' ? badge('may prompt', 'warn') : null,
+            h(
+              'div',
+              { class: 'row-title' },
+              h('strong', {}, e.displayName),
+              badge(CATALOG_CATEGORIES[e.category], 'muted'),
+              unresolved ? badge('unresolved', 'err', 'No verified WinGet identifier; cannot be installed.') : null,
+              e.source === 'msstore' ? badge('Microsoft Store', 'info') : null,
+              e.accountSignIn ? badge('sign-in after install') : null,
+              e.interaction === 'mayPrompt' ? badge('may prompt', 'warn') : null,
+            ),
             h('span', { class: 'choice-desc' }, e.description, e.notes ? ` ${e.notes}` : ''),
             h(
               'span',
               { class: 'ids advanced' },
-              unresolved ? 'No identifier' : `${e.source}: ${e.packageIdentifier}`,
+              h('code', {}, unresolved ? 'No identifier' : `${e.source}: ${e.packageIdentifier}`),
               ` · ${e.license}`,
               e.website ? h('span', {}, ' · ', h('a', { href: e.website, rel: 'noopener noreferrer', target: '_blank' }, 'website')) : null,
             ),
@@ -366,7 +401,7 @@ export const applicationsEditor: CustomRenderer = (def, store) => {
             'button',
             {
               type: 'button',
-              class: 'btn',
+              class: `btn sm${there ? ' done' : unresolved ? '' : ' add'}`,
               'data-action': 'app-add',
               disabled: unresolved || there,
               'aria-label': `${there ? 'Added' : 'Add'} ${e.displayName}`,
@@ -392,7 +427,12 @@ export const applicationsEditor: CustomRenderer = (def, store) => {
     targetSelect.append(h('option', { value: ADDED, selected: target === ADDED }, 'This deployment only'), ...selection.profiles.map((p) => h('option', { value: p.id, selected: target === p.id }, `Profile: ${p.name}`)));
 
     const installableCount = r.packages.filter((x) => x.resolution !== 'unresolved').length;
-    count.textContent = `${installableCount} selected${r.packages.length > installableCount ? `, ${r.packages.length - installableCount} unresolved` : ''}`;
+    const unresolvedCount = r.packages.length - installableCount;
+    count.textContent = `${installableCount} selected${unresolvedCount ? `, ${unresolvedCount} unresolved` : ''}`;
+    clear(stats);
+    const stat = (n: number, label: string, tone = '') => h('div', { class: `stat${tone ? ` ${tone}` : ''}` }, h('strong', {}, String(n)), h('span', {}, label));
+    stats.append(stat(installableCount, 'to install', installableCount ? 'ok' : ''), stat(selection.selectedProfiles.length, `profile${selection.selectedProfiles.length === 1 ? '' : 's'} combined`), stat(selection.added.length, 'added individually'));
+    if (unresolvedCount) stats.append(stat(unresolvedCount, 'unresolved', 'err'));
 
     clear(warnings);
     const notes: HTMLElement[] = [];
@@ -404,7 +444,14 @@ export const applicationsEditor: CustomRenderer = (def, store) => {
 
     clear(selected);
     if (r.packages.length === 0) {
-      selected.append(h('p', { class: 'empty' }, selection.selectedProfiles.length ? 'The selected profiles are empty. Add applications below.' : 'No applications selected. Tick a profile or add applications below.'));
+      selected.append(
+        h(
+          'div',
+          { class: 'empty-state' },
+          icon('package'),
+          h('p', { class: 'empty' }, selection.selectedProfiles.length ? 'The selected profiles are empty. Add applications from the catalog.' : 'No applications selected. Tick a profile or add applications from the catalog.'),
+        ),
+      );
     }
     r.packages.forEach((x, i) => {
       selected.append(
@@ -412,16 +459,16 @@ export const applicationsEditor: CustomRenderer = (def, store) => {
           'div',
           { class: `app-row${x.resolution === 'unresolved' ? ' unresolved' : ''}`, 'data-package': x.key },
           h('span', { class: 'app-index' }, String(i + 1)),
+          avatar(x.displayName, x.catalog?.category),
           h(
             'div',
             { class: 'app-name' },
             h('strong', {}, x.displayName),
-            ' ',
-            ...packageBadges(x),
-            h('span', { class: 'ids advanced' }, `${x.ref.source}: ${x.ref.packageIdentifier}${x.ref.version ? ` · version ${x.ref.version}` : ''}${x.ref.scope ? ` · ${x.ref.scope} scope` : ''}`),
+            h('div', { class: 'badges' }, ...packageBadges(x)),
+            h('span', { class: 'ids advanced' }, h('code', {}, `${x.ref.source}: ${x.ref.packageIdentifier}`), `${x.ref.version ? ` · version ${x.ref.version}` : ''}${x.ref.scope ? ` · ${x.ref.scope} scope` : ''}`),
             h('span', { class: 'choice-desc advanced' }, `From: ${x.origins.map((o) => (o === ADDED ? 'added individually' : (selection.profiles.find((p) => p.id === o)?.name ?? o))).join(', ')}`),
           ),
-          h('button', { type: 'button', class: 'icon danger', 'data-action': 'app-remove', 'aria-label': `Remove ${x.displayName}`, title: 'Remove from the selection', onclick: () => mutate((s) => removePackage(s, x.key)) }, '✕'),
+          h('button', { type: 'button', class: 'icon-btn danger', 'data-action': 'app-remove', 'aria-label': `Remove ${x.displayName}`, title: 'Remove from the selection', onclick: () => mutate((s) => removePackage(s, x.key)) }, icon('x')),
         ),
       );
     });
@@ -433,7 +480,7 @@ export const applicationsEditor: CustomRenderer = (def, store) => {
         h(
           'ul',
           { class: 'ids-list' },
-          r.removed.map((x) => h('li', { 'data-removed': x.key }, `${x.displayName} `, h('button', { type: 'button', class: 'linkish', 'data-action': 'app-restore', onclick: () => mutate((s) => restorePackage(s, x.key)) }, 'restore'))),
+          r.removed.map((x) => h('li', { 'data-removed': x.key }, h('span', {}, x.displayName), h('button', { type: 'button', class: 'linkish', 'data-action': 'app-restore', onclick: () => mutate((s) => restorePackage(s, x.key)) }, 'restore'))),
         ),
       );
     }
@@ -466,7 +513,7 @@ export const applicationsEditor: CustomRenderer = (def, store) => {
 const INSTALLER_TYPES: AdditionalItem['installerType'][] = ['exe', 'msi', 'msix', 'zip', 'other'];
 
 export const additionalSoftwareEditor: CustomRenderer = (def, store) => {
-  const list = h('div', { class: 'list' });
+  const list = h('div', { class: 'addl-list' });
   const mutate = (fn: (items: AdditionalItem[]) => void) => store.update((p) => fn(p.additionalSoftware.items), true);
   const add = h(
     'button',
@@ -495,14 +542,25 @@ export const additionalSoftwareEditor: CustomRenderer = (def, store) => {
           }),
         ),
     },
+    icon('plus'),
     'Add installer',
   );
   const el = customShell(
     def,
     h(
       'div',
-      {},
-      h('p', { class: 'context' }, h('strong', {}, 'Safety: '), 'URLs are recorded, never downloaded. Silent switches are never guessed: enter only switches the publisher documents. Automatic execution is limited to reviewed installers (none yet), so every entry becomes a manual follow-up task.'),
+      { class: 'addl' },
+      h(
+        'div',
+        { class: 'addl-callout', role: 'note' },
+        icon('info'),
+        h(
+          'div',
+          {},
+          h('strong', {}, 'Not installed automatically. '),
+          'Entries are recorded as a manual follow-up checklist. URLs are recorded, never downloaded. Silent switches are never guessed: enter only switches the publisher documents. Automatic execution is limited to reviewed installers, and there are none yet.',
+        ),
+      ),
       list,
       add,
     ),
@@ -510,13 +568,13 @@ export const additionalSoftwareEditor: CustomRenderer = (def, store) => {
 
   const render = (items: AdditionalItem[]) => {
     clear(list);
-    if (items.length === 0) list.append(h('p', { class: 'empty' }, 'No additional installers.'));
+    if (items.length === 0) list.append(h('div', { class: 'empty-state' }, icon('boxPlus'), h('p', { class: 'empty' }, 'No additional installers.')));
     items.forEach((it, i) => {
-      const text = (key: keyof AdditionalItem, label: string, placeholder = '', type = 'text') => {
+      const text = (key: keyof AdditionalItem, label: string, placeholder = '', type = 'text', wide = false) => {
         const id = uid('ad');
         return h(
           'div',
-          { class: 'mini-field' },
+          { class: `mini-field${wide ? ' wide' : ''}` },
           h('label', { for: id }, label),
           h('input', {
             id,
@@ -543,27 +601,36 @@ export const additionalSoftwareEditor: CustomRenderer = (def, store) => {
           ),
         );
       };
+      const part = (title: string, ico: IconName, ...children: HTMLElement[]) => h('div', { class: 'addl-part' }, h('h5', {}, icon(ico), title), h('div', { class: 'mini-grid' }, ...children));
       const supplyId = uid('ad');
       list.append(
         h(
           'div',
-          { class: 'item', 'data-additional-index': i },
+          { class: 'item addl-item', 'data-additional-index': i },
           h(
             'div',
             { class: 'item-head' },
-            h('strong', {}, it.name || `Installer ${i + 1}`),
-            h('span', { class: 'tag' }, it.execution === 'automatic' ? 'automatic (reviewed only)' : 'manual follow-up'),
-            h('button', { type: 'button', class: 'icon danger', 'aria-label': 'Delete installer', title: 'Delete', onclick: () => mutate((xs) => xs.splice(i, 1)) }, '✕'),
+            avatar(it.name || `Installer ${i + 1}`),
+            h('div', { class: 'addl-title' }, h('strong', {}, it.name || `Installer ${i + 1}`), h('span', { class: 'choice-desc' }, it.publisher || 'Publisher not set')),
+            h('span', { class: `tag ${it.execution === 'automatic' ? 'warn' : 'manual'}` }, it.execution === 'automatic' ? 'automatic (reviewed only)' : 'manual follow-up'),
+            h('button', { type: 'button', class: 'icon-btn danger', 'aria-label': 'Delete installer', title: 'Delete', onclick: () => mutate((xs) => xs.splice(i, 1)) }, icon('trash')),
           ),
-          h(
-            'div',
-            { class: 'mini-grid' },
-            text('name', 'Name'),
-            text('publisher', 'Publisher'),
-            text('downloadUrl', 'Official download URL', 'https://…', 'url'),
+          part('Application', 'package', text('name', 'Name'), text('publisher', 'Publisher (official source)'), text('license', 'Licence'), select('redistribution', 'Redistribution', [
+            ['unknown', 'Unknown'],
+            ['allowed', 'Allowed'],
+            ['restricted', 'Restricted'],
+          ])),
+          part(
+            'Installer source',
+            'globe',
+            text('downloadUrl', 'Official installer URL', 'https://…', 'url', true),
             select('installerType', 'Installer type', INSTALLER_TYPES.map((t) => [t, t.toUpperCase()])),
             text('fileName', 'Supplied file name', 'setup.exe'),
-            text('sha256', 'Expected SHA-256', '64 hex characters'),
+            text('sha256', 'Expected SHA-256 checksum', '64 hex characters', 'text', true),
+          ),
+          part(
+            'Installation',
+            'terminal',
             text('silentArgs', 'Silent arguments (documented by the publisher)', 'e.g. /S'),
             text('prerequisites', 'Prerequisites'),
             select('interaction', 'Interaction', [
@@ -571,23 +638,21 @@ export const additionalSoftwareEditor: CustomRenderer = (def, store) => {
               ['none', 'None (fully silent)'],
               ['required', 'Required'],
             ]),
-            text('license', 'Licence'),
-            select('redistribution', 'Redistribution', [
-              ['unknown', 'Unknown'],
-              ['allowed', 'Allowed'],
-              ['restricted', 'Restricted'],
-            ]),
             select('execution', 'Execution', [
               ['manual', 'Manual follow-up'],
               ['automatic', 'Automatic (reviewed installers only)'],
             ]),
+          ),
+          part(
+            'Manual follow-up',
+            'list',
             h(
               'div',
               { class: 'mini-field check' },
               h('input', { type: 'checkbox', id: supplyId, checked: it.manualSupply, onchange: (e: Event) => mutate((xs) => (xs[i]!.manualSupply = (e.target as HTMLInputElement).checked)) }),
               h('label', { for: supplyId }, 'Installer must be supplied manually'),
             ),
-            text('notes', 'Notes'),
+            text('notes', 'Notes for the follow-up task', '', 'text', true),
           ),
           h('div', { class: 'issues', 'data-issues-for': `additionalSoftware.items.${i}` }),
         ),

@@ -3,56 +3,65 @@ import { generate, type GenerateResult } from './engine/pipeline';
 import { exportProfile, hasSecrets, importProfile, ownerDefaults } from './engine/profiles';
 import { resolveIdentity } from './engine/naming';
 import type { Profile } from './engine/schema/profile';
+import type { SettingDef } from './engine/settings/types';
 import type { Issue } from './engine/validation/issues';
-import { ALL_SETTINGS, SECTIONS } from './features';
+import { ALL_SETTINGS, SECTIONS, SETTINGS_BY_PATH } from './features';
 import { AUTOLOGON_WARNING } from './features/accounts';
 import { CUSTOM_RENDERERS } from './ui/editors';
 import { clear, download, h } from './ui/dom';
 import { renderField, type FieldHandle } from './ui/form';
+import { icon, type IconName } from './ui/icons';
+import { FIELD_GROUPS, NAV_GROUPS, PAGE_ICONS, type NavItem, type PageId } from './ui/layout';
 import { renderReview } from './ui/review';
 import { Store } from './ui/store';
 
 type View = 'basic' | 'advanced';
+type Theme = 'dark' | 'light' | 'system';
 const VIEW_KEY = 'wdb.view';
+const THEME_KEY = 'wdb.theme';
 
-function loadView(): View {
+// View and appearance are per-browser conveniences; configuration itself is never stored.
+function loadPref(key: string): string | null {
   try {
-    return localStorage.getItem(VIEW_KEY) === 'advanced' ? 'advanced' : 'basic';
+    return localStorage.getItem(key);
   } catch {
-    return 'basic';
+    return null;
   }
 }
 
-function saveView(v: View): void {
+function savePref(key: string, value: string): void {
   try {
-    localStorage.setItem(VIEW_KEY, v);
+    localStorage.setItem(key, value);
   } catch {
-    /* storage unavailable: view preference is only a convenience */
+    /* storage unavailable: preferences are only a convenience */
   }
 }
 
 const store = new Store();
-const fields: FieldHandle[] = [];
+const fields: { def: SettingDef; handle: FieldHandle }[] = [];
 const review = renderReview();
 const app = document.getElementById('app')!;
 
-// Header ---------------------------------------------------------------------------------------
+// Notice -----------------------------------------------------------------------------------------
 const notice = h('div', { class: 'notice', role: 'status', 'aria-live': 'polite', 'data-testid': 'notice', hidden: true });
 function showNotice(kind: 'info' | 'error', title: string, lines: string[] = []): void {
   clear(notice);
   notice.hidden = false;
   notice.className = `notice ${kind}`;
   notice.append(
-    h('strong', {}, title),
-    ...(lines.length > 0 ? [h('ul', {}, lines.map((l) => h('li', {}, l)))] : []),
-    h('button', { type: 'button', class: 'icon', 'aria-label': 'Dismiss', onclick: () => (notice.hidden = true) }, '✕'),
+    icon(kind === 'error' ? 'xCircle' : 'info'),
+    h('div', { class: 'notice-body' }, h('strong', {}, title), ...(lines.length > 0 ? [h('ul', {}, lines.map((l) => h('li', {}, l)))] : [])),
+    h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Dismiss', onclick: () => (notice.hidden = true) }, icon('x')),
   );
+  window.scrollTo({ top: 0 });
 }
 
+// Header -----------------------------------------------------------------------------------------
 const fileInput = h('input', {
   type: 'file',
   accept: '.json,application/json',
   class: 'sr-only',
+  tabindex: -1,
   'data-testid': 'import-input',
   onchange: async () => {
     const file = fileInput.files?.[0];
@@ -69,112 +78,351 @@ const fileInput = h('input', {
 });
 
 const includeSecrets = h('input', { type: 'checkbox', id: 'include-secrets', 'data-testid': 'include-secrets' });
-const viewSwitch = h('div', { class: 'view-switch', role: 'radiogroup', 'aria-label': 'View' });
-let view: View = loadView();
-function setView(v: View): void {
-  view = v;
-  document.body.dataset.view = v;
-  saveView(v);
-  for (const b of viewSwitch.querySelectorAll('button')) b.setAttribute('aria-pressed', String(b.dataset.view === v));
-}
+
+const viewSwitch = h('div', { class: 'seg', role: 'group', 'aria-label': 'Settings view' });
+let view: View = loadPref(VIEW_KEY) === 'advanced' ? 'advanced' : 'basic';
 for (const v of ['basic', 'advanced'] as View[]) {
   viewSwitch.append(h('button', { type: 'button', 'data-view': v, 'aria-pressed': 'false', onclick: () => setView(v) }, v === 'basic' ? 'Basic' : 'Advanced'));
 }
 
+const THEMES: [Theme, IconName, string][] = [
+  ['light', 'sun', 'Light'],
+  ['dark', 'moon', 'Dark'],
+  ['system', 'monitor', 'System'],
+];
+const themeSwitch = h('div', { class: 'seg seg-icons', role: 'group', 'aria-label': 'Appearance' });
+let theme: Theme = ((t) => (t === 'light' || t === 'system' ? t : 'dark'))(loadPref(THEME_KEY));
+for (const [t, ico, label] of THEMES) {
+  themeSwitch.append(h('button', { type: 'button', 'data-theme-choice': t, 'aria-pressed': 'false', 'aria-label': `${label} appearance`, title: `${label} appearance`, onclick: () => setTheme(t) }, icon(ico)));
+}
+function setTheme(t: Theme): void {
+  theme = t;
+  document.documentElement.dataset.theme = t;
+  savePref(THEME_KEY, t);
+  for (const b of themeSwitch.querySelectorAll<HTMLButtonElement>('button')) b.setAttribute('aria-pressed', String(b.dataset.themeChoice === t));
+}
+
+const menuButton = (cls: string) =>
+  h('button', { type: 'button', class: `icon-btn menu-btn ${cls}`, 'aria-controls': 'sidebar', 'aria-expanded': 'false', 'aria-label': 'Open section navigation', onclick: () => setDrawer(!document.body.classList.contains('nav-open')) }, icon('menu'));
+
 const header = h(
   'header',
-  { class: 'top' },
-  h('div', { class: 'brand' }, h('h1', {}, 'Windows Deployment Builder'), h('p', {}, 'autounattend.xml, Windows Update and WinGet provisioning for Windows 11 Pro · runs entirely offline in this browser')),
+  { class: 'app-header' },
+  h(
+    'div',
+    { class: 'brand' },
+    h('div', { class: 'logo' }, icon('windows')),
+    h(
+      'div',
+      { class: 'brand-text' },
+      h('h1', {}, 'Windows Deployment Builder'),
+      h(
+        'p',
+        { class: 'tagline' },
+        h('span', {}, 'Answer file, Windows Update and WinGet provisioning for Windows 11 Pro'),
+        h('span', { class: 'offline-pill', title: 'Everything is generated in this browser. Nothing is uploaded.' }, h('span', { class: 'dot' }), 'Runs entirely offline'),
+      ),
+    ),
+  ),
   h(
     'div',
     { class: 'toolbar' },
-    viewSwitch,
-    h('button', { type: 'button', class: 'btn', 'data-action': 'import', onclick: () => fileInput.click() }, 'Import profile…'),
-    fileInput,
+    h('div', { class: 'tool-group' }, viewSwitch),
     h(
-      'span',
-      { class: 'export' },
+      'div',
+      { class: 'tool-group' },
+      h('button', { type: 'button', class: 'btn', 'data-action': 'import', 'aria-label': 'Import profile…', title: 'Import a profile JSON file', onclick: () => fileInput.click() }, icon('importIcon'), h('span', { class: 'btn-text' }, 'Import profile…')),
+      fileInput,
       h(
         'button',
         {
           type: 'button',
           class: 'btn',
           'data-action': 'export',
+          'aria-label': 'Export profile…',
+          title: 'Export this configuration as a profile JSON file',
           onclick: () => {
             const p = store.get();
             download(`${(p.profileName || 'profile').replace(/[^\w.-]+/g, '-')}.json`, exportProfile(p, { includeSecrets: includeSecrets.checked }), 'application/json');
-            if (!includeSecrets.checked && hasSecrets(p)) showNotice('info', 'Exported without passwords', ['Account and Wi-Fi passwords were left out. Tick "include passwords" to keep them.']);
+            if (!includeSecrets.checked && hasSecrets(p)) showNotice('info', 'Exported without passwords', ['Account and Wi-Fi passwords were left out. Tick "Include passwords" to keep them.']);
           },
         },
-        'Export profile',
+        icon('exportIcon'),
+        h('span', { class: 'btn-text' }, 'Export profile…'),
       ),
-      h('span', { class: 'check' }, includeSecrets, h('label', { for: 'include-secrets' }, 'include passwords')),
+      h('label', { class: 'check-inline', for: 'include-secrets' }, includeSecrets, h('span', {}, 'Include passwords')),
     ),
     h(
-      'button',
-      {
-        type: 'button',
-        class: 'btn',
-        'data-action': 'reset',
-        onclick: () => {
-          if (confirm('Reset every setting to the owner defaults? Unsaved changes are lost.')) {
-            store.replace(ownerDefaults());
-            showNotice('info', 'Reset to owner defaults');
-          }
+      'div',
+      { class: 'tool-group' },
+      themeSwitch,
+      h(
+        'button',
+        {
+          type: 'button',
+          class: 'btn',
+          'data-action': 'reset',
+          'aria-label': 'Reset to owner defaults',
+          title: 'Reset every setting to the owner defaults',
+          onclick: () => {
+            if (confirm('Reset every setting to the owner defaults? Unsaved changes are lost.')) {
+              store.replace(ownerDefaults());
+              showNotice('info', 'Reset to owner defaults');
+            }
+          },
         },
-      },
-      'Reset to owner defaults',
+        icon('reset'),
+        h('span', { class: 'btn-text' }, 'Reset to owner defaults'),
+      ),
     ),
   ),
-  notice,
 );
 
-// Sections -------------------------------------------------------------------------------------
+// Pages ------------------------------------------------------------------------------------------
 const identity = h('p', { class: 'identity', 'data-testid': 'identity' });
 const autologonBanner = h(
   'div',
   { class: 'hazard', role: 'note', 'data-testid': 'autologon-warning' },
-  h('strong', {}, 'Security warning: '),
-  AUTOLOGON_WARNING,
-  ' This is the requested owner default. Choose a password and "once" or "none" under Advanced for a safer setup. Initial auto-login is separate from the Windows Update restart sign-on setting under System tweaks.',
+  icon('alert'),
+  h(
+    'p',
+    {},
+    h('strong', {}, 'Security warning: '),
+    AUTOLOGON_WARNING,
+    ' This is the requested owner default. Choose a password and "once" or "none" under Advanced for a safer setup. Initial auto-login is separate from the Windows Update restart sign-on setting under System tweaks.',
+  ),
 );
 
-const nav = h('nav', { class: 'toc', 'aria-label': 'Sections' });
-const main = h('main', { id: 'main' });
+interface GroupCard {
+  el: HTMLElement;
+  members: { def: SettingDef; handle: FieldHandle }[];
+}
+const groupCards: GroupCard[] = [];
+const pages = new Map<PageId, HTMLElement>();
+const pagers = new Map<PageId, HTMLElement>();
+const pagesEl = h('div', { class: 'pages' });
 
 for (const section of SECTIONS) {
   const defs = ALL_SETTINGS.filter((s) => s.section === section.id);
   if (defs.length === 0) continue;
   const allAdvanced = defs.every((d) => d.advanced);
-  const sectionEl = h(
+  const pageEl = h(
     'section',
-    { class: `section${allAdvanced ? ' advanced' : ''}`, id: `section-${section.id}`, 'aria-labelledby': `title-${section.id}` },
-    h('h2', { id: `title-${section.id}` }, section.title),
-    section.intro ? h('p', { class: 'intro' }, section.intro) : null,
+    { class: `page${allAdvanced ? ' advanced' : ''}`, id: `section-${section.id}`, 'data-page': section.id, 'aria-labelledby': `title-${section.id}`, hidden: true },
+    h(
+      'header',
+      { class: 'page-head' },
+      h('div', { class: 'page-icon' }, icon(PAGE_ICONS[section.id] ?? 'gear')),
+      h('div', {}, h('h2', { id: `title-${section.id}`, tabindex: -1 }, section.title), section.intro ? h('p', { class: 'intro' }, section.intro) : null),
+    ),
     section.id === 'accounts' ? identity : null,
     section.id === 'accounts' ? autologonBanner : null,
   );
-  for (const def of defs) {
-    const field = renderField(def, store, CUSTOM_RENDERERS);
-    field.el.id = `field-${def.path}`;
-    fields.push(field);
-    sectionEl.append(field.el);
+  const groups = FIELD_GROUPS[section.id] ?? [{ title: '', paths: defs.map((d) => d.path) }];
+  for (const g of groups) {
+    const body = h('div', { class: 'group-body' });
+    const el = h(
+      'section',
+      { class: `group-card${g.paths.every((p) => SETTINGS_BY_PATH.get(p)?.advanced) ? ' advanced' : ''}` },
+      g.title ? h('header', { class: 'group-head' }, h('h3', {}, g.title), g.description ? h('p', {}, g.description) : null) : null,
+      body,
+    );
+    const card: GroupCard = { el, members: [] };
+    for (const def of defs.filter((d) => g.paths.includes(d.path))) {
+      const handle = renderField(def, store, CUSTOM_RENDERERS);
+      handle.el.id = `field-${def.path}`;
+      fields.push({ def, handle });
+      card.members.push({ def, handle });
+      body.append(handle.el);
+    }
+    groupCards.push(card);
+    pageEl.append(el);
   }
-  main.append(sectionEl);
-  nav.append(h('a', { href: `#section-${section.id}`, class: allAdvanced ? 'advanced' : undefined }, section.title));
+  const pager = h('nav', { class: 'pager', 'aria-label': 'Previous and next section' });
+  pageEl.append(pager);
+  pagers.set(section.id, pager);
+  pages.set(section.id, pageEl);
+  pagesEl.append(pageEl);
 }
-main.append(review.el);
-nav.append(h('a', { href: '#section-review' }, 'Review & download'));
+review.el.hidden = true;
+const reviewPager = h('nav', { class: 'pager', 'aria-label': 'Previous and next section' });
+review.el.append(reviewPager);
+pagers.set('review', reviewPager);
+pages.set('review', review.el);
+pagesEl.append(review.el);
 
+// Sidebar ----------------------------------------------------------------------------------------
+const navLinks: { item: NavItem; a: HTMLAnchorElement; badge: HTMLElement }[] = [];
+const sidebarStatus = h('a', { class: 'sidebar-status', href: '#section-review', 'data-testid': 'nav-status' });
+const sidebar = h(
+  'aside',
+  { class: 'sidebar', id: 'sidebar', 'aria-label': 'Sections' },
+  h(
+    'div',
+    { class: 'sidebar-head' },
+    h('span', {}, 'Sections'),
+    h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Close section navigation', onclick: () => setDrawer(false) }, icon('x')),
+  ),
+  h(
+    'nav',
+    { 'aria-label': 'Sections' },
+    NAV_GROUPS.map((g) =>
+      h(
+        'div',
+        { class: 'nav-group' },
+        h('p', { class: 'nav-title' }, g.title),
+        h(
+          'ul',
+          {},
+          g.items
+            .filter((item) => pages.has(item.page))
+            .map((item) => {
+              const badge = h('span', { class: 'nav-badge', hidden: true });
+              const a = h('a', { class: 'nav-item', href: `#${item.target}`, 'data-target': item.target }, icon(item.icon), h('span', { class: 'nav-label' }, item.label), badge);
+              navLinks.push({ item, a, badge });
+              return h('li', { class: pages.get(item.page)!.classList.contains('advanced') ? 'advanced' : undefined }, a);
+            }),
+        ),
+      ),
+    ),
+  ),
+  sidebarStatus,
+);
+const backdrop = h('div', { class: 'backdrop', onclick: () => setDrawer(false) });
+
+const mobileTitle = h('span', { class: 'mobile-title' });
+const mobileStatus = h('a', { class: 'mobile-status', href: '#section-review', 'aria-label': 'Review & download' });
+const mobileBar = h('div', { class: 'mobile-bar' }, menuButton('in-bar'), mobileTitle, mobileStatus);
+
+const main = h('main', { id: 'main', tabindex: -1 }, notice, pagesEl);
 const footer = h(
   'footer',
-  {},
+  { class: 'app-footer' },
   h('p', {}, 'Based on the option model and XML patterns of ', h('a', { href: 'https://github.com/cschneegans/unattend-generator', rel: 'noopener' }, 'cschneegans/unattend-generator'), ' (MIT), reimplemented in TypeScript. Not affiliated with Christoph Schneegans or Microsoft.'),
 );
 
-app.append(header, h('div', { class: 'layout' }, nav, main), footer);
+app.append(header, mobileBar, h('div', { class: 'shell' }, sidebar, backdrop, h('div', { class: 'content' }, main, footer)));
 
-// Issues ---------------------------------------------------------------------------------------
+// Navigation -------------------------------------------------------------------------------------
+const PAGE_ORDER: PageId[] = NAV_GROUPS.flatMap((g) => g.items.filter((i) => i.target === `section-${i.page}`).map((i) => i.page)).filter((p) => pages.has(p));
+let activePage: PageId = 'setup';
+
+const pageTitle = (id: PageId) => NAV_GROUPS.flatMap((g) => g.items).find((i) => i.target === `section-${id}`)?.label ?? id;
+const pageVisible = (id: PageId) => view === 'advanced' || !pages.get(id)!.classList.contains('advanced');
+
+function renderPagers(): void {
+  const visible = PAGE_ORDER.filter(pageVisible);
+  for (const [id, pager] of pagers) {
+    clear(pager);
+    const i = visible.indexOf(id);
+    const prev = i > 0 ? visible[i - 1] : undefined;
+    const next = i >= 0 && i < visible.length - 1 ? visible[i + 1] : undefined;
+    pager.append(
+      prev
+        ? h('a', { class: 'pager-link prev', href: `#section-${prev}`, 'data-pager': 'prev' }, icon('chevronLeft'), h('span', {}, h('small', {}, 'Previous'), pageTitle(prev)))
+        : h('span', {}),
+      next ? h('a', { class: 'pager-link next', href: `#section-${next}`, 'data-pager': 'next' }, h('span', {}, h('small', {}, 'Next'), pageTitle(next)), icon('chevronRight')) : h('span', {}),
+    );
+  }
+}
+
+function setDrawer(open: boolean): void {
+  document.body.classList.toggle('nav-open', open);
+  for (const b of document.querySelectorAll('.menu-btn')) b.setAttribute('aria-expanded', String(open));
+  if (open) requestAnimationFrame(() => sidebar.querySelector<HTMLElement>('.nav-item[aria-current]')?.focus());
+}
+
+function showPage(id: PageId, opts: { navTarget?: string; scrollTo?: Element | null; focus?: boolean } = {}): void {
+  activePage = id;
+  for (const [pid, el] of pages) el.hidden = pid !== id;
+  const navTarget = opts.navTarget && navLinks.some((l) => l.item.target === opts.navTarget) ? opts.navTarget : `section-${id}`;
+  for (const { item, a } of navLinks) {
+    if (item.target === navTarget) a.setAttribute('aria-current', 'page');
+    else a.removeAttribute('aria-current');
+  }
+  mobileTitle.textContent = pageTitle(id);
+  setDrawer(false);
+  if (opts.scrollTo) opts.scrollTo.scrollIntoView({ block: 'start' });
+  else window.scrollTo({ top: 0 });
+  if (opts.focus) pages.get(id)!.querySelector<HTMLElement>('h2')?.focus({ preventScroll: true });
+}
+
+function route(hash: string, focus = false): void {
+  const id = decodeURIComponent(hash.replace(/^#/, '')) || 'section-setup';
+  const target = document.getElementById(id);
+  const pageEl = target?.closest<HTMLElement>('[data-page]');
+  if (!target || !pageEl) {
+    if (target) target.focus();
+    else showPage('setup');
+    return;
+  }
+  if (pageEl.classList.contains('advanced') && view === 'basic') setView('advanced');
+  showPage(pageEl.dataset.page as PageId, { navTarget: id, scrollTo: target === pageEl ? null : target, focus });
+}
+
+document.addEventListener('click', (e) => {
+  if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey) return;
+  const jump = (e.target as Element).closest<HTMLAnchorElement>('a[data-jump]');
+  if (jump) {
+    const path = jump.dataset.jump ?? '';
+    const target = document.getElementById(`field-${path}`) ?? document.querySelector(`[data-issues-for^="${CSS.escape(path)}"]`);
+    const pageEl = target?.closest<HTMLElement>('[data-page]');
+    if (!target || !pageEl) return;
+    e.preventDefault();
+    if (target.closest('.advanced') && view === 'basic') setView('advanced');
+    history.pushState(null, '', `#${pageEl.id}`);
+    showPage(pageEl.dataset.page as PageId);
+    target.scrollIntoView({ block: 'center' });
+    target.querySelector<HTMLElement>('input, select, textarea, button')?.focus({ preventScroll: true });
+    return;
+  }
+  const a = (e.target as Element).closest<HTMLAnchorElement>('a[href^="#"]');
+  if (!a) return;
+  const hash = a.getAttribute('href')!;
+  if (hash === '#main') return;
+  e.preventDefault();
+  if (hash !== location.hash) history.pushState(null, '', hash);
+  route(hash, true);
+});
+window.addEventListener('popstate', () => route(location.hash));
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && document.body.classList.contains('nav-open')) {
+    setDrawer(false);
+    document.querySelector<HTMLElement>('.menu-btn.in-bar')?.focus();
+  }
+});
+
+// Keeps the sticky offsets right when the header wraps onto more lines.
+new ResizeObserver(() => document.documentElement.style.setProperty('--header-h', `${header.offsetHeight}px`)).observe(header);
+
+function setView(v: View): void {
+  view = v;
+  document.body.dataset.view = v;
+  savePref(VIEW_KEY, v);
+  for (const b of viewSwitch.querySelectorAll('button')) b.setAttribute('aria-pressed', String(b.dataset.view === v));
+  updateGroups();
+  renderPagers();
+  if (!pageVisible(activePage)) {
+    history.replaceState(null, '', '#section-setup');
+    showPage('setup');
+  }
+}
+
+/** A card disappears when none of its settings is visible in the current view and state. */
+function updateGroups(): void {
+  for (const g of groupCards) g.el.hidden = !g.members.some((m) => !m.handle.el.hidden && (view === 'advanced' || !m.def.advanced));
+}
+
+// Issues -----------------------------------------------------------------------------------------
+function pageOf(path: string): PageId {
+  const parts = path.split('.');
+  for (let i = parts.length; i > 0; i--) {
+    const def = SETTINGS_BY_PATH.get(parts.slice(0, i).join('.'));
+    if (def) return def.section;
+  }
+  return 'review';
+}
+
 function showIssues(issues: Issue[]): void {
   for (const slot of document.querySelectorAll<HTMLElement>('[data-issues-for]')) {
     clear(slot);
@@ -187,25 +435,50 @@ function showIssues(issues: Issue[]): void {
       path = path.includes('.') ? path.slice(0, path.lastIndexOf('.')) : '';
     }
     if (!slot) continue;
-    slot.append(h('p', { class: issue.severity, 'data-severity': issue.severity }, issue.message));
+    slot.append(h('p', { class: issue.severity, 'data-severity': issue.severity }, icon(issue.severity === 'error' ? 'xCircle' : issue.severity === 'warning' ? 'alert' : 'info'), h('span', {}, issue.message)));
     if (issue.severity === 'error') slot.closest('.field, .item')?.classList.add('has-error');
   }
+
+  const perPage = new Map<PageId, { errors: number; warnings: number }>();
+  for (const i of issues) {
+    const page = pageOf(i.path);
+    const c = perPage.get(page) ?? { errors: 0, warnings: 0 };
+    if (i.severity === 'error') c.errors++;
+    else if (i.severity === 'warning') c.warnings++;
+    perPage.set(page, c);
+  }
+  for (const { item, badge } of navLinks) {
+    if (item.target !== `section-${item.page}`) {
+      badge.hidden = true;
+      continue;
+    }
+    const c = item.page === 'review' ? { errors: issues.filter((i) => i.severity === 'error').length, warnings: 0 } : perPage.get(item.page);
+    badge.hidden = !c || (c.errors === 0 && c.warnings === 0);
+    if (!c) continue;
+    badge.className = `nav-badge ${c.errors ? 'err' : 'warn'}`;
+    badge.textContent = String(c.errors || c.warnings);
+    badge.title = c.errors ? `${c.errors} error(s)` : `${c.warnings} warning(s)`;
+  }
+
+  const errors = issues.filter((i) => i.severity === 'error').length;
+  const warnings = issues.filter((i) => i.severity === 'warning').length;
+  clear(sidebarStatus);
+  sidebarStatus.className = `sidebar-status ${errors ? 'err' : warnings ? 'warn' : 'ok'}`;
+  sidebarStatus.append(
+    icon(errors ? 'xCircle' : warnings ? 'alert' : 'checkCircle'),
+    h('span', {}, h('strong', {}, errors ? `${errors} problem${errors === 1 ? '' : 's'} to fix` : 'Ready to generate'), h('small', {}, warnings ? `${warnings} warning${warnings === 1 ? '' : 's'}` : errors ? 'Download is blocked' : 'No warnings')),
+  );
+  clear(mobileStatus);
+  mobileStatus.className = `mobile-status ${errors ? 'err' : warnings ? 'warn' : 'ok'}`;
+  mobileStatus.append(icon(errors ? 'xCircle' : warnings ? 'alert' : 'checkCircle'), h('span', {}, errors ? String(errors) : 'Ready'));
 }
 
-document.addEventListener('click', (e) => {
-  const a = (e.target as Element).closest<HTMLAnchorElement>('a[data-jump]');
-  if (!a) return;
-  const target = document.getElementById(`field-${a.dataset.jump}`) ?? document.querySelector(`[data-issues-for^="${CSS.escape(a.dataset.jump ?? '')}"]`);
-  if (target?.closest('.advanced') && view === 'basic') setView('advanced');
-  if (target) {
-    e.preventDefault();
-    target.scrollIntoView({ behavior: 'smooth', block: 'center' });
-  }
-});
-
-// Update cycle ---------------------------------------------------------------------------------
+// Update cycle -----------------------------------------------------------------------------------
 function refresh(p: Profile, structural: boolean): void {
-  if (structural) for (const f of fields) f.sync(p);
+  if (structural) {
+    for (const f of fields) f.handle.sync(p);
+    updateGroups();
+  }
   const id = resolveIdentity(p.accounts);
   identity.hidden = p.accounts.accountMode !== 'unattendedLocal';
   identity.textContent = `Username: ${id.username || '—'} · Display name: ${id.displayName || '—'} · Computer name: ${id.computerName ?? 'random'}`;
@@ -216,5 +489,7 @@ function refresh(p: Profile, structural: boolean): void {
 }
 
 store.subscribe(refresh);
+setTheme(theme);
 setView(view);
 refresh(store.get(), true);
+route(location.hash);
