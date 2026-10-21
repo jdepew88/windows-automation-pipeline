@@ -111,10 +111,11 @@ describe('cross-field validation (field-level messages, no output)', () => {
       p.wifi.ssid = 'Home';
       p.wifi.password = 'longenough';
     }));
-    expect(issues).toEqual([expect.objectContaining({ severity: 'warning', path: 'wifi.mode' })]);
+    expect(issues.filter((i) => i.path !== 'applications.selection')).toEqual([expect.objectContaining({ severity: 'warning', path: 'wifi.mode' })]);
   });
 
-  it('owner default with a name has no issues at all', () => {
-    expect(validateProfile(profile()).issues).toEqual([]);
+  it('owner default with a name has no issues except the RustDesk manual follow-up (Phase 4.2)', () => {
+    // RustDesk is a Core Essentials default but has no WinGet or Store package: reported, never hidden.
+    expect(validateProfile(profile()).issues).toEqual([expect.objectContaining({ severity: 'warning', path: 'applications.selection', message: expect.stringMatching(/^RustDesk: no unattended installation/) })]);
   });
 });

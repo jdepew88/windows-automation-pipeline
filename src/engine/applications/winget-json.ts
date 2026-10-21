@@ -1,5 +1,5 @@
 import { KNOWN_SOURCES, SOURCE_DETAILS, type KnownSource, type PackageRef, type SourceDetails } from '../schema/applications';
-import { normalizeId, packageKey, unresolvedReason, VERSION } from './ids';
+import { isKnownSource, normalizeId, packageKey, unresolvedReason, VERSION } from './ids';
 
 /**
  * Microsoft's native package list format, as written by `winget export` and read by `winget import`:
@@ -193,7 +193,7 @@ export function exportWinGetDocument(refs: readonly PackageRef[], now: Date | nu
   const seen = new Set<string>();
   for (const r of refs) {
     const source = r.source.toLowerCase();
-    if (unresolvedReason(r) || seen.has(packageKey(r))) continue;
+    if (!isKnownSource(source) || unresolvedReason(r) || seen.has(packageKey(r))) continue;
     seen.add(packageKey(r));
     const list = bySource.get(source as KnownSource) ?? [];
     const pkg: WinGetPackage = { PackageIdentifier: r.packageIdentifier };

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Script, ScriptPhase } from '../../src/engine/schema/profile';
 import { generate } from '../../src/engine/pipeline';
-import { commandLines, embedded, generateOk, profile } from './helpers';
+import { commandLines, embedded, generateOk, noApps, profile } from './helpers';
 
 const s = (id: string, type: Script['type'], content: string, enabled = true): Script => ({ id, name: id, type, enabled, content });
 
@@ -25,7 +25,7 @@ describe('custom scripts in the four stages', () => {
     expect([...embedded(r.root).keys()].some((f) => f.startsWith('unattend-'))).toBe(false);
     expect(embedded(r.root).get('FirstLogon.ps1')).toBe(embedded(base.root).get('FirstLogon.ps1'));
     expect(commandLines(r.root)).toEqual(commandLines(base.root));
-    expect(r.issues.filter((i) => i.severity === 'warning').map((i) => i.path).sort()).toEqual(['scripts.defaultUser.0', 'scripts.firstLogon.0', 'scripts.system.0']);
+    expect(r.issues.filter((i) => i.severity === 'warning' && i.path.startsWith('scripts.')).map((i) => i.path).sort()).toEqual(['scripts.defaultUser.0', 'scripts.firstLogon.0', 'scripts.system.0']);
   });
 
   it('maps each stage to its sequence, preserving order and numbering files', () => {
@@ -84,6 +84,7 @@ describe('custom scripts in the four stages', () => {
       p.accounts.autoLogon = 'none';
       p.security.systemRestore = 'windowsDefault';
       p.windowsUpdate.enabled = false;
+      noApps(p);
       p.scripts.firstLogon.push(s('only', 'cmd', 'echo hi'));
     }));
     expect(commandLines(r.root).firstLogon).toHaveLength(1);

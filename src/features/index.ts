@@ -36,7 +36,7 @@ export const SECTIONS: SectionDef[] = [
   {
     id: 'applications',
     title: 'Application provisioning',
-    intro: 'Choose applications to install with WinGet after Windows Update has finished. Profiles combine; each package is installed once. Nothing is selected by default.',
+    intro: 'Choose applications to install with WinGet after Windows Update has finished. Core Essentials is selected for every new deployment; add profiles, device recommendations and individual apps. Each package is installed once.',
   },
   {
     id: 'additionalSoftware',

@@ -1,19 +1,26 @@
 {
   "format": "windows-deployment-builder/app-profiles",
-  "formatVersion": 1,
+  "formatVersion": 2,
   "profiles": [
     {
       "id": "deployment-selection",
       "name": "Illustrative sample (not an owner default): application selection",
       "category": "custom",
-      "description": "Combined selection exported with this deployment (no profiles + individual changes).",
+      "description": "Effective, flattened selection of this deployment (Core Essentials + individual changes): exactly the applications in the installation plan.",
       "builtin": false,
       "inherits": [],
       "packages": [
         {
-          "packageIdentifier": "Git.Git",
+          "packageIdentifier": "Google.Chrome",
           "source": "winget",
-          "displayName": "Git",
+          "displayName": "Google Chrome",
+          "version": "",
+          "scope": ""
+        },
+        {
+          "packageIdentifier": "VideoLAN.VLC",
+          "source": "winget",
+          "displayName": "VLC media player",
           "version": "",
           "scope": ""
         },
@@ -21,6 +28,41 @@
           "packageIdentifier": "7zip.7zip",
           "source": "winget",
           "displayName": "7-Zip",
+          "version": "",
+          "scope": ""
+        },
+        {
+          "packageIdentifier": "CodeSector.TeraCopy",
+          "source": "winget",
+          "displayName": "TeraCopy",
+          "version": "",
+          "scope": ""
+        },
+        {
+          "packageIdentifier": "Bitwarden.Bitwarden",
+          "source": "winget",
+          "displayName": "Bitwarden",
+          "version": "",
+          "scope": ""
+        },
+        {
+          "packageIdentifier": "Microsoft.VCRedist.2015+.x64",
+          "source": "winget",
+          "displayName": "Visual C++ Redistributable 2015-2026 (x64)",
+          "version": "",
+          "scope": ""
+        },
+        {
+          "packageIdentifier": "Microsoft.VCRedist.2015+.x86",
+          "source": "winget",
+          "displayName": "Visual C++ Redistributable 2015-2026 (x86)",
+          "version": "",
+          "scope": ""
+        },
+        {
+          "packageIdentifier": "Git.Git",
+          "source": "winget",
+          "displayName": "Git",
           "version": "",
           "scope": ""
         },
@@ -42,6 +84,13 @@
           "packageIdentifier": "9MSPC6MP8FM4",
           "source": "msstore",
           "displayName": "Microsoft Whiteboard",
+          "version": "",
+          "scope": ""
+        },
+        {
+          "packageIdentifier": "rustdesk",
+          "source": "catalog",
+          "displayName": "RustDesk",
           "version": "",
           "scope": ""
         }

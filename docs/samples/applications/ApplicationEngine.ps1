@@ -21,10 +21,13 @@
          "winget list" (already installed?) and "winget install" while holding the machine-wide
          install lock, so Windows Update cannot restart the computer meanwhile.
       4. Additional Software (manual follow-up entries; automatic only for reviewed installers).
+         Catalog entries without an unattended installation are reported as manual follow-ups;
+         portable packages get a Start menu shortcut after installation (engine 1.1.0).
       5. Restart when packages require it (policy), resume after sign-in, verify, finish.
 
-    Package results: Pending, Installing, Succeeded, AlreadyInstalled, Skipped,
-    RequiresInteraction, RequiresRestart, Failed, Unavailable.
+    Package results: Pending, Installing, Succeeded, AlreadyInstalled, Skipped, SkippedByUser,
+    RequiresInteraction, RequiresRestart, Failed, Unavailable. (SkippedByUser: deselected for this
+    deployment, recorded so the report shows it; RequiresInteraction also covers manual follow-ups.)
     Final states (result.json): Succeeded, CompletedWithFollowUp, CompletedWithFailures, Failed,
     Offline. The marker <dataRoot>\state\applications.done is written for the first three.
 
@@ -43,7 +46,7 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-$script:EngineVersion = '1.0.0'
+$script:EngineVersion = '1.1.0'
 $script:EventSource = 'WindowsDeploymentBuilder'
 $script:LogFile = $null
 $script:StatusFile = $null
@@ -53,6 +56,10 @@ $script:WingetId = '^(?=.{3,128}$)[A-Za-z0-9][A-Za-z0-9_+-]{0,31}(?:\.[A-Za-z0-9
 $script:StoreId = '^(?:9[A-Z0-9]{11}|XP[A-Z0-9]{12})$'
 $script:VersionPattern = '^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$'
 $script:SafeToken = '^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$|^--[a-z][a-z-]{1,40}$|^(list|show|install)$'
+# Portable packages: shortcut target pattern and name (plain names; see catalog.ts PORTABLE_EXE/SHORTCUT_NAME).
+$script:PortableExe = '^[A-Za-z0-9][A-Za-z0-9._+*-]{0,79}\.exe$'
+$script:ShortcutName = '^[A-Za-z0-9][A-Za-z0-9 ._()+-]{0,59}$'
+$script:CatalogKey = '^catalog:[a-z0-9][a-z0-9-]{0,47}$'
 
 # WinGet HRESULTs (AppInstallerErrors.h) -> Status, Retry, Restart (none|later|now|initiated), Text
 $script:ExitCodes = @{
@@ -90,7 +97,7 @@ $script:ExitCodes = @{
     '0x8A150106' = @('Failed', $true, 'none', 'Not enough memory (INSTALL_INSUFFICIENT_MEMORY).')
 }
 
-$script:Terminal = @('Succeeded', 'AlreadyInstalled', 'Skipped', 'RequiresInteraction', 'Failed', 'Unavailable')
+$script:Terminal = @('Succeeded', 'AlreadyInstalled', 'Skipped', 'SkippedByUser', 'RequiresInteraction', 'Failed', 'Unavailable')
 
 # ------------------------------------------------------------------------------------------------
 # Small helpers (time, waiting, JSON) - kept as functions so tests can replace them.
@@ -178,10 +185,12 @@ function Get-WdaConfig {
         packages              = @()
         unresolved            = @()
         additionalSoftware    = @()
+        manual                = @()
+        deselected            = @()
         coordination          = @{ policy = 'updatesFirst'; windowsUpdate = @{ enabled = $false } }
     }
     foreach ($k in @($defaults.Keys)) { if (-not $raw.ContainsKey($k) -or $null -eq $raw[$k]) { $raw[$k] = $defaults[$k] } }
-    foreach ($k in 'packages', 'unresolved', 'additionalSoftware') { $raw[$k] = @($raw[$k] | Where-Object { $_ }) }
+    foreach ($k in 'packages', 'unresolved', 'additionalSoftware', 'manual', 'deselected') { $raw[$k] = @($raw[$k] | Where-Object { $_ }) }
     $raw.configDirectory = Split-Path -Parent ([IO.Path]::GetFullPath($Path))
     return $raw
 }
@@ -311,6 +320,11 @@ function Test-WdaPackageSpec {
     else { return "Unsupported source '$source'." }
     if ($P.version -and ([string] $P.version) -cnotmatch $script:VersionPattern) { return "Invalid version '$($P.version)'." }
     if ($P.scope -and $P.scope -notin 'user', 'machine') { return "Invalid scope '$($P.scope)'." }
+    if ($P.method -and $P.method -notin 'winget', 'msstore', 'portable') { return "Unsupported installation method '$($P.method)'." }
+    if ($P.method -eq 'portable') {
+        if ($source -ne 'winget' -or $P.scope -ne 'machine') { return 'Portable packages must come from winget with machine scope.' }
+        if (-not $P.portable -or ([string] $P.portable.executable) -cnotmatch $script:PortableExe -or ([string] $P.portable.shortcut) -cnotmatch $script:ShortcutName) { return 'Invalid portable shortcut definition.' }
+    }
     return $null
 }
 
@@ -355,6 +369,10 @@ function Get-WdaQueue {
             version = [string] $p.version; scope = [string] $p.scope
             interaction = $(if ($p.interaction) { [string] $p.interaction } else { 'unknown' })
             after = @($p.after | Where-Object { $_ }); inNative = $nativeKeys.ContainsKey($k)
+            # Optional since engine 1.1.0: configs written for 1.0.0 have neither key (StrictMode
+            # throws on a missing hashtable key, so test for it first).
+            method = $(if ($p.ContainsKey('method') -and $p.method) { [string] $p.method } else { [string] $p.source })
+            portable = $(if ($p.ContainsKey('portable') -and $p.portable -is [hashtable]) { @{ executable = [string] $p.portable['executable']; shortcut = [string] $p.portable['shortcut'] } } else { $null })
         }
     }
     # Packages only in the native list (for example a WinGet export placed there by hand).
@@ -363,7 +381,7 @@ function Get-WdaQueue {
         if ($seen.ContainsKey($k)) { continue }
         $seen[$k] = $true
         $queue += @{ key = $k; packageIdentifier = $n.packageIdentifier; source = $n.source; name = $n.packageIdentifier
-                     version = $n.version; scope = $n.scope; interaction = 'unknown'; after = @(); inNative = $true }
+                     version = $n.version; scope = $n.scope; interaction = 'unknown'; after = @(); inNative = $true; method = $n.source; portable = $null }
     }
     return , $queue
 }
@@ -450,6 +468,71 @@ function Test-WdaAvailable {
 function Install-WdaPackage {
     param([hashtable] $P, [int] $TimeoutMinutes, [string] $LogFile = '')
     Invoke-WdaWinGet (Get-WdaArguments 'install' $P) $TimeoutMinutes $LogFile
+}
+
+<# Folders where WinGet puts machine-scope portable packages (its documented defaults). #>
+function Get-WdaPortableRoots {
+    @($env:ProgramFiles, ${env:ProgramFiles(x86)}) | Where-Object { $_ } | ForEach-Object { Join-Path $_ 'WinGet\Packages' } | Select-Object -Unique
+}
+
+function Get-WdaShortcutFolder { Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\Windows Deployment Tools' }
+
+function New-WdaShortcutFile {
+    param([string] $Path, [string] $Target)
+    $shell = New-Object -ComObject WScript.Shell
+    $lnk = $shell.CreateShortcut($Path)
+    $lnk.TargetPath = $Target
+    $lnk.WorkingDirectory = Split-Path -Parent $Target
+    $lnk.Save()
+}
+
+<#
+    Finds the executable of an installed portable package inside WinGet's package folder
+    (<root>\<PackageIdentifier>_<source id>). Only plain files below that folder count: reparse
+    points (links, junctions) are skipped and every match must resolve inside the folder, so a
+    crafted archive cannot redirect the shortcut. The shortest path wins (top-level file first).
+#>
+function Find-WdaPortableExe {
+    param([string[]] $Roots, [string] $PackageIdentifier, [string] $Pattern)
+    if ($Pattern -cnotmatch $script:PortableExe -or $PackageIdentifier -cnotmatch $script:WingetId) { return $null }
+    foreach ($root in $Roots) {
+        if (-not $root -or -not (Test-Path -LiteralPath $root)) { continue }
+        $dirs = @(Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name.StartsWith("$($PackageIdentifier)_", [StringComparison]::OrdinalIgnoreCase) -and -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) })
+        foreach ($dir in $dirs) {
+            $base = [IO.Path]::GetFullPath($dir.FullName).TrimEnd('\') + '\'
+            $found = @()
+            $level = @($dir)
+            for ($depth = 0; $depth -lt 4 -and $level.Count; $depth++) {
+                $next = @()
+                foreach ($d in $level) {
+                    foreach ($f in @(Get-ChildItem -LiteralPath $d.FullName -Filter $Pattern -File -ErrorAction SilentlyContinue)) {
+                        $full = [IO.Path]::GetFullPath($f.FullName)
+                        if (-not ($f.Attributes -band [IO.FileAttributes]::ReparsePoint) -and $full.StartsWith($base, [StringComparison]::OrdinalIgnoreCase)) { $found += $full }
+                    }
+                    $next += @(Get-ChildItem -LiteralPath $d.FullName -Directory -ErrorAction SilentlyContinue | Where-Object { -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) })
+                }
+                $level = $next
+            }
+            if ($found.Count) { return ($found | Sort-Object Length, { $_ } | Select-Object -First 1) }
+        }
+    }
+    return $null
+}
+
+<# Creates (or replaces) the Start menu shortcut of a portable package. Never fails the package. #>
+function Set-WdaPortableShortcut {
+    param([hashtable] $P)
+    try {
+        $exe = Find-WdaPortableExe @(Get-WdaPortableRoots) $P.packageIdentifier $P.portable.executable
+        if (-not $exe) { return @{ Ok = $false; Message = "Start menu shortcut not created: $($P.portable.executable) was not found in WinGet's machine package folder." } }
+        $folder = Get-WdaShortcutFolder
+        if (-not (Test-Path -LiteralPath $folder)) { New-Item -ItemType Directory -Path $folder -Force | Out-Null }
+        $lnk = Join-Path $folder ($P.portable.shortcut + '.lnk')
+        New-WdaShortcutFile $lnk $exe
+        return @{ Ok = $true; Message = "Start menu shortcut: $lnk -> $exe." }
+    } catch {
+        return @{ Ok = $false; Message = "Start menu shortcut not created: $($_.Exception.Message)" }
+    }
 }
 
 function Test-WdaNetwork {
@@ -670,6 +753,22 @@ function Initialize-WdaEntries {
                                 status = 'Unavailable'; attempts = 0; exitCode = ''; message = "Unresolved: $($u.reason)"; updatedUtc = (Get-WdaNow).ToString('o')
                                 restart = ''; restartBoot = ''; interrupted = $false }
     }
+    foreach ($m in @($Config.manual)) {
+        $k = ([string] $m.key).ToLowerInvariant()
+        if ($k -cnotmatch $script:CatalogKey -or $State.packages.ContainsKey($k)) { continue }
+        $how = [string] $m.instructions
+        if ($m.ContainsKey('url') -and ([string] $m.url) -match '^https://[^\s"''<>]+$') { $how = "$how ($($m.url))" }
+        $State.packages[$k] = @{ key = $k; name = [string] $m.displayName; packageIdentifier = $k.Substring(8); source = 'catalog'
+                                status = 'RequiresInteraction'; attempts = 0; exitCode = ''; message = "Manual action required: $how"; updatedUtc = (Get-WdaNow).ToString('o')
+                                restart = ''; restartBoot = ''; interrupted = $false }
+    }
+    foreach ($d in @($Config.deselected)) {
+        $k = Get-WdaKey ([string] $d.source) ([string] $d.packageIdentifier)
+        if ($State.packages.ContainsKey($k)) { continue }
+        $State.packages[$k] = @{ key = $k; name = [string] $d.displayName; packageIdentifier = [string] $d.packageIdentifier; source = [string] $d.source
+                                status = 'SkippedByUser'; attempts = 0; exitCode = ''; message = 'Deselected for this deployment; not installed.'; updatedUtc = (Get-WdaNow).ToString('o')
+                                restart = ''; restartBoot = ''; interrupted = $false }
+    }
     foreach ($a in @($Config.additionalSoftware)) {
         if ($State.additional.ContainsKey($a.id)) { continue }
         $State.additional[$a.id] = @{ id = $a.id; name = [string] $a.name; status = 'Pending'; attempts = 0; exitCode = ''; message = ''; updatedUtc = (Get-WdaNow).ToString('o') }
@@ -692,13 +791,23 @@ function Resume-WdaEntries {
     }
 }
 
+<# Portable packages: (re)creates the Start menu shortcut; a failure is noted, the package stays installed. #>
+function Complete-WdaPortable {
+    param([hashtable] $P, [hashtable] $Entry)
+    if ($P.method -ne 'portable' -or -not $P.portable) { return }
+    $r = Set-WdaPortableShortcut $P
+    $Entry.shortcutFailed = -not $r.Ok
+    Set-WdaPackage $Entry $Entry.status ("$($Entry.message) $($r.Message)".Trim())
+    Write-WdaLog "  $($P.name): $($r.Message)" $(if ($r.Ok) { 'INFO' } else { 'WARN' })
+}
+
 function Get-WdaCounts {
     param([hashtable] $State)
-    $c = [ordered]@{ total = 0; succeeded = 0; alreadyInstalled = 0; skipped = 0; requiresInteraction = 0; requiresRestart = 0; failed = 0; unavailable = 0; pending = 0 }
+    $c = [ordered]@{ total = 0; succeeded = 0; alreadyInstalled = 0; skipped = 0; skippedByUser = 0; requiresInteraction = 0; requiresRestart = 0; failed = 0; unavailable = 0; pending = 0 }
     foreach ($e in @($State.packages.Values) + @($State.additional.Values)) {
         $c.total++
         switch ($e.status) {
-            'Succeeded' { $c.succeeded++ } 'AlreadyInstalled' { $c.alreadyInstalled++ } 'Skipped' { $c.skipped++ }
+            'Succeeded' { $c.succeeded++ } 'AlreadyInstalled' { $c.alreadyInstalled++ } 'Skipped' { $c.skipped++ } 'SkippedByUser' { $c.skippedByUser++ }
             'RequiresInteraction' { $c.requiresInteraction++ } 'RequiresRestart' { $c.requiresRestart++ }
             'Failed' { $c.failed++ } 'Unavailable' { $c.unavailable++ } default { $c.pending++ }
         }
@@ -726,6 +835,7 @@ function Complete-Wda {
     $followUp = @()
     foreach ($e in $packages + $additional) {
         if ($e.status -in 'RequiresInteraction', 'RequiresRestart', 'Failed', 'Unavailable', 'Pending') { $followUp += ('{0} [{1}]: {2}' -f $e.name, $e.status, $e.message) }
+        elseif ($e.Contains('key') -and $State.packages.ContainsKey($e.key) -and $State.packages[$e.key].ContainsKey('shortcutFailed') -and $State.packages[$e.key].shortcutFailed) { $followUp += ('{0} [shortcut]: {1}' -f $e.name, $e.message) }
     }
     $b = $State.bootstrap
     $result = [ordered]@{
@@ -927,6 +1037,7 @@ function Invoke-WdaQueue {
                 if ($installed -eq $true) {
                     if ($e.interrupted -or $e.attempts -gt 0) { Set-WdaPackage $e 'Succeeded' 'Installed (confirmed by winget list).' }
                     else { Set-WdaPackage $e 'AlreadyInstalled' 'Already installed before this run; left unchanged.' }
+                    Complete-WdaPortable $p $e
                     Write-WdaLog "  $($e.status.ToLowerInvariant()) $($p.name)"
                     Save-WdaState $State $Paths
                     continue
@@ -955,6 +1066,7 @@ function Invoke-WdaQueue {
                     if ($m.Restart -in 'now', 'initiated') { $restartNow = $m.Restart }
                 }
                 Set-WdaPackage $e $status $m.Message $m.Code
+                if ($status -in 'Succeeded', 'AlreadyInstalled') { Complete-WdaPortable $p $e }
                 $lvl = $(if ($status -in 'Succeeded', 'AlreadyInstalled') { 'INFO' } else { 'WARN' })
                 Write-WdaLog ("  -> {0} {1} [{2}] {3}" -f $status, $p.name, $m.Code, $m.Message) $lvl
                 Save-WdaState $State $Paths
@@ -1159,11 +1271,13 @@ function Invoke-WdaPlan {
             $installed = $(if ($i -eq $true) { 'yes' } elseif ($i -eq $false) { 'no' } else { '?' })
             $available = Test-WdaAvailable $p
         }
-        $action = if ($bad) { "Unavailable: $bad" } elseif ($p.interaction -eq 'required') { 'RequiresInteraction (not attempted)' } elseif ($installed -eq 'yes') { 'AlreadyInstalled (skip)' } elseif ($available -eq 'NotFound') { 'Unavailable' } else { 'Install' }
+        $action = if ($bad) { "Unavailable: $bad" } elseif ($p.interaction -eq 'required') { 'RequiresInteraction (not attempted)' } elseif ($installed -eq 'yes') { 'AlreadyInstalled (skip)' } elseif ($available -eq 'NotFound') { 'Unavailable' } elseif ($p.method -eq 'portable') { "Install (portable) + shortcut $($p.portable.shortcut)" } else { 'Install' }
         $rows += [pscustomobject]@{ '#' = $n; Name = $p.name; Source = $p.source; Id = $p.packageIdentifier; Installed = $installed; Available = $available; Action = $action
                                     Command = $(if ($bad) { '' } else { 'winget ' + ((Get-WdaArguments 'install' $p) -join ' ') }) }
     }
     foreach ($u in @($Config.unresolved)) { $rows += [pscustomobject]@{ '#' = ''; Name = $u.displayName; Source = $u.source; Id = $u.packageIdentifier; Installed = ''; Available = ''; Action = "Unavailable: $($u.reason)"; Command = '' } }
+    foreach ($m in @($Config.manual)) { $rows += [pscustomobject]@{ '#' = ''; Name = $m.displayName; Source = 'manual'; Id = $m.key; Installed = ''; Available = ''; Action = "Manual action required: $($m.instructions)"; Command = '' } }
+    foreach ($d in @($Config.deselected)) { $rows += [pscustomobject]@{ '#' = ''; Name = $d.displayName; Source = $d.source; Id = $d.packageIdentifier; Installed = ''; Available = ''; Action = 'SkippedByUser (deselected)'; Command = '' } }
     foreach ($a in @($Config.additionalSoftware)) { $rows += [pscustomobject]@{ '#' = ''; Name = $a.name; Source = 'additional'; Id = $a.fileName; Installed = ''; Available = ''; Action = $(if ($a.execution -eq 'automatic') { 'Reviewed installer (hash + signature checked)' } else { 'Manual follow-up' }); Command = '' } }
     [pscustomobject]@{ WinGet = $b; Rows = $rows; Paths = $paths }
 }

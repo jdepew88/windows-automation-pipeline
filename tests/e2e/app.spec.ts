@@ -196,7 +196,9 @@ test('Windows Update automation: on by default, assets downloadable, policy conf
 
   const assets = page.getByTestId('assets');
   await go(page, 'review');
-  await expect(assets.locator('[data-asset]')).toHaveCount(5); // 4 engine files + orchestration.json
+  // 4 engine files + orchestration.json (the application assets of Core Essentials are a separate group since Phase 4.2).
+  await expect(assets.locator('[data-asset-group="windows-update"] [data-asset]')).toHaveCount(4);
+  await expect(assets.locator('[data-asset-group="orchestration"] [data-asset]')).toHaveCount(1);
   const [dl] = await Promise.all([page.waitForEvent('download'), assets.locator('[data-asset="config.json"] [data-action="download-asset"]').click()]);
   expect(dl.suggestedFilename()).toBe('config.json');
   const config = JSON.parse(await readFile((await dl.path())!, 'utf8'));
@@ -219,14 +221,15 @@ test('Windows Update automation: on by default, assets downloadable, policy conf
   await checkbox(page, 'windowsUpdate.enabled').uncheck();
   await expect(field(page, 'windowsUpdate.drivers')).toBeHidden();
   await expect(assets).toContainText('None');
-  await expect(preview(page)).not.toContainText('Install-UpdateEngine');
+  // The engine is not embedded. (The orchestrator, present for Core Essentials, still lists the
+  // stage as "enabled": false in its manifest and mentions it in its documentation comment.)
+  await expect(preview(page)).not.toContainText('WindowsUpdate\\Install-UpdateEngine.ps1');
+  await expect(preview(page)).not.toContainText('WindowsUpdateEngine.ps1"');
   await expect(page.getByTestId('summary')).toContainText('Off');
 });
 
 // Phase 3 ----------------------------------------------------------------------------------------
 
-const apps = (page: Page) => field(page, 'applications.selection');
-const catalogAdd = (page: Page, id: string) => page.locator(`[data-catalog="${id}"] [data-action="app-add"]`);
 const wingetExport = JSON.stringify({
   $schema: 'https://aka.ms/winget-packages.schema.2.0.json',
   CreationDate: '2026-10-19T09:41:12.512-00:00',
@@ -239,105 +242,199 @@ const wingetExport = JSON.stringify({
   ],
 });
 
-test('application provisioning: empty by default, nothing generated until something is selected', async ({ page }) => {
-  await setName(page, 'Alex');
-  await expect(checkbox(page, 'applications.enabled')).toBeChecked();
-  await expect(apps(page).locator('[data-profile]')).toHaveCount(6);
-  for (const id of ['everyday', 'gaming', 'developer', 'laptop', 'touch', 'custom']) {
-    await expect(apps(page).locator(`[data-profile="${id}"]`)).toContainText('Empty');
-  }
-  await expect(page.getByTestId('app-count')).toHaveText('0 selected');
-  await expect(page.getByTestId('summary')).toContainText('On, nothing selected');
-  await expect(preview(page)).not.toContainText('Applications\\Install-ApplicationEngine.ps1');
-  await expect(page.getByTestId('assets').locator('[data-asset-group="applications"]')).toHaveCount(0);
-});
+const appBox = (page: Page, id: string) => page.locator(`[data-app="${id}"] input[type=checkbox]`);
+const showAll = (page: Page) => page.getByTestId('app-filter').locator('[data-filter="all"]').click();
+const planIds = async (page: Page) => page.getByTestId('app-order').locator('li[data-package]').evaluateAll((els) => els.map((e) => e.getAttribute('data-package')));
 
-test('application provisioning (Basic): search, filter, add, remove, count, duplicates and generated assets', async ({ page }) => {
+test('application provisioning: Core Essentials by default; RustDesk is an honest manual follow-up', async ({ page }) => {
   await setName(page, 'Alex');
   await go(page, 'applications');
-  await page.getByTestId('app-search').fill('pdf');
-  await expect(page.getByTestId('app-catalog').locator('[data-catalog="sumatrapdf"]')).toBeVisible();
-  await expect(page.getByTestId('app-catalog').locator('[data-catalog="steam"]')).toHaveCount(0);
-  await catalogAdd(page, 'sumatrapdf').click();
-  await expect(page.getByTestId('app-count')).toHaveText('1 selected');
-  await expect(catalogAdd(page, 'sumatrapdf')).toBeDisabled();
-
-  await page.getByTestId('app-search').fill('');
-  await page.getByTestId('app-category').locator('[data-category="gaming"]').click();
-  await expect(page.getByTestId('app-category').locator('[data-category="gaming"]')).toHaveAttribute('aria-pressed', 'true');
-  await expect(page.getByTestId('app-catalog').locator('[data-catalog="git"]')).toHaveCount(0);
-  await catalogAdd(page, 'steam').click();
-  await expect(catalogAdd(page, 'launchbox')).toBeDisabled();
-  await expect(page.locator('[data-catalog="launchbox"]')).toContainText('unresolved');
-
-  // Populate the empty Gaming profile explicitly, then combine it: Steam is selected twice but installed once.
-  await page.getByTestId('app-target').selectOption('gaming');
-  await catalogAdd(page, 'steam').click();
-  await catalogAdd(page, 'playnite').click();
-  await checkbox(page, 'applications.profile.gaming').check();
-  await expect(apps(page).locator('[data-profile="gaming"]')).toContainText('2 packages');
-  await expect(page.getByTestId('app-count')).toHaveText('3 selected');
-  await expect(page.getByTestId('app-warnings').locator('[data-kind="duplicate"]')).toContainText('Steam');
-
-  await apps(page).locator('[data-package="winget:sumatrapdf.sumatrapdf"] [data-action="app-remove"]').click();
-  await expect(page.getByTestId('app-count')).toHaveText('2 selected');
-
-  await expect(page.getByTestId('summary')).toContainText('2 package(s) via WinGet from Gaming');
+  await expect(checkbox(page, 'applications.enabled')).toBeChecked();
+  await expect(checkbox(page, 'applications.profile.core')).toBeChecked();
+  for (const id of ['everyday', 'gaming', 'developer', 'network-engineer', 'music', 'laptop', 'touch']) await expect(checkbox(page, `applications.profile.${id}`)).not.toBeChecked();
+  await expect(page.getByTestId('app-count')).toHaveText('7 to install, 1 manual');
+  for (const id of ['chrome', 'vlc', '7zip', 'teracopy', 'bitwarden', 'vcredist-x64', 'vcredist-x86']) await expect(appBox(page, id)).toBeChecked();
+  await expect(page.locator('[data-app="rustdesk"]')).toContainText('Manual follow-up');
+  await expect(page.getByTestId('app-manual-list')).toContainText('RustDesk');
+  await expect(page.getByTestId('summary')).toContainText('7 package(s) via WinGet from Core Essentials, 1 manual follow-up');
   await expect(preview(page)).toContainText('Applications\\Install-ApplicationEngine.ps1');
-  await go(page, 'review');
-  const group = page.getByTestId('assets').locator('[data-asset-group="applications"]');
-  await expect(group.locator('[data-asset]')).toHaveCount(9);
-  const [dl] = await Promise.all([page.waitForEvent('download'), group.locator('[data-asset="winget-packages.json"] [data-action="download-asset"]').click()]);
-  const native = JSON.parse(await readFile((await dl.path())!, 'utf8'));
-  expect(native.Sources[0].Packages.map((p: { PackageIdentifier: string }) => p.PackageIdentifier)).toEqual(['Valve.Steam', 'Playnite.Playnite']);
+});
+
+test('quick start: Gaming, untick a launcher, add a PDF reader, download the USB package with exactly that plan', async ({ page }) => {
+  await setName(page, 'Alex');
+  await go(page, 'applications');
+  await checkbox(page, 'applications.profile.gaming').check();
+  await expect(appBox(page, 'steam')).toBeChecked();
+  await expect(appBox(page, 'epic')).toBeChecked();
+  await expect(appBox(page, 'battlenet')).not.toBeChecked();
+  await appBox(page, 'epic').uncheck();
+  await expect(page.locator('[data-app="epic"]')).toContainText('Unticked by you (default in Gaming)');
+  await page.getByTestId('app-search').fill('pdf');
+  await appBox(page, 'acrobat-reader').check();
+  await page.getByTestId('app-search').fill('');
+  await expect(page.getByTestId('app-removed')).toContainText('Epic Games Launcher');
+  const ids = await planIds(page);
+  expect(ids).toContain('winget:valve.steam');
+  expect(ids).toContain('winget:adobe.acrobat.reader.64-bit');
+  expect(ids).not.toContain('winget:epicgames.epicgameslauncher');
+
+  await go(page, 'deployment');
+  const [dl] = await Promise.all([page.waitForEvent('download'), page.locator('[data-action="download-package"]').first().click()]);
+  const { readZip } = await import('../../src/engine/deployment/zip');
+  const entry = readZip(new Uint8Array(await readFile((await dl.path())!))).find((e) => e.path === 'WindowsDeployment/scripts/applications/applications-config.json')!;
+  const cfg = JSON.parse(new TextDecoder().decode(entry.data));
+  expect(cfg.packages.map((p: { packageIdentifier: string }) => p.packageIdentifier)).toEqual(expect.arrayContaining(['Valve.Steam', 'Adobe.Acrobat.Reader.64-bit', 'Google.Chrome']));
+  expect(cfg.packages.map((p: { packageIdentifier: string }) => p.packageIdentifier)).not.toContain('EpicGames.EpicGamesLauncher');
+  expect(cfg.deselected.map((p: { packageIdentifier: string }) => p.packageIdentifier)).toEqual(['EpicGames.EpicGamesLauncher']);
+  expect(cfg.manual.map((m: { key: string }) => m.key)).toEqual(['catalog:rustdesk']);
+  expect(cfg.packages.map((p: { key: string }) => p.key)).toEqual(ids);
+});
+
+test('mobile devices: Android phone plus iPad recommends Apple Devices; it can be unticked; Apple Music stays optional', async ({ page }) => {
+  await setName(page, 'Alex');
+  await go(page, 'applications');
+  await page.locator('[data-device="phone-android"]').check();
+  await expect(page.getByTestId('app-device-note')).toContainText('Android');
+  await expect(page.locator('[data-app="apple-devices"]')).toHaveCount(0);
+  await page.locator('[data-device="ipad"]').check();
+  await expect(appBox(page, 'apple-devices')).toBeChecked();
+  await expect(page.locator('[data-app="apple-devices"]')).toContainText('Default in iPhone / iPad');
+  await expect(appBox(page, 'apple-music')).not.toBeChecked();
+  await expect(page.locator('[data-app="icloud"]')).toContainText('Recommended by iPhone / iPad');
+  await appBox(page, 'icloud').check();
+  await expect(page.locator('[data-app="icloud"] .app-warning')).toContainText('very large amounts of data');
+  await appBox(page, 'apple-devices').uncheck();
+  await expect(appBox(page, 'apple-devices')).not.toBeChecked();
+  await page.locator('[data-device="ipad"]').uncheck();
+  await page.locator('[data-device="ipad"]').check();
+  await expect(appBox(page, 'apple-devices')).not.toBeChecked();
+});
+
+test('antivirus: a second real-time antivirus cannot be ticked; Malwarebytes can, with a warning', async ({ page }) => {
+  await setName(page, 'Alex');
+  await go(page, 'applications');
+  await showAll(page);
+  await page.getByTestId('app-category').selectOption('security');
+  await appBox(page, 'avast').check();
+  await expect(appBox(page, 'avg')).toBeDisabled();
+  await expect(appBox(page, 'avira')).toBeDisabled();
+  await expect(page.locator('[data-app="avg"]')).toContainText('Cannot be combined with Avast One Free Antivirus');
+  await appBox(page, 'malwarebytes').check();
+  await expect(page.getByTestId('app-warnings')).toContainText('Malwarebytes and Avast One Free Antivirus are both selected');
+  await expect(page.getByTestId('status')).toContainText('Ready');
+});
+
+test('antivirus conflicts imported from a profile file block generation with a clear message', async ({ page }) => {
+  await setName(page, 'Alex');
+  await go(page, 'applications');
+  const file = JSON.stringify({
+    format: 'windows-deployment-builder/app-profiles',
+    formatVersion: 2,
+    profiles: [{ id: 'two-av', name: 'Two AV', category: 'custom', description: '', builtin: false, inherits: [], packages: [
+      { packageIdentifier: 'XPDNZJFNCR1B07', source: 'msstore', displayName: 'Avast', version: '', scope: '' },
+      { packageIdentifier: 'XP8BX2DWV7TF50', source: 'msstore', displayName: 'AVG', version: '', scope: '' },
+    ] }],
+  });
+  await page.getByTestId('app-import-input').setInputFiles({ name: 'two-av.json', mimeType: 'application/json', buffer: Buffer.from(file) });
+  await expect(page.getByTestId('app-warnings').locator('[data-kind="conflict-group"]')).toContainText('keep only one');
+  await expect(field(page, 'applications.selection').locator('.issues .error')).toContainText('real-time antivirus');
+  await expect(page.getByTestId('status')).not.toContainText('Ready');
+});
+
+test('Network Engineer profile: the full workstation, dependency added, portable tools shown as portable', async ({ page }) => {
+  await setName(page, 'Alex');
+  await go(page, 'applications');
+  await checkbox(page, 'applications.profile.network-engineer').check();
+  for (const id of ['git', 'vscode', 'python-314', 'nodejs-lts', 'claude-code', 'claude-desktop', 'chatgpt', 'docker-desktop', 'wireshark', 'tailscale', 'wireguard', 'wiztree', 'hwinfo', 'rufus', 'ventoy', 'qbittorrent', 'sabnzbd', 'syncthing']) {
+    await expect(appBox(page, id), id).toBeChecked();
+  }
+  await expect(page.locator('[data-app="wsl"]')).toContainText('Required by Docker Desktop');
+  await expect(page.locator('[data-app="rufus"]')).toContainText('Portable');
+  await expect(page.locator('[data-app="chatgpt"]')).toContainText('Microsoft Store');
+  await expect(page.locator('[data-app="filezilla"]')).toContainText('Manual follow-up');
+  await expect(appBox(page, 'quicklook')).not.toBeChecked();
+  await expect(appBox(page, 'freefilesync')).not.toBeChecked();
+  await page.getByTestId('app-filter').locator('[data-filter="excluded"]').click();
+  await expect(page.getByTestId('app-catalog')).toContainText('WinDirStat');
+});
+
+test('Save as new profile: survives a page reload, re-applies exactly, can be renamed, exported and deleted', async ({ page }) => {
+  await setName(page, 'Alex');
+  await go(page, 'applications');
+  await checkbox(page, 'applications.profile.gaming').check();
+  await appBox(page, 'epic').uncheck();
+  await page.locator('[data-device="phone-iphone"]').check();
+  const before = (await planIds(page)).sort();
+  page.once('dialog', (d) => d.accept("Aunt's Computer"));
+  await page.locator('[data-action="app-save-new"]').click();
+  await expect(checkbox(page, 'applications.profile.aunt-s-computer')).toBeChecked();
+  expect((await planIds(page)).sort()).toEqual(before);
+
+  await page.reload();
+  await go(page, 'applications');
+  const card = page.getByTestId('app-custom-profiles').locator('[data-profile="aunt-s-computer"]');
+  await expect(card).toContainText("Aunt's Computer");
+  await expect(checkbox(page, 'applications.profile.aunt-s-computer')).not.toBeChecked();
+  await checkbox(page, 'applications.profile.core').uncheck();
+  await checkbox(page, 'applications.profile.aunt-s-computer').check();
+  expect((await planIds(page)).sort()).toEqual(before);
+
+  page.once('dialog', (d) => d.accept('Customer Laptop'));
+  await card.locator('[data-action="app-rename-profile"]').click();
+  await expect(card).toContainText('Customer Laptop');
+  const [dl] = await Promise.all([page.waitForEvent('download'), card.locator('[data-action="app-export-profile"]').click()]);
+  const exported = JSON.parse(await readFile((await dl.path())!, 'utf8'));
+  expect(exported).toMatchObject({ format: 'windows-deployment-builder/app-profiles', formatVersion: 2 });
+  expect(exported.profiles[0]).toMatchObject({ name: 'Customer Laptop', inherits: ['core', 'gaming'], excluded: ['winget:epicgames.epicgameslauncher'], devices: { phone: 'iphone' } });
+  expect(JSON.stringify(exported)).not.toMatch(/password|Alex/i);
+
+  page.once('dialog', (d) => d.accept());
+  await card.locator('[data-action="app-delete-profile"]').click();
+  await expect(card).toHaveCount(0);
+  await page.reload();
+  await go(page, 'applications');
+  await expect(page.getByTestId('app-custom-profiles').locator('[data-profile]')).toHaveCount(0);
+  // Built-in templates are untouched.
+  await expect(page.locator('[data-profile="gaming"]')).toContainText('2 apps');
 });
 
 test('application provisioning: WinGet import adds a profile without overwriting, export is valid WinGet JSON', async ({ page }) => {
   await setName(page, 'Alex');
   await go(page, 'applications');
-  await catalogAdd(page, '7zip').click();
   await page.getByTestId('app-import-input').setInputFiles({ name: 'office.json', mimeType: 'application/json', buffer: Buffer.from(wingetExport) });
   await expect(page.getByTestId('app-import-status')).toContainText('Imported office.json as profile "Imported: office"');
   await expect(page.getByTestId('app-import-status')).toContainText('Not A Valid Id');
   await expect(checkbox(page, 'applications.profile.imported-office')).toBeChecked();
-  await expect(page.getByTestId('app-count')).toHaveText('3 selected');
-  await expect(apps(page).locator('[data-package="winget:7zip.7zip"]')).toBeVisible();
+  await expect(checkbox(page, 'applications.profile.core')).toBeChecked();
+  // Git is new; VLC was already in Core Essentials and is installed once.
+  await expect(page.getByTestId('app-count')).toHaveText('8 to install, 1 manual');
 
   const [dl] = await Promise.all([page.waitForEvent('download'), page.locator('[data-action="app-export-winget"]').click()]);
   expect(dl.suggestedFilename()).toBe('winget-packages.json');
   const out = JSON.parse(await readFile((await dl.path())!, 'utf8'));
   expect(out.$schema).toBe('https://aka.ms/winget-packages.schema.2.0.json');
   expect(out.Sources[0].SourceDetails.Identifier).toBe('Microsoft.Winget.Source_8wekyb3d8bbwe');
-  expect(out.Sources[0].Packages.map((p: { PackageIdentifier: string }) => p.PackageIdentifier).sort()).toEqual(['7zip.7zip', 'Git.Git', 'VideoLAN.VLC']);
+  const ids = out.Sources[0].Packages.map((p: { PackageIdentifier: string }) => p.PackageIdentifier);
+  expect(ids).toEqual(expect.arrayContaining(['Git.Git', 'VideoLAN.VLC', 'Google.Chrome']));
+  expect(ids).not.toContain('rustdesk');
 
   await page.getByTestId('app-import-input').setInputFiles({ name: 'evil.json', mimeType: 'application/json', buffer: Buffer.from('{"Sources":[{"SourceDetails":{"Name":"winget"},"Packages":[]}]}') });
   await expect(page.getByTestId('app-import-status')).toContainText('Could not import evil.json');
-  await expect(page.getByTestId('app-count')).toHaveText('3 selected');
+  await expect(page.getByTestId('app-count')).toHaveText('8 to install, 1 manual');
 });
 
-test('application provisioning (Advanced): profiles, manual IDs, order preview, policies and validation', async ({ page }) => {
+test('application provisioning (Advanced): package IDs, install order with dependencies, custom IDs, policies and validation', async ({ page }) => {
   await setName(page, 'Alex');
-  await expect(page.getByTestId('app-order')).toBeHidden();
   await page.getByRole('button', { name: 'Advanced' }).click();
   await go(page, 'applications');
-
-  page.once('dialog', (d) => d.accept('Family PC'));
-  await page.locator('[data-action="app-new-profile"]').click();
-  await expect(checkbox(page, 'applications.profile.family-pc')).toBeChecked();
-  await expect(page.getByTestId('app-target')).toHaveValue('family-pc');
-  await catalogAdd(page, 'docker-desktop').click();
-  await catalogAdd(page, 'wsl').click();
-  await expect(page.getByTestId('app-order').locator('li').first()).toContainText('Windows Subsystem for Linux');
+  await showAll(page);
+  await appBox(page, 'docker-desktop').check();
+  const ids = await planIds(page);
+  expect(ids.indexOf('winget:microsoft.wsl')).toBeLessThan(ids.indexOf('winget:docker.dockerdesktop'));
   await expect(page.getByTestId('app-order')).toContainText('winget install --id Docker.DockerDesktop --exact --source winget --silent');
+  await expect(page.locator('[data-app="rufus"] .ids')).toContainText('winget: Rufus.Rufus');
 
-  page.once('dialog', (d) => d.accept('Kids PC'));
-  await apps(page).locator('[data-profile="family-pc"] [data-action="app-rename-profile"]').click();
-  await expect(apps(page).locator('[data-profile="family-pc"]')).toContainText('Kids PC');
-  await apps(page).locator('[data-profile="family-pc"] [data-action="app-duplicate-profile"]').click();
-  await expect(apps(page).locator('[data-profile]')).toHaveCount(8);
-  await expect(apps(page).locator('[data-profile="gaming"] [data-action="app-delete-profile"]')).toHaveCount(0);
-
-  await page.getByText('Add by package identifier').click();
+  await page.getByTestId('app-custom-id').locator('summary').click();
   await page.getByTestId('app-manual-id').fill('Foo Bar');
   await page.locator('[data-action="app-add-manual"]').click();
   await expect(page.getByTestId('app-manual-message')).toContainText('Not a valid winget identifier');
@@ -346,6 +443,11 @@ test('application provisioning (Advanced): profiles, manual IDs, order preview, 
   await page.locator('[data-action="app-add-manual"]').click();
   await expect(page.getByTestId('app-manual-message')).toContainText('Added');
   await expect(page.getByTestId('app-order')).toContainText('--version 1.95.0');
+  // Adding an excluded app by exact ID is allowed and explained.
+  await page.getByTestId('app-manual-id').fill('Brave.Brave');
+  await page.getByTestId('app-manual-version').fill('');
+  await page.locator('[data-action="app-add-manual"]').click();
+  await expect(page.getByTestId('app-warnings')).toContainText('Brave.Brave is not in the curated catalog');
 
   await radio(page, 'applications.restartPolicy', 'never').check();
   await page.locator('input[name="applications.maxAttemptsPerPackage"]').fill('9');
@@ -363,27 +465,40 @@ test('application provisioning (Advanced): profiles, manual IDs, order preview, 
   const [dl] = await Promise.all([page.waitForEvent('download'), page.getByTestId('assets').locator('[data-asset="applications-config.json"] [data-action="download-asset"]').click()]);
   const cfg = JSON.parse(await readFile((await dl.path())!, 'utf8'));
   expect(cfg).toMatchObject({ restartPolicy: 'never', maxAttemptsPerPackage: 3 });
-  expect(cfg.packages.map((p: { packageIdentifier: string }) => p.packageIdentifier)).toEqual(['Microsoft.WSL', 'Docker.DockerDesktop', 'Microsoft.VisualStudioCode']);
+  const pk = cfg.packages.map((p: { packageIdentifier: string }) => p.packageIdentifier);
+  expect(pk.indexOf('Microsoft.WSL')).toBeLessThan(pk.indexOf('Docker.DockerDesktop'));
+  expect(cfg.packages.find((p: { packageIdentifier: string }) => p.packageIdentifier === 'Microsoft.VisualStudioCode').version).toBe('1.95.0');
 });
 
-test('application selection survives Basic/Advanced switches, profile export/import, and reset', async ({ page }) => {
+test('application selection survives navigation, Basic/Advanced switches, profile export/import, and reset', async ({ page }) => {
   await setName(page, 'Alex');
   await go(page, 'applications');
-  await catalogAdd(page, 'git').click();
+  await appBox(page, 'chrome').uncheck();
+  await checkbox(page, 'applications.profile.music').check();
+  await go(page, 'review');
+  await go(page, 'applications');
   await page.getByRole('button', { name: 'Advanced' }).click();
   await page.getByRole('button', { name: 'Basic' }).click();
-  await expect(page.getByTestId('app-count')).toHaveText('1 selected');
+  await expect(appBox(page, 'chrome')).not.toBeChecked();
+  await expect(appBox(page, 'musicbee')).toBeChecked();
+  // Adding another profile does not tick Chrome again.
+  await checkbox(page, 'applications.profile.everyday').check();
+  await expect(appBox(page, 'chrome')).not.toBeChecked();
 
   const [dl] = await Promise.all([page.waitForEvent('download'), page.locator('[data-action="export"]').click()]);
   const json = await readFile((await dl.path())!, 'utf8');
-  expect(JSON.parse(json).applications.selection.added[0].packageIdentifier).toBe('Git.Git');
+  expect(JSON.parse(json).applications.selection).toMatchObject({ selectedProfiles: ['core', 'music', 'everyday'], removed: ['winget:google.chrome'] });
 
   page.once('dialog', (d) => d.accept());
   await page.locator('[data-action="reset"]').click();
-  await expect(page.getByTestId('app-count')).toHaveText('0 selected');
+  await go(page, 'applications');
+  await expect(appBox(page, 'chrome')).toBeChecked();
+  await expect(checkbox(page, 'applications.profile.music')).not.toBeChecked();
 
   await page.getByTestId('import-input').setInputFiles({ name: 'p.json', mimeType: 'application/json', buffer: Buffer.from(json) });
-  await expect(page.getByTestId('app-count')).toHaveText('1 selected');
+  await go(page, 'applications');
+  await expect(appBox(page, 'chrome')).not.toBeChecked();
+  await expect(appBox(page, 'musicbee')).toBeChecked();
 });
 
 test('Additional Software: recorded as manual follow-up; unsafe entries are rejected', async ({ page }) => {
@@ -507,9 +622,11 @@ test('deployment package: ZIP built offline in the browser, answer file at the r
   const { readZip } = await import('../../src/engine/deployment/zip');
   await setName(page, 'Alex');
   await go(page, 'applications');
-  await catalogAdd(page, 'git').click();
-  await catalogAdd(page, '7zip').click();
-  await apps(page).locator('[data-package="winget:7zip.7zip"] [data-action="app-remove"]').click();
+  await checkbox(page, 'applications.profile.core').uncheck();
+  await showAll(page);
+  await appBox(page, 'git').check();
+  await appBox(page, '7zip').check();
+  await appBox(page, '7zip').uncheck();
   await context.setOffline(true);
   await go(page, 'deployment');
   await expect(page.getByTestId('package-status')).toContainText('Ready: windows-deployment-package.zip');

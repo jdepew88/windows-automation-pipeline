@@ -14,7 +14,8 @@ import {
   applicationsActive,
 } from '../../engine/applications';
 import { isKnownSource } from '../../engine/applications/ids';
-import { expandProfile, resolveSelection } from '../../engine/applications/selection';
+import { isBuiltinProfile, isSelectableProfile } from '../../engine/applications/builtin';
+import { allProfiles, expandProfile, resolveSelection } from '../../engine/applications/selection';
 import { TASK_PATH } from '../../engine/windows-update';
 
 const on = (p: Profile) => p.applications.enabled;
@@ -58,7 +59,7 @@ export const settings: SettingDef[] = [
     label: 'Applications',
     control: 'custom',
     description:
-      'Combine profiles, then add or remove individual applications. Packages are identified by PackageIdentifier and source, never by name, and appear once even when several profiles contain them. All profiles start empty.',
+      'Core Essentials is selected for every new deployment. Combine more profiles, answer the device questions, then tick or untick individual applications; your changes survive profile switches and never alter a profile. Packages are identified by PackageIdentifier and source, never by name, and appear once even when several profiles contain them.',
     applicability: APPLIES,
     stages: ['firstLogon'],
     mapping: 'winget-packages.json (Microsoft packages schema 2.0) + applications-config.json › packages',
@@ -146,14 +147,20 @@ export function validate(p: Profile, issues: Issue[]): void {
   const warn = (path: string, message: string) => issues.push({ severity: 'warning', path, message });
   const path = 'applications.selection';
 
-  const ids = sel.profiles.map((x) => x.id);
-  const dup = ids.filter((id, i) => ids.indexOf(id) !== i);
+  const custom = sel.profiles.map((x) => x.id);
+  const dup = custom.filter((id, i) => custom.indexOf(id) !== i || isBuiltinProfile(id));
   if (dup.length) err(path, `Duplicate profile id: ${[...new Set(dup)].join(', ')}.`);
-  for (const id of sel.selectedProfiles) if (!ids.includes(id)) err(path, `Selected profile "${id}" does not exist.`);
+  if (sel.profiles.some((x) => x.builtin)) err(path, 'Built-in profiles are templates and cannot be stored in a deployment; duplicate one to edit it.');
+  const profiles = allProfiles(sel);
+  const ids = profiles.map((x) => x.id);
+  for (const id of sel.selectedProfiles) {
+    if (!ids.includes(id)) err(path, `Selected profile "${id}" does not exist.`);
+    else if (!isSelectableProfile(id)) err(path, `"${id}" is a device profile; it follows the device answers and cannot be ticked.`);
+  }
   for (const prof of sel.profiles) {
     for (const i of prof.inherits) if (!ids.includes(i)) err(path, `Profile "${prof.name}" inherits "${i}", which does not exist.`);
     const cycles: string[] = [];
-    expandProfile(prof.id, sel.profiles, cycles);
+    expandProfile(prof.id, profiles, cycles);
     if (cycles.length) err(path, `Profile "${prof.name}" inherits itself: ${cycles[0]}.`);
   }
   if (!a.enabled) return;
@@ -169,7 +176,11 @@ export function validate(p: Profile, issues: Issue[]): void {
     else warn(path, `${x.displayName}: ${x.reason}`);
   }
   for (const c of r.conflicts) warn(path, c.message);
-  const interactive = r.packages.filter((x) => x.interaction === 'required');
+  for (const g of r.groupConflicts) err(path, `${g.message} Untick all but one.`);
+  for (const n of r.notices) (n.kind === 'error' ? err : warn)(path, n.message);
+  const manual = r.packages.filter((x) => x.resolution === 'manual');
+  if (manual.length) warn(path, `${manual.map((x) => x.displayName).join(', ')}: no unattended installation is available; listed as a manual follow-up with the official download (never reported as installed).`);
+  const interactive = r.packages.filter((x) => x.interaction === 'required' && x.resolution !== 'manual');
   if (interactive.length) warn(path, `${interactive.map((x) => x.displayName).join(', ')} need interaction and will be listed for manual follow-up instead of being installed.`);
 
   if (!applicationsActive(p)) return;

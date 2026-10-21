@@ -6,8 +6,8 @@ import { z } from 'zod';
  * published as an asset; the Zod schema validates engine output in the tests.
  */
 
-export const PACKAGE_STATUSES = ['Pending', 'Installing', 'Succeeded', 'AlreadyInstalled', 'Skipped', 'RequiresInteraction', 'RequiresRestart', 'Failed', 'Unavailable'] as const;
-export const TERMINAL_STATUSES = ['Succeeded', 'AlreadyInstalled', 'Skipped', 'RequiresInteraction', 'Failed', 'Unavailable'] as const;
+export const PACKAGE_STATUSES = ['Pending', 'Installing', 'Succeeded', 'AlreadyInstalled', 'Skipped', 'SkippedByUser', 'RequiresInteraction', 'RequiresRestart', 'Failed', 'Unavailable'] as const;
+export const TERMINAL_STATUSES = ['Succeeded', 'AlreadyInstalled', 'Skipped', 'SkippedByUser', 'RequiresInteraction', 'Failed', 'Unavailable'] as const;
 export const FINAL_STATUSES = ['Succeeded', 'CompletedWithFollowUp', 'CompletedWithFailures', 'Failed', 'Offline'] as const;
 /** Final statuses for which the completion marker is written. */
 export const MARKER_STATUSES = ['Succeeded', 'CompletedWithFollowUp', 'CompletedWithFailures'] as const;
@@ -56,7 +56,7 @@ export const ApplicationsResultSchema = z
     reboots: count,
     bootstrap: z.object({ status: z.enum(BOOTSTRAP_STATUSES), method: z.string(), winGetVersion: z.string(), message: z.string() }).strict(),
     counts: z
-      .object({ total: count, succeeded: count, alreadyInstalled: count, skipped: count, requiresInteraction: count, requiresRestart: count, failed: count, unavailable: count, pending: count })
+      .object({ total: count, succeeded: count, alreadyInstalled: count, skipped: count, skippedByUser: count, requiresInteraction: count, requiresRestart: count, failed: count, unavailable: count, pending: count })
       .strict(),
     packages: z.array(PackageResult),
     additionalSoftware: z.array(AdditionalResult),
@@ -105,8 +105,8 @@ export const RESULTS_JSON_SCHEMA = {
     counts: {
       type: 'object',
       additionalProperties: false,
-      required: ['total', 'succeeded', 'alreadyInstalled', 'skipped', 'requiresInteraction', 'requiresRestart', 'failed', 'unavailable', 'pending'],
-      properties: { total: int, succeeded: int, alreadyInstalled: int, skipped: int, requiresInteraction: int, requiresRestart: int, failed: int, unavailable: int, pending: int },
+      required: ['total', 'succeeded', 'alreadyInstalled', 'skipped', 'skippedByUser', 'requiresInteraction', 'requiresRestart', 'failed', 'unavailable', 'pending'],
+      properties: { total: int, succeeded: int, alreadyInstalled: int, skipped: int, skippedByUser: int, requiresInteraction: int, requiresRestart: int, failed: int, unavailable: int, pending: int },
     },
     packages: {
       type: 'array',

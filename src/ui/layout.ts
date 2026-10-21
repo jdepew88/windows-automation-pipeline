@@ -46,6 +46,7 @@ export const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
     items: [
       page('applications', 'WinGet applications', 'package'),
       { target: 'app-profiles', page: 'applications', label: 'Application profiles', icon: 'layers' },
+      { target: 'app-devices', page: 'applications', label: 'Mobile devices', icon: 'laptop' },
       page('additionalSoftware', 'Additional Software', 'boxPlus'),
     ],
   },

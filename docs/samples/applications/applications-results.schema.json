@@ -111,6 +111,7 @@
         "succeeded",
         "alreadyInstalled",
         "skipped",
+        "skippedByUser",
         "requiresInteraction",
         "requiresRestart",
         "failed",
@@ -131,6 +132,10 @@
           "minimum": 0
         },
         "skipped": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "skippedByUser": {
           "type": "integer",
           "minimum": 0
         },
@@ -192,6 +197,7 @@
               "Succeeded",
               "AlreadyInstalled",
               "Skipped",
+              "SkippedByUser",
               "RequiresInteraction",
               "RequiresRestart",
               "Failed",
@@ -242,6 +248,7 @@
               "Succeeded",
               "AlreadyInstalled",
               "Skipped",
+              "SkippedByUser",
               "RequiresInteraction",
               "RequiresRestart",
               "Failed",

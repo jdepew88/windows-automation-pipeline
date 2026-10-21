@@ -15,7 +15,7 @@ import { exportProfile, hasSecrets } from '../profiles';
 import { orchestrationAsset } from '../orchestration';
 import { DATA_ROOT, EMBEDDED_UPDATE_FILES, ENGINE_VERSION, TASK_NAME, TASK_PATH, resolveDrivers, updateEngineAssets } from '../windows-update';
 import { APP_ENGINE_VERSION, APP_PROFILE_FILE, APP_TASK_NAME, EMBEDDED_APP_FILES, applicationAssets, applicationsActive } from '../applications';
-import { resolveSelection } from '../applications/selection';
+import { allProfiles, effectiveDevices, resolveSelection } from '../applications/selection';
 import { DRIVER_STAGE } from '../drivers/contract';
 import { isEffective, PHASES } from '../../features/scripts';
 import { sha256, utf8 } from './sha256';
@@ -257,15 +257,19 @@ export function buildManifest(p: Profile) {
     ],
     applications: {
       enabled: apps,
-      selectedProfiles: a.selection.selectedProfiles.map((pid) => a.selection.profiles.find((x) => x.id === pid)?.name ?? pid),
+      selectedProfiles: a.selection.selectedProfiles.map((pid) => allProfiles(a.selection).find((x) => x.id === pid)?.name ?? pid),
+      // Phase 4.2 fields only when the stage runs, so a deployment without applications keeps the Phase 4 manifest (and answer file).
+      ...(apps ? { deviceProfiles: sel.deviceProfiles.map((pid) => allProfiles(a.selection).find((x) => x.id === pid)?.name ?? pid), devices: effectiveDevices(a.selection) } : {}),
       packages: sel.packages.map((x) => ({
         displayName: x.displayName,
         packageIdentifier: x.ref.packageIdentifier,
         source: x.ref.source,
+        method: x.method,
         version: x.ref.version,
         scope: x.ref.scope,
         resolution: x.resolution,
-        requiresAttention: x.resolution === 'unresolved' || x.interaction === 'required',
+        origins: x.origins,
+        requiresAttention: x.resolution === 'unresolved' || x.resolution === 'manual' || x.interaction === 'required',
       })),
       removedFromProfiles: sel.removed.map((x) => x.key),
       additionalSoftware: p.additionalSoftware.items.map((i) => ({ name: i.name, execution: i.execution })),

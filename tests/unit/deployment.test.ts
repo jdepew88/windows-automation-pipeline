@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { commandLines, embedded, generateOk, profile } from './helpers';
+import { commandLines, embedded, generateOk, noApps, profile } from './helpers';
 import { generate } from '../../src/engine/pipeline';
 import { ownerDefaults } from '../../src/engine/profiles';
 import {
@@ -24,8 +24,10 @@ import type { Profile } from '../../src/engine/schema/profile';
 const nodeSha = (b: Uint8Array | string) => createHash('sha256').update(b).digest('hex').toUpperCase();
 const dec = new TextDecoder();
 
+// Exactly Git + Whiteboard (no Core Essentials), as in Phase 4.
 const withApps = (mutate?: (p: Profile) => void) =>
   profile((p) => {
+    noApps(p);
     p.applications.selection.added.push(
       { packageIdentifier: 'Git.Git', source: 'winget', displayName: 'Git', version: '', scope: '' },
       { packageIdentifier: '9MSPC6MP8FM4', source: 'msstore', displayName: 'Whiteboard', version: '', scope: '' },
@@ -168,34 +170,28 @@ describe('deployment package (ZIP)', () => {
 
 describe('customer application selections', () => {
   it('contains exactly the effective selection after composition, additions, removals and de-duplication', () => {
+    const ref = (packageIdentifier: string, displayName: string) => ({ packageIdentifier, source: 'winget', displayName, version: '', scope: '' as const });
     const p = profile((x) => {
+      noApps(x);
       const sel = x.applications.selection;
-      const everyday = sel.profiles.find((pr) => pr.id === 'everyday')!;
-      everyday.packages.push(
-        { packageIdentifier: 'Mozilla.Firefox', source: 'winget', displayName: 'Firefox', version: '', scope: '' },
-        { packageIdentifier: '7zip.7zip', source: 'winget', displayName: '7-Zip', version: '', scope: '' },
-      );
-      const gaming = sel.profiles.find((pr) => pr.id === 'gaming')!;
-      gaming.packages.push(
-        { packageIdentifier: 'Valve.Steam', source: 'winget', displayName: 'Steam', version: '', scope: '' },
-        { packageIdentifier: 'ElectronicArts.EADesktop', source: 'winget', displayName: 'EA app', version: '', scope: '' },
-        { packageIdentifier: '7zip.7zip', source: 'winget', displayName: '7-Zip', version: '', scope: '' },
-      );
-      sel.selectedProfiles = ['everyday', 'gaming'];
-      sel.added.push({ packageIdentifier: 'SumatraPDF.SumatraPDF', source: 'winget', displayName: 'SumatraPDF', version: '', scope: '' });
-      sel.removed.push('winget:electronicarts.eadesktop');
+      sel.profiles.push({ id: 'home', name: 'Home', category: 'custom', description: '', builtin: false, inherits: [], packages: [ref('Mozilla.Firefox', 'Firefox'), ref('7zip.7zip', '7-Zip')] });
+      sel.profiles.push({ id: 'extra', name: 'Extra', category: 'custom', description: '', builtin: false, inherits: [], packages: [ref('Valve.Steam', 'Steam'), ref('7ZIP.7ZIP', '7-Zip')] });
+      sel.selectedProfiles = ['home', 'gaming', 'extra'];
+      sel.added.push(ref('Adobe.Acrobat.Reader.64-bit', 'Acrobat Reader'));
+      sel.removed.push('winget:epicgames.epicgameslauncher');
     });
     const { pkg } = pkgOf(p);
-    expect(pkg.manifest.applications.packages.map((x) => x.packageIdentifier)).toEqual(['Mozilla.Firefox', '7zip.7zip', 'Valve.Steam', 'SumatraPDF.SumatraPDF']);
+    expect(pkg.manifest.applications.packages.map((x) => x.packageIdentifier)).toEqual(['Mozilla.Firefox', '7zip.7zip', 'Valve.Steam', 'Adobe.Acrobat.Reader.64-bit']);
     const native = JSON.parse(dec.decode(readZip(pkg.zip).find((e) => e.path.endsWith('winget-packages.json'))!.data));
-    expect(native.Sources[0].Packages.map((x: { PackageIdentifier: string }) => x.PackageIdentifier)).toEqual(['Mozilla.Firefox', '7zip.7zip', 'Valve.Steam', 'SumatraPDF.SumatraPDF']);
-    expect(pkg.manifest.applications.removedFromProfiles).toEqual(['winget:electronicarts.eadesktop']);
-    expect(pkg.manifest.applications.selectedProfiles).toEqual(['Everyday Essentials', 'Gaming']);
+    expect(native.Sources[0].Packages.map((x: { PackageIdentifier: string }) => x.PackageIdentifier)).toEqual(['Mozilla.Firefox', '7zip.7zip', 'Valve.Steam', 'Adobe.Acrobat.Reader.64-bit']);
+    expect(pkg.manifest.applications.removedFromProfiles).toEqual(['winget:epicgames.epicgameslauncher']);
+    expect(pkg.manifest.applications.selectedProfiles).toEqual(['Home', 'Gaming', 'Extra']);
+    expect(pkg.manifest.applications.packages.find((x) => x.packageIdentifier === 'Valve.Steam')!.origins).toEqual(['gaming', 'extra']);
   });
 
   it('does not change the owner defaults', () => {
     const before = JSON.stringify(ownerDefaults());
-    pkgOf(withApps((x) => x.applications.selection.profiles[0]!.packages.push({ packageIdentifier: 'Git.Git', source: 'winget', displayName: 'Git', version: '', scope: '' })));
+    pkgOf(withApps((x) => x.applications.selection.added.push({ packageIdentifier: 'Mozilla.Firefox', source: 'winget', displayName: 'Firefox', version: '', scope: '' })));
     expect(JSON.stringify(ownerDefaults())).toBe(before);
   });
 
@@ -244,7 +240,10 @@ describe('answer file integration (Phase 4 changes)', () => {
   });
 
   it('with both engines off nothing is added (Milestone 1 answer file unchanged)', () => {
-    const p = profile((x) => (x.windowsUpdate.enabled = false));
+    const p = profile((x) => {
+      x.windowsUpdate.enabled = false;
+      noApps(x);
+    });
     expect(deploymentActive(p)).toBe(false);
     const off = generateOk(p);
     expect(off.embeddedFiles.some((f) => f.path.includes('\\Deployment\\'))).toBe(false);

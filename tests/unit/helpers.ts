@@ -12,6 +12,14 @@ export function profile(mutate?: (p: Profile) => void, name = 'Alex'): Profile {
   return p;
 }
 
+/**
+ * The Phase 4 owner default had an empty application selection; since Phase 4.2 Core Essentials
+ * is selected. Tests about the engines-off / Milestone 1 output use this to clear it again.
+ */
+export function noApps(p: Profile): void {
+  p.applications.selection.selectedProfiles = [];
+}
+
 export function generateOk(p: Profile): GenerateResult & { xml: string; root: XElement } {
   const r = generate(p);
   if (!r.ok) throw new Error(`Expected success, got: ${r.issues.map((i) => `${i.path}: ${i.message}`).join('; ')}`);

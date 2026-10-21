@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "engineVersion": "1.0.0",
+  "engineVersion": "1.1.0",
   "dataRoot": "C:\\ProgramData\\WindowsDeploymentBuilder",
   "taskPath": "\\WindowsDeploymentBuilder\\",
   "taskName": "Applications",
@@ -29,14 +29,26 @@
   "rebootWarningSeconds": 60,
   "packages": [
     {
-      "key": "winget:git.git",
-      "packageIdentifier": "Git.Git",
+      "key": "winget:google.chrome",
+      "packageIdentifier": "Google.Chrome",
       "source": "winget",
-      "displayName": "Git",
+      "displayName": "Google Chrome",
       "version": "",
       "scope": "",
       "interaction": "unknown",
-      "after": []
+      "after": [],
+      "method": "winget"
+    },
+    {
+      "key": "winget:videolan.vlc",
+      "packageIdentifier": "VideoLAN.VLC",
+      "source": "winget",
+      "displayName": "VLC media player",
+      "version": "",
+      "scope": "",
+      "interaction": "unknown",
+      "after": [],
+      "method": "winget"
     },
     {
       "key": "winget:7zip.7zip",
@@ -46,7 +58,63 @@
       "version": "",
       "scope": "",
       "interaction": "unknown",
-      "after": []
+      "after": [],
+      "method": "winget"
+    },
+    {
+      "key": "winget:codesector.teracopy",
+      "packageIdentifier": "CodeSector.TeraCopy",
+      "source": "winget",
+      "displayName": "TeraCopy",
+      "version": "",
+      "scope": "",
+      "interaction": "unknown",
+      "after": [],
+      "method": "winget"
+    },
+    {
+      "key": "winget:bitwarden.bitwarden",
+      "packageIdentifier": "Bitwarden.Bitwarden",
+      "source": "winget",
+      "displayName": "Bitwarden",
+      "version": "",
+      "scope": "",
+      "interaction": "unknown",
+      "after": [],
+      "method": "winget"
+    },
+    {
+      "key": "winget:microsoft.vcredist.2015+.x64",
+      "packageIdentifier": "Microsoft.VCRedist.2015+.x64",
+      "source": "winget",
+      "displayName": "Visual C++ Redistributable 2015-2026 (x64)",
+      "version": "",
+      "scope": "",
+      "interaction": "unknown",
+      "after": [],
+      "method": "winget"
+    },
+    {
+      "key": "winget:microsoft.vcredist.2015+.x86",
+      "packageIdentifier": "Microsoft.VCRedist.2015+.x86",
+      "source": "winget",
+      "displayName": "Visual C++ Redistributable 2015-2026 (x86)",
+      "version": "",
+      "scope": "",
+      "interaction": "unknown",
+      "after": [],
+      "method": "winget"
+    },
+    {
+      "key": "winget:git.git",
+      "packageIdentifier": "Git.Git",
+      "source": "winget",
+      "displayName": "Git",
+      "version": "",
+      "scope": "",
+      "interaction": "unknown",
+      "after": [],
+      "method": "winget"
     },
     {
       "key": "winget:microsoft.wsl",
@@ -56,7 +124,8 @@
       "version": "",
       "scope": "",
       "interaction": "unknown",
-      "after": []
+      "after": [],
+      "method": "winget"
     },
     {
       "key": "winget:docker.dockerdesktop",
@@ -68,7 +137,8 @@
       "interaction": "unknown",
       "after": [
         "winget:microsoft.wsl"
-      ]
+      ],
+      "method": "winget"
     },
     {
       "key": "msstore:9mspc6mp8fm4",
@@ -78,9 +148,19 @@
       "version": "",
       "scope": "",
       "interaction": "unknown",
-      "after": []
+      "after": [],
+      "method": "msstore"
     }
   ],
   "unresolved": [],
+  "manual": [
+    {
+      "key": "catalog:rustdesk",
+      "displayName": "RustDesk",
+      "instructions": "Download the signed Windows installer from RustDesk's official GitHub releases and install it. Leave unattended access off: do not set a permanent password; the customer approves each session.",
+      "url": "https://github.com/rustdesk/rustdesk/releases/latest"
+    }
+  ],
+  "deselected": [],
   "additionalSoftware": []
 }

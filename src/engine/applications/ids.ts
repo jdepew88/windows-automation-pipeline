@@ -15,6 +15,13 @@ export const VERSION = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$/;
 
 export const isKnownSource = (s: string): s is KnownSource => (KNOWN_SOURCES as readonly string[]).includes(s);
 
+/**
+ * Pseudo-source for catalog entries that have no WinGet or Store package (manual follow-up, Phase
+ * 4.2). The identifier is the catalog id. Such a reference is never passed to WinGet.
+ */
+export const CATALOG_SOURCE = 'catalog';
+export const CATALOG_ID = /^[a-z0-9][a-z0-9-]{0,47}$/;
+
 /** Stable de-duplication key: source + PackageIdentifier, case-insensitive (WinGet IDs are). */
 export function packageKey(ref: Pick<PackageRef, 'source' | 'packageIdentifier'>): string {
   return `${ref.source.toLowerCase()}:${ref.packageIdentifier.toLowerCase()}`;
@@ -29,6 +36,7 @@ export function normalizeId(source: string, id: string): string {
 /** Why a package cannot be installed by the engine, or undefined when it can. */
 export function unresolvedReason(ref: Pick<PackageRef, 'source' | 'packageIdentifier' | 'version'>): string | undefined {
   const source = ref.source.toLowerCase();
+  if (source === CATALOG_SOURCE) return CATALOG_ID.test(ref.packageIdentifier) ? undefined : `"${ref.packageIdentifier}" is not a catalog id.`;
   if (!isKnownSource(source)) return `Source "${ref.source}" is not supported (only winget and msstore). The package is kept but not installed.`;
   if (source === 'winget' && !WINGET_ID.test(ref.packageIdentifier)) return `"${ref.packageIdentifier}" is not a valid winget PackageIdentifier (for example Publisher.Package).`;
   if (source === 'msstore' && !MSSTORE_ID.test(ref.packageIdentifier)) return `"${ref.packageIdentifier}" is not a Microsoft Store product ID (for example 9NBLGGH4NNS1).`;

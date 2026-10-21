@@ -1,5 +1,7 @@
 # Application profile format (Phase 3)
 
+> **Phase 4.2:** format version 2 adds `optional`, `excluded`, `devices` and timestamps (version 1 still imports), and built-in profiles are no longer stored in deployments. See [../phase-4-2-application-profiles/profiles.md](../phase-4-2-application-profiles/profiles.md).
+
 The builder uses **two** JSON formats for applications. They do different jobs and are kept
 separate.
 

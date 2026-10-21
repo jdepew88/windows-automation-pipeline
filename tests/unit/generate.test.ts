@@ -3,7 +3,7 @@ import { generate } from '../../src/engine/pipeline';
 import { ownerDefaults } from '../../src/engine/profiles';
 import { getAttr, textContent, walk } from '../../src/engine/xml/tree';
 import { NS } from '../../src/engine/xml/tree';
-import { commandLines, component, components, embedded, find, generateOk, profile, texts } from './helpers';
+import { commandLines, component, components, embedded, find, generateOk, noApps, profile, texts } from './helpers';
 
 describe('owner-default answer file', () => {
   const r = generateOk(profile());
@@ -247,6 +247,7 @@ describe('variations', () => {
       p.updates.mode = 'windowsDefault';
       p.updates.excludeDrivers = false;
       p.windowsUpdate.enabled = false;
+      noApps(p);
     }, ''));
     expect(r.xml).not.toContain('Extensions');
     expect(r.xml).not.toContain('RunSynchronous');

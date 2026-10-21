@@ -37,6 +37,9 @@ Unit test coverage by acceptance criterion:
   - busy installer, already finished, pending restart, corrupt state;
   - single instance (mutex across processes), log content, config defaults.
 
+- **Phase 4.2 (catalog, profiles, devices, engine 1.1.0)**: `app-profiles.test.ts`, the new
+  `Applications.Tests.ps1` scenarios and the application browser tests; see
+  [phase-4-2-application-profiles/testing.md](phase-4-2-application-profiles/testing.md).
 - **Phase 3 (WinGet provisioning)**: see [phase-3/testing.md](phase-3/testing.md) for the coverage
   table, the read-only checks done on real Windows, and the VM checklist (section D below points
   there).

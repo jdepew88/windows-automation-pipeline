@@ -23,6 +23,13 @@ read-only package verification on real Windows. **Not validated in a VM or on ha
 `phase-4-usb-deployment/testing.md`. Report: `phase-4-usb-deployment/implementation-report.md`.
 This delivers the former "Milestone 3: deployment bundle" items except PowerShell 7 via the catalog.
 
+## Phase 4.2: application catalog, profiles and device ecosystems (branch `feature/phase-4-2-application-profiles`)
+
+Implemented and covered by automated tests (simulated WinGet, the real generated package, browser
+tests at three sizes), plus read-only WinGet verification and an engine Plan run on real Windows.
+**Not validated in a VM or on hardware**; see `phase-4-2-application-profiles/testing.md`. Report:
+`phase-4-2-application-profiles/implementation-report.md`.
+
 ## Milestone 2: validation and hardening
 
 - Run WSIM validation and both VM runs (with and without Internet). Fix any findings and record a `docs/validation-log.md`.
@@ -34,6 +41,9 @@ This delivers the former "Milestone 3: deployment bundle" items except PowerShel
 
 - Run the Phase 4 USB deployment checks (`phase-4-usb-deployment/testing.md`) in a VM, then on
   physical hardware (Media Creation Tool and Rufus media).
+- Run the Phase 4.2 application checks (`phase-4-2-application-profiles/testing.md`): Core
+  Essentials, Store and portable packages, antivirus listings, the Network Engineer profile.
+- Consider a reviewed, hash-pinned vendor installer for RustDesk (currently a manual follow-up).
 
 ## Next: manufacturer drivers
 

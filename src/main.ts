@@ -15,6 +15,7 @@ import { FIELD_GROUPS, NAV_GROUPS, PAGE_ICONS, type NavItem, type PageId } from 
 import { renderReview } from './ui/review';
 import { renderDeploymentPage } from './ui/deployment';
 import { Store } from './ui/store';
+import { profileLibrary } from './ui/library';
 
 type View = 'basic' | 'advanced';
 type Theme = 'dark' | 'light' | 'system';
@@ -496,6 +497,22 @@ function refresh(p: Profile, structural: boolean): void {
   review.update(p, result);
 }
 
+// Saved application profiles: restored from this browser at start-up and after a reset or an
+// import, and every custom profile is saved back when it changes (src/ui/library.ts).
+let syncingLibrary = false;
+store.subscribe((p, structural) => {
+  if (!structural || syncingLibrary) return;
+  syncingLibrary = true;
+  try {
+    if (profileLibrary.list().some((x) => !p.applications.selection.profiles.some((y) => y.id === x.id))) {
+      store.update((q) => profileLibrary.restoreInto(q.applications.selection), true);
+    }
+    profileLibrary.saveFrom(store.get().applications.selection);
+  } finally {
+    syncingLibrary = false;
+  }
+});
+profileLibrary.restoreInto(store.get().applications.selection);
 store.subscribe(refresh);
 setTheme(theme);
 setView(view);

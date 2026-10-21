@@ -43,11 +43,29 @@ export const PackageRefSchema = z
   .strict();
 export type PackageRef = z.infer<typeof PackageRefSchema>;
 
-export const APP_PROFILE_CATEGORIES = ['everyday', 'gaming', 'developer', 'laptop', 'touch', 'custom'] as const;
+export const APP_PROFILE_CATEGORIES = ['core', 'everyday', 'gaming', 'developer', 'network', 'music', 'devices', 'laptop', 'touch', 'custom'] as const;
 export const AppProfileCategorySchema = z.enum(APP_PROFILE_CATEGORIES);
 export type AppProfileCategory = z.infer<typeof AppProfileCategorySchema>;
 
 export const APP_PROFILE_ID = /^[a-z0-9][a-z0-9-]{0,47}$/;
+
+/**
+ * Phase 4.2: the customer's devices. Only the kind of device is recorded, never a device name,
+ * serial number, account or phone number. Several devices of different ecosystems can coexist.
+ */
+export const DevicesSchema = z
+  .object({
+    /** The customer's primary smartphone. */
+    phone: z.enum(['none', 'iphone', 'android']),
+    ipad: z.boolean(),
+    extraIphone: z.boolean(),
+    androidTablet: z.boolean(),
+  })
+  .strict();
+export type Devices = z.infer<typeof DevicesSchema>;
+export const NO_DEVICES: Devices = { phone: 'none', ipad: false, extraIphone: false, androidTablet: false };
+
+const UtcStamp = z.string().max(40);
 
 export const AppProfileSchema = z
   .object({
@@ -55,20 +73,32 @@ export const AppProfileSchema = z
     name: z.string().min(1).max(80),
     category: AppProfileCategorySchema,
     description: z.string().max(500),
-    /** Built-in profiles can be populated and cleared but not renamed or deleted. */
+    /** Built-in profiles are templates defined in src/data/apps/profiles.json; they are never stored or edited. */
     builtin: z.boolean(),
-    /** Other profiles whose packages this one includes (composition). */
+    /** Other profiles whose packages this one includes (composition): its parents. */
     inherits: z.array(z.string().max(48)).max(10),
+    /** Packages this profile selects (its defaults, or a saved profile's explicit additions). */
     packages: z.array(PackageRefSchema).max(500),
+    /** Recommended but not selected: shown unticked while the profile is active (Phase 4.2). */
+    optional: z.array(PackageRefSchema).max(500).optional(),
+    /** Package keys ("source:id") this profile leaves out while it is selected (Phase 4.2). */
+    excluded: z.array(z.string().max(200)).max(1000).optional(),
+    /** Device answers saved with the profile; combined with the deployment's own (Phase 4.2). */
+    devices: DevicesSchema.optional(),
+    createdUtc: UtcStamp.optional(),
+    updatedUtc: UtcStamp.optional(),
   })
   .strict();
 export type AppProfile = z.infer<typeof AppProfileSchema>;
 
 export const ApplicationsSelectionSchema = z
   .object({
+    /** Custom (saved or imported) profiles. Built-in profiles come from the application data. */
     profiles: z.array(AppProfileSchema).max(50),
-    /** Profiles combined for this deployment, in order. */
+    /** Profiles combined for this deployment, in order (built-in or custom ids). */
     selectedProfiles: z.array(z.string().max(48)).max(50),
+    /** The customer's devices; they add the matching device recommendations. */
+    devices: DevicesSchema,
     /** Individually added packages (on top of the selected profiles). */
     added: z.array(PackageRefSchema).max(500),
     /** Package keys ("source:id", lower case) removed from the combined selection. */

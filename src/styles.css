@@ -1717,6 +1717,164 @@ fieldset.field > legend + * {
 .avatar[data-cat='networking'] { background: #0284c7; }
 .avatar[data-cat='hardware'] { background: #65a30d; }
 .avatar[data-cat='touch'] { background: #c2410c; }
+.avatar[data-cat='essentials'] { background: #2f6fd6; }
+.avatar[data-cat='music'] { background: #be185d; }
+.avatar[data-cat='remote'] { background: #0369a1; }
+.avatar[data-cat='files'] { background: #b45309; }
+.avatar[data-cat='usb'] { background: #475569; }
+.avatar[data-cat='cloud'] { background: #0e7490; }
+.avatar[data-cat='security'] { background: #15803d; }
+.avatar[data-cat='runtimes'] { background: #6d28d9; }
+
+/* Phase 4.2: application list with checkboxes, devices, saved profiles */
+.saved-head {
+  margin-top: 18px;
+}
+.devices {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 10px;
+}
+.device-group {
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  min-width: 0;
+}
+.device-group legend {
+  padding: 0 4px;
+  font-size: 13.5px;
+  font-weight: 600;
+}
+.device-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  margin-top: 6px;
+}
+.device-choice {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 14px;
+  cursor: pointer;
+}
+.device-note {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+}
+.device-note p.info {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--accent-ring);
+  background: var(--accent-soft);
+  font-size: 13px;
+}
+.device-note p.info .ico {
+  flex: none;
+  margin-top: 2px;
+  color: var(--accent-text);
+}
+.app-list {
+  display: grid;
+  gap: 6px;
+  margin: 10px 0 14px;
+}
+.app-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0 2px;
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.app-group:first-child {
+  margin-top: 0;
+}
+.app-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 11px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  min-width: 0;
+}
+.app-item > input[type='checkbox'] {
+  flex: none;
+  margin-top: 9px;
+  width: 17px;
+  height: 17px;
+  accent-color: var(--accent);
+}
+.app-item.on {
+  border-color: var(--accent-ring);
+  background: var(--accent-soft);
+}
+.app-item.removed {
+  border-style: dashed;
+}
+.app-item.unresolved {
+  border-color: var(--err-border);
+}
+.app-item.excluded {
+  opacity: 0.8;
+}
+.app-main {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  flex: 1;
+}
+.app-main .row-title label {
+  cursor: pointer;
+}
+.app-main .ids,
+.app-main .choice-desc {
+  overflow-wrap: anywhere;
+}
+.app-warning {
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+  margin-top: 3px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--warn-border);
+  background: var(--warn-soft);
+  color: var(--warn-text);
+  font-size: 12.5px;
+}
+.app-warning .ico {
+  flex: none;
+  margin-top: 1px;
+}
+.app-manual:empty {
+  display: none;
+}
+.app-manual,
+.app-removed {
+  margin-top: 12px;
+}
+.app-manual h5,
+.app-removed h5 {
+  font-size: 13px;
+  margin-bottom: 4px;
+}
+.stat.warn strong {
+  color: var(--warn-text);
+}
 
 .app-warnings {
   display: grid;

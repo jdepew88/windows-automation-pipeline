@@ -1,4 +1,3 @@
-import ownerDefaultJson from '../../../profiles/owner-default.json';
 import { SCHEMA_VERSION } from '../schema/profile';
 import { normalizeId, WINGET_ID } from '../applications/ids';
 
@@ -40,11 +39,10 @@ export const MIGRATIONS: Record<number, Migration> = {
     for (const id of legacy.map((x) => normalizeId('winget', x))) if (!byKey.has(id.toLowerCase())) byKey.set(id.toLowerCase(), id);
     const ids = [...byKey.values()];
     const valid = ids.filter((id) => WINGET_ID.test(id));
-    const defaults = structuredClone(ownerDefaultJson.applications.selection.profiles);
     value.applications = {
       selection: {
         profiles: [
-          ...defaults,
+          ...structuredClone(V3_BUILTIN_PROFILES),
           {
             id: 'imported-legacy',
             name: 'Imported from an older profile',
@@ -66,7 +64,65 @@ export const MIGRATIONS: Record<number, Migration> = {
       note: `${valid.length} WinGet package ID(s) from this older profile were moved to the unselected profile "Imported from an older profile" under Application provisioning${dropped ? `; ${dropped} invalid ID(s) were dropped` : ''}. Nothing is installed unless you select it.`,
     };
   },
+
+  // v4 (Phase 4.2): built-in application profiles become read-only templates from the catalog data,
+  // the selection gains device answers, and new deployments start with Core Essentials. An older
+  // profile keeps producing the same answer file: Core Essentials is NOT added, the empty v3
+  // built-ins are dropped (and unticked), and a v3 built-in that someone had filled becomes a
+  // custom profile with the same packages, ticked if it was.
+  3: (input) => {
+    const value = { ...input };
+    const apps = isObj(value.applications) ? { ...value.applications } : {};
+    const sel = isObj(apps.selection) ? { ...apps.selection } : {};
+    const profiles = Array.isArray(sel.profiles) ? sel.profiles.filter(isObj) : [];
+    const selected = Array.isArray(sel.selectedProfiles) ? sel.selectedProfiles.filter((x): x is string => typeof x === 'string') : [];
+    const kept: Record<string, unknown>[] = [];
+    const renamed = new Map<string, string | null>();
+    const converted: string[] = [];
+    for (const p of profiles) {
+      if (p.builtin !== true) {
+        kept.push(p);
+        continue;
+      }
+      const packages = Array.isArray(p.packages) ? p.packages : [];
+      const inherits = Array.isArray(p.inherits) ? p.inherits : [];
+      if (packages.length === 0 && inherits.length === 0) {
+        renamed.set(String(p.id), null);
+        continue;
+      }
+      const id = `${String(p.id).slice(0, 40)}-saved`;
+      renamed.set(String(p.id), id);
+      converted.push(String(p.name));
+      kept.push({ ...p, id, name: `${String(p.name)} (from an older profile)`.slice(0, 80), builtin: false, category: 'custom' });
+    }
+    const remap = (ids: unknown[]) => ids.flatMap((x) => (typeof x === 'string' && renamed.has(x) ? (renamed.get(x) ? [renamed.get(x)!] : []) : typeof x === 'string' ? [x] : []));
+    for (const p of kept) if (Array.isArray(p.inherits)) p.inherits = remap(p.inherits);
+    value.applications = {
+      ...apps,
+      selection: {
+        ...sel,
+        profiles: kept,
+        selectedProfiles: remap(selected),
+        devices: { phone: 'none', ipad: false, extraIphone: false, androidTablet: false },
+        added: Array.isArray(sel.added) ? sel.added : [],
+        removed: Array.isArray(sel.removed) ? sel.removed : [],
+      },
+    };
+    const notes = ['Core Essentials (Chrome, VLC, 7-Zip, TeraCopy, RustDesk, Bitwarden and the Visual C++ runtimes) is not selected for this older profile, so it installs the same applications as before. Tick "Core Essentials" under Applications to add it.'];
+    if (converted.length) notes.push(`Built-in profiles are now fixed templates; your filled-in ${converted.map((n) => `"${n}"`).join(', ')} became custom profile(s) "… (from an older profile)" with the same packages.`);
+    return { value, note: notes.join(' ') };
+  },
 };
+
+/** The six (empty) built-in profiles of schema version 3, for the v2→v3 step. */
+const V3_BUILTIN_PROFILES = [
+  ['everyday', 'Everyday Essentials', 'everyday', 'Browsers, email, documents, PDFs, photo viewing and basic productivity for home users.'],
+  ['gaming', 'Gaming', 'gaming', 'Game launchers, library managers and optional emulator frontends.'],
+  ['developer', 'Developer / Power User', 'developer', 'Editors, terminals, Git, virtualization, networking and related tools.'],
+  ['laptop', 'Laptop', 'laptop', 'Battery-management and optional manufacturer utilities for portable devices.'],
+  ['touch', 'Touchscreen / 2-in-1', 'touch', 'Pen, handwriting, note-taking and touch-oriented apps for convertibles.'],
+  ['custom', 'Custom', 'custom', 'Any combination you choose.'],
+].map(([id, name, category, description]) => ({ id, name, category, description, builtin: true, inherits: [], packages: [] }));
 
 export type MigrateResult =
   | { ok: true; value: Record<string, unknown>; notes: string[] }

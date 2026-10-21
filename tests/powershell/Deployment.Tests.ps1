@@ -170,8 +170,18 @@ Test-Scenario 'answer-file extraction: text hashes match for every embedded file
     Assert-True ($files.Count -ge 15) "embedded files listed ($($files.Count))"
     $r = Invoke-WddStage $script:Manifest (Join-Path $emb 'Deployment\deployment-manifest.json') 'Embedded' (Join-Path $emb 'Deployment') $emb $script:Paths -VerifyOnly
     Assert-True $r.Ok "verification: $($r.Message) $($r.Missing -join ',') $($r.Mismatched -join ',')"
+    # Since Phase 4.2 the application config escapes non-ASCII (\uXXXX), so even the non-ASCII
+    # display name is verified by exact text hash (previously only structurally), and both the
+    # ANSI-extracted copy and the UTF-8 ZIP copy decode to the same name.
     $nonAscii = @($files | Where-Object { -not $_.textSha256 })
-    Assert-True ($nonAscii.Count -ge 1) 'the non-ASCII application config is verified structurally'
+    Assert-Equal $nonAscii.Count 0 'every embedded file is verified by exact text hash'
+    $extracted = Join-Path $emb 'Applications\applications-config.json'
+    $zipCopy = Join-Path $pkgRoot 'scripts\applications\applications-config.json'
+    foreach ($cfg in $extracted, $zipCopy) {
+        $names = @((Read-WddJson $cfg).packages | ForEach-Object { $_.displayName })
+        Assert-True ($names -contains $script:Zoe) "non-ASCII name decodes correctly from $(Split-Path -Leaf (Split-Path -Parent $cfg))"
+        Assert-True (@((Get-Content -LiteralPath $cfg -Raw | ConvertFrom-Json).packages | ForEach-Object { $_.displayName }) -contains $script:Zoe) 'also with the code-page-dependent Get-Content the engine uses'
+    }
 }
 
 Test-Scenario 'staging (embedded): copies to the package folder, verifies the copy, secures the folder' {

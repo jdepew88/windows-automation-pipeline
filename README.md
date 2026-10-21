@@ -1,4 +1,4 @@
-# Windows Deployment Builder (Milestone 1 + Phase 2 Windows Update + Phase 3 WinGet provisioning + Phase 4 USB deployment)
+# Windows Deployment Builder (Milestone 1 + Phase 2 Windows Update + Phase 3 WinGet provisioning + Phase 4 USB deployment + Phase 4.2 application profiles)
 
 A local, offline, browser-based generator for **Windows 11 Pro `autounattend.xml`** answer files,
 written entirely in TypeScript. It is built on the option model and XML patterns of
@@ -29,8 +29,9 @@ serves `dist/`; source maps are excluded by `public/.assetsignore`). Deploy manu
 `npm run deploy`, or let Cloudflare Workers Builds deploy pushes to `main` (build command
 `npm run build`, deploy command `npx wrangler deploy`).
 
-Everything runs locally in the browser, including on the deployed site. Nothing is uploaded, no script runs in the browser, and profiles are not
-saved automatically.
+Everything runs locally in the browser, including on the deployed site. Nothing is uploaded, no script runs in the browser, and the
+configuration is not saved automatically. Only application profiles you save with "Save as new profile…" are kept in this
+browser's local storage (no names or passwords); export them for a backup.
 
 ## Using it
 
@@ -73,11 +74,18 @@ saved automatically.
   `CompletedWithFailures`, `Failed` or `Offline`. It is built only on documented Windows APIs. The
   scripts are also offered as separate downloads under **Review & download → Deployment assets**.
   ⚠️ **Not yet validated in a VM.**
-- **Application provisioning (Phase 3), on but empty.** Six profiles (Everyday Essentials, Gaming,
-  Developer / Power User, Laptop, Touchscreen / 2-in-1, Custom) start **empty**, and nothing is
-  selected, so nothing is generated until you choose applications.
-  - **Choosing applications:** combine profiles, add from a catalog of 48 apps whose WinGet
-    identifiers were checked on 2026-10-19, or import a native `winget export` file.
+- **Application provisioning (Phases 3 and 4.2), on, with Core Essentials.** Every new deployment
+  installs Google Chrome, VLC, 7-Zip, TeraCopy, Bitwarden and the Visual C++ runtimes; RustDesk is
+  listed as a manual step because it has no WinGet or Store package. Each of them can be unticked.
+  - **Choosing applications:** tick profiles (Everyday Essentials, Gaming, General Developer,
+    Network Engineer / Developer / Technician, Music Enthusiast, Laptop, Touchscreen), answer the
+    mobile-device questions (an iPhone or iPad adds Apple Devices), then tick or untick single apps
+    from a catalog of 115 apps verified on 2026-10-21, or add any exact WinGet/Store ID.
+  - **Saved profiles:** "Save as new profile…" keeps a selection (for example "Aunt's Computer") in
+    this browser; export it as JSON for a real backup or another computer.
+  - **Installation methods:** WinGet, Microsoft Store, portable tools (Rufus, Ventoy, … installed
+    machine-wide with a Start menu shortcut, never run) and manual follow-ups that are never
+    reported as installed. Only one real-time antivirus can be selected.
   - **What happens on the PC:** after Windows Update has finished, a task running as the signed-in
     user (elevated) checks WinGet, installs each package once with its exact identifier and source,
     restarts when a package needs it, and records a result for every package.
@@ -98,6 +106,26 @@ saved automatically.
 
 The full per-setting mapping is in [docs/settings-mapping.md](docs/settings-mapping.md) (generated
 from code).
+
+## Quick start: a gaming PC with a PDF reader, on a USB drive
+
+1. Open the site. Enter the customer's name under **Account & computer name**.
+2. Go to **WinGet applications**. Core Essentials is already ticked.
+3. Under **Profiles**, tick **Gaming**. Steam and the Epic Games Launcher are ticked; Battle.net, EA
+   app, Discord and the others appear unticked as recommendations.
+4. The customer only uses Steam: untick **Epic Games Launcher**. It is marked "Unticked by you" and
+   the Gaming profile itself stays unchanged.
+5. Type `pdf` in the search box and tick **Adobe Acrobat Reader**.
+6. If the customer has an iPhone, choose **iPhone** under **Mobile devices & ecosystem**; Apple
+   Devices is ticked automatically.
+7. Check **Installation plan** on the right: it lists exactly what will be installed, in order, plus
+   the manual follow-ups (RustDesk) and what you unticked.
+8. Optional: **Save as new profile…** to reuse this selection for the next computer.
+9. Go to **Deployment package** and download `windows-deployment-package.zip`. Extract it to the root
+   of a Windows 11 installation USB drive ([how](docs/phase-4-usb-deployment/usb-preparation.md)).
+   The ZIP's application plan is the one you saw on screen.
+
+⚠️ Application installation from a real USB drive has not been tested in a VM or on hardware yet.
 
 ## Documentation
 
@@ -120,6 +148,10 @@ from code).
 - [docs/phase-4-usb-deployment/testing.md](docs/phase-4-usb-deployment/testing.md): Phase 4 coverage, regression results, VM/hardware checklist
 - [docs/phase-4-usb-deployment/usb-preparation.md](docs/phase-4-usb-deployment/usb-preparation.md): preparing the USB drive (Media Creation Tool, Rufus, manual copy)
 - [docs/phase-4-usb-deployment/recovery.md](docs/phase-4-usb-deployment/recovery.md): progress, logs, recovery commands
+- [docs/phase-4-2-application-profiles/catalog.md](docs/phase-4-2-application-profiles/catalog.md): catalog schema, source verification, installation methods, portable tools, security software, runtimes
+- [docs/phase-4-2-application-profiles/profiles.md](docs/phase-4-2-application-profiles/profiles.md): built-in profiles, devices, selection rules, saved profiles, browser storage, JSON formats
+- [docs/phase-4-2-application-profiles/testing.md](docs/phase-4-2-application-profiles/testing.md): test results, regression against Phase 4, VM/hardware checklist
+- [docs/phase-4-2-application-profiles/implementation-report.md](docs/phase-4-2-application-profiles/implementation-report.md): what Phase 4.2 changed, engine 1.1.0, ZIP integration, limitations
 
 ## Not yet implemented
 

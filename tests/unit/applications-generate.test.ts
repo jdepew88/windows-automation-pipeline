@@ -23,13 +23,15 @@ import engineSource from '../../src/engine/applications/scripts/ApplicationEngin
 import bootstrapSource from '../../src/engine/applications/scripts/WinGetBootstrap.ps1?raw';
 import installerSource from '../../src/engine/applications/scripts/Install-ApplicationEngine.ps1?raw';
 import wuEngineSource from '../../src/engine/windows-update/scripts/WindowsUpdateEngine.ps1?raw';
-import { commandLines, embedded, errorsOf, generateOk, profile } from './helpers';
+import { commandLines, embedded, errorsOf, generateOk, noApps, profile } from './helpers';
 
 const fixture = (name: string) => readFileSync(new URL(`./fixtures/${name}`, import.meta.url), 'utf8');
 const M1_XML = fixture('m1-owner-default-alex.xml');
 const ref = (packageIdentifier: string, source = 'winget', extra: Partial<PackageRef> = {}): PackageRef => ({ packageIdentifier, source, displayName: packageIdentifier, version: '', scope: '', ...extra });
+// Exactly Git + Whiteboard (no Core Essentials), as in Phase 3.
 const withApps = (mutate?: (p: Profile) => void) =>
   profile((p) => {
+    noApps(p);
     p.applications.selection.added.push(ref('Git.Git', 'winget', { displayName: 'Git' }), ref('9MSPC6MP8FM4', 'msstore', { displayName: 'Whiteboard' }));
     mutate?.(p);
   });
@@ -53,15 +55,18 @@ const item = (extra: Partial<AdditionalItem> = {}): AdditionalItem => ({
 });
 
 describe('earlier milestones are preserved', () => {
-  it('empty selection (owner default): no application files, no extra FirstLogon command', () => {
-    const r = generateOk(profile());
+  it('empty selection (the Phase 4 owner default): no application files, no extra FirstLogon command', () => {
+    const r = generateOk(profile(noApps));
     expect(r.embeddedFiles.some((f) => f.path.startsWith(APP_STAGING_DIR))).toBe(false);
     expect(commandLines(r.root).firstLogon).toHaveLength(2);
     expect(r.assets.map((a) => a.name)).toEqual(['WindowsUpdateEngine.ps1', 'Install-UpdateEngine.ps1', 'config.json', 'README-WindowsUpdate.txt', 'orchestration.json']);
   });
 
   it('Milestone 1: both engines off reproduce the Milestone 1 answer file byte for byte', () => {
-    const r = generate(profile((p) => (p.windowsUpdate.enabled = false)));
+    const r = generate(profile((p) => {
+      p.windowsUpdate.enabled = false;
+      noApps(p);
+    }));
     expect(r.xml).toBe(M1_XML);
     expect(r.assets).toEqual([]);
   });
@@ -75,7 +80,7 @@ describe('earlier milestones are preserved', () => {
     expect(r.profile!.schemaVersion).toBe(SCHEMA_VERSION);
     expect(r.profile!.applications.selection.selectedProfiles).toEqual([]);
     expect(r.profile!.deferred).toEqual({ installPowerShell7: true });
-    expect(generate(r.profile).xml).toBe(generate(profile()).xml);
+    expect(generate(r.profile).xml).toBe(generate(profile(noApps)).xml);
   });
 
   it('a Milestone 1 profile with recorded WinGet IDs moves them to an unselected profile; the XML is unchanged', () => {
@@ -87,7 +92,8 @@ describe('earlier milestones are preserved', () => {
     const legacy = r.profile!.applications.selection.profiles.find((p) => p.id === 'imported-legacy')!;
     expect(legacy.packages.map((p) => p.packageIdentifier)).toEqual(['Git.Git']);
     expect(r.profile!.applications.selection.selectedProfiles).toEqual([]);
-    expect(r.profile!.applications.selection.profiles.filter((p) => p.builtin)).toHaveLength(6);
+    // Since schema v4 the (empty) built-in profiles are templates and are not stored.
+    expect(r.profile!.applications.selection.profiles.map((p) => p.id)).toEqual(['imported-legacy']);
     expect(r.warnings.join(' ')).toMatch(/1 WinGet package ID\(s\).*1 invalid ID\(s\) were dropped/);
     expect(generate(r.profile).xml).toBe(M1_XML);
   });
@@ -213,7 +219,7 @@ describe('deployment assets and contracts', () => {
   it('publishes a results schema consistent with the status vocabulary', () => {
     expect(RESULTS_JSON_SCHEMA.properties.status.enum).toEqual([...FINAL_STATUSES]);
     expect(RESULTS_JSON_SCHEMA.properties.packages.items.properties.status.enum).toEqual([...PACKAGE_STATUSES]);
-    expect(PACKAGE_STATUSES).toEqual(['Pending', 'Installing', 'Succeeded', 'AlreadyInstalled', 'Skipped', 'RequiresInteraction', 'RequiresRestart', 'Failed', 'Unavailable']);
+    expect(PACKAGE_STATUSES).toEqual(['Pending', 'Installing', 'Succeeded', 'AlreadyInstalled', 'Skipped', 'SkippedByUser', 'RequiresInteraction', 'RequiresRestart', 'Failed', 'Unavailable']);
   });
 
   it('describes stages, order, locks and the Phase 4 driver hand-off in orchestration.json', () => {
@@ -276,10 +282,10 @@ describe('validation', () => {
 
   it('rejects missing selected profiles and inheritance cycles', () => {
     expect(errorsOf(profile((p) => (p.applications.selection.selectedProfiles = ['ghost'])))[0]!.message).toMatch(/does not exist/);
+    const custom = (id: string, inherits: string[]) => ({ id, name: id, category: 'custom' as const, description: '', builtin: false, inherits, packages: [] });
     const cyc = errorsOf(
       profile((p) => {
-        p.applications.selection.profiles[0]!.inherits = ['gaming'];
-        p.applications.selection.profiles[1]!.inherits = ['everyday'];
+        p.applications.selection.profiles.push(custom('a', ['b']), custom('b', ['a']));
       }),
     );
     expect(cyc.some((e) => /inherits itself/.test(e.message))).toBe(true);

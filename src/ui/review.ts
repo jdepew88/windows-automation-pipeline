@@ -7,7 +7,7 @@ import { lookup } from '../data';
 import { SETTINGS_BY_PATH } from '../features';
 import { isEffective, PHASES } from '../features/scripts';
 import { resolveDrivers, type DeploymentAsset } from '../engine/windows-update';
-import { resolveSelection } from '../engine/applications/selection';
+import { allProfiles, installable, resolveSelection } from '../engine/applications/selection';
 import type { Issue } from '../engine/validation/issues';
 import { clear, download, h } from './dom';
 import { icon, type IconName } from './icons';
@@ -181,13 +181,15 @@ function summaryTiles(p: Profile, result: GenerateResult): Tile[] {
 function applicationsSummary(p: Profile): { value: string; detail?: string; badge: [string, Tone] } {
   if (!p.applications.enabled) return { value: 'Off', badge: ['Off', 'muted'] };
   const r = resolveSelection(p.applications.selection);
-  const ok = r.packages.filter((x) => x.resolution !== 'unresolved').length;
+  const ok = installable(r).length;
+  const manual = r.packages.filter((x) => x.resolution === 'manual').length;
+  const unresolved = r.packages.filter((x) => x.resolution === 'unresolved').length;
   if (r.packages.length === 0) return { value: 'On, nothing selected (nothing is generated)', badge: ['0', 'muted'] };
-  const profiles = p.applications.selection.selectedProfiles.map((id) => p.applications.selection.profiles.find((x) => x.id === id)?.name ?? id);
+  const profiles = r.activeProfiles.map((id) => allProfiles(p.applications.selection).find((x) => x.id === id)?.name ?? id);
   return {
-    value: `${ok} package(s) via WinGet${profiles.length ? ` from ${profiles.join(' + ')}` : ''}${r.packages.length > ok ? `, ${r.packages.length - ok} unresolved` : ''}`,
+    value: `${ok} package(s) via WinGet${profiles.length ? ` from ${profiles.join(' + ')}` : ''}${manual ? `, ${manual} manual follow-up` : ''}${unresolved ? `, ${unresolved} unresolved` : ''}`,
     detail: 'Installed after Windows Update as the signed-in user',
-    badge: [String(ok), r.packages.length > ok ? 'warn' : 'ok'],
+    badge: [String(ok), manual + unresolved ? 'warn' : 'ok'],
   };
 }
 

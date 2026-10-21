@@ -1,0 +1,357 @@
+{
+  "schemaVersion": 3,
+  "profileName": "Owner default",
+  "setup": {
+    "languageMode": "unattended",
+    "imageLanguage": "en-US",
+    "userLocale": "en-US",
+    "keyboard": "00000409",
+    "geoLocation": "244",
+    "editionMode": "genericKey",
+    "editionId": "pro",
+    "customProductKey": "",
+    "diskMode": "interactive",
+    "bypassRequirementsCheck": false,
+    "bypassNetworkCheck": false,
+    "processorArchitectures": [
+      "amd64"
+    ],
+    "timeZoneMode": "implicit",
+    "timeZone": "Eastern Standard Time",
+    "useConfigurationSet": false,
+    "useNarrator": false,
+    "hidePowerShellWindows": false,
+    "keepSensitiveFiles": false
+  },
+  "accounts": {
+    "accountMode": "unattendedLocal",
+    "personName": "",
+    "usernameMode": "derived",
+    "customUsername": "",
+    "accountGroup": "Administrators",
+    "password": "",
+    "autoLogon": "persistent",
+    "obscurePasswords": true,
+    "hideOnlineAccountScreens": true,
+    "computerNameMode": "derived",
+    "customComputerName": "",
+    "lockoutMode": "default",
+    "lockoutThreshold": 10,
+    "lockoutDuration": 10,
+    "lockoutWindow": 10,
+    "passwordExpirationMode": "default",
+    "maxPasswordAge": 42
+  },
+  "security": {
+    "uacLevel": "noDim",
+    "disableSmartScreen": false,
+    "disableSmartAppControl": false,
+    "systemRestore": "enable",
+    "preventDeviceEncryption": false,
+    "enableRemoteDesktop": false,
+    "processAudit": "disabled",
+    "disableInsiderBuilds": true,
+    "appLockerMode": "none",
+    "appLockerPolicyXml": ""
+  },
+  "privacy": {
+    "expressSettings": "disableAll",
+    "diagnosticData": "required",
+    "disableAdvertisingId": true,
+    "disableTailoredExperiences": true,
+    "disableInkingTypingCollection": true,
+    "disableLocation": true,
+    "disableAppSuggestions": true,
+    "disableBingResults": true,
+    "disableCopilot": true,
+    "disableRecall": true
+  },
+  "updates": {
+    "mode": "notifyInstall",
+    "excludeDrivers": true,
+    "preventAutomaticReboot": false
+  },
+  "windowsUpdate": {
+    "enabled": true,
+    "drivers": "followPolicy",
+    "featureUpdates": "skip",
+    "optionalUpdates": "skip",
+    "microsoftUpdate": false,
+    "maxReboots": 10,
+    "maxAttemptsPerUpdate": 2,
+    "maxRuntimeHours": 6,
+    "networkWaitMinutes": 15,
+    "confirmationScans": 1,
+    "resetComponentsOnce": true,
+    "rebootWarningSeconds": 60,
+    "excludedKbs": ""
+  },
+  "applications": {
+    "enabled": true,
+    "selection": {
+      "profiles": [
+        {
+          "id": "everyday",
+          "name": "Everyday Essentials",
+          "category": "everyday",
+          "description": "Browsers, email, documents, PDFs, photo viewing and basic productivity for home users.",
+          "builtin": true,
+          "inherits": [],
+          "packages": []
+        },
+        {
+          "id": "gaming",
+          "name": "Gaming",
+          "category": "gaming",
+          "description": "Game launchers, library managers and optional emulator frontends.",
+          "builtin": true,
+          "inherits": [],
+          "packages": [
+            {
+              "packageIdentifier": "Valve.Steam",
+              "source": "winget",
+              "displayName": "Steam",
+              "version": "",
+              "scope": ""
+            }
+          ]
+        },
+        {
+          "id": "developer",
+          "name": "Developer / Power User",
+          "category": "developer",
+          "description": "Editors, terminals, Git, virtualization, networking and related tools.",
+          "builtin": true,
+          "inherits": [],
+          "packages": []
+        },
+        {
+          "id": "laptop",
+          "name": "Laptop",
+          "category": "laptop",
+          "description": "Battery-management and optional manufacturer utilities for portable devices.",
+          "builtin": true,
+          "inherits": [],
+          "packages": []
+        },
+        {
+          "id": "touch",
+          "name": "Touchscreen / 2-in-1",
+          "category": "touch",
+          "description": "Pen, handwriting, note-taking and touch-oriented apps for convertibles.",
+          "builtin": true,
+          "inherits": [],
+          "packages": []
+        },
+        {
+          "id": "custom",
+          "name": "Custom",
+          "category": "custom",
+          "description": "Any combination you choose.",
+          "builtin": true,
+          "inherits": [],
+          "packages": []
+        }
+      ],
+      "selectedProfiles": [
+        "gaming",
+        "everyday"
+      ],
+      "added": [
+        {
+          "packageIdentifier": "Git.Git",
+          "source": "winget",
+          "displayName": "Git",
+          "version": "",
+          "scope": ""
+        }
+      ],
+      "removed": []
+    },
+    "coordination": "updatesFirst",
+    "restartPolicy": "whenRequired",
+    "registerAppInstaller": true,
+    "onlineRepair": false,
+    "maxReboots": 3,
+    "maxAttemptsPerPackage": 2,
+    "packageTimeoutMinutes": 30,
+    "networkWaitMinutes": 15,
+    "maxRuntimeHours": 4,
+    "waitForUpdatesHours": 8,
+    "rebootWarningSeconds": 60
+  },
+  "additionalSoftware": {
+    "items": []
+  },
+  "system": {
+    "disableFastStartup": true,
+    "disableErrorReporting": true,
+    "powerShellExecutionPolicy": "remoteSigned",
+    "hardenSystemDriveAcl": false,
+    "enableLongPaths": false,
+    "deleteJunctions": false,
+    "disableLastAccess": false,
+    "turnOffSystemSounds": false,
+    "deleteWindowsOld": false,
+    "disableAutomaticRestartSignOn": false,
+    "disableWpbt": false,
+    "preventDeviceApps": true,
+    "disablePointerPrecision": true,
+    "hideEdgeFirstRun": true,
+    "disableEdgeStartupBoost": true,
+    "makeEdgeUninstallable": false
+  },
+  "explorer": {
+    "showFileExtensions": true,
+    "hiddenFiles": "hideAll",
+    "launchToThisPC": true,
+    "classicContextMenu": false,
+    "hideInfoTip": false,
+    "removeShortcutArrows": true,
+    "showEndTask": false
+  },
+  "taskbar": {
+    "leftAlign": true,
+    "search": "icon",
+    "hideTaskView": false,
+    "disableWidgets": true,
+    "showAllTrayIcons": false,
+    "icons": "default"
+  },
+  "desktop": {
+    "deleteEdgeShortcut": true,
+    "iconsMode": "custom",
+    "icons": {
+      "ControlPanel": false,
+      "Desktop": false,
+      "Documents": false,
+      "Downloads": false,
+      "Gallery": false,
+      "Home": false,
+      "Music": false,
+      "Network": false,
+      "Pictures": false,
+      "RecycleBin": true,
+      "ThisPC": false,
+      "UserFiles": false,
+      "Videos": false
+    }
+  },
+  "start": {
+    "pinsMode": "default",
+    "pinsJson": "",
+    "foldersMode": "custom",
+    "folders": {
+      "Documents": false,
+      "Downloads": true,
+      "FileExplorer": false,
+      "Music": false,
+      "Network": false,
+      "PersonalFolder": true,
+      "Pictures": true,
+      "Settings": true,
+      "Videos": false
+    }
+  },
+  "personalization": {
+    "visualEffects": "default",
+    "stickyKeys": "default"
+  },
+  "bloatware": {
+    "3DViewer": "remove",
+    "BingSearch": "untouched",
+    "Calculator": "keep",
+    "Camera": "keep",
+    "Clipchamp": "remove",
+    "Clock": "keep",
+    "Copilot": "untouched",
+    "Cortana": "untouched",
+    "DevHome": "keep",
+    "Family": "untouched",
+    "FeedbackHub": "remove",
+    "GameAssist": "untouched",
+    "GetHelp": "keep",
+    "GetStarted": "remove",
+    "Handwriting": "untouched",
+    "InternetExplorer": "untouched",
+    "MailCalendar": "keep",
+    "Maps": "remove",
+    "MathInputPanel": "untouched",
+    "MediaFeatures": "untouched",
+    "MixedReality": "remove",
+    "News": "remove",
+    "Notepad": "untouched",
+    "NotepadClassic": "untouched",
+    "Office365": "untouched",
+    "OneDrive": "remove",
+    "OneNote": "remove",
+    "OneSync": "untouched",
+    "OpenSSHClient": "untouched",
+    "Outlook": "untouched",
+    "Paint": "untouched",
+    "Paint3D": "keep",
+    "People": "remove",
+    "Photos": "keep",
+    "PowerAutomate": "keep",
+    "PowerShell2": "untouched",
+    "PowerShellISE": "untouched",
+    "QuickAssist": "remove",
+    "RdpClient": "untouched",
+    "Recall": "untouched",
+    "Skype": "remove",
+    "SnippingTool": "keep",
+    "Solitaire": "keep",
+    "Speech": "untouched",
+    "StepsRecorder": "untouched",
+    "StickyNotes": "keep",
+    "Store": "keep",
+    "Teams": "remove",
+    "ToDo": "keep",
+    "VoiceRecorder": "keep",
+    "Wallet": "remove",
+    "Weather": "remove",
+    "WindowsBackup": "keep",
+    "WindowsHello": "untouched",
+    "WindowsMediaPlayer": "untouched",
+    "WindowsTerminal": "untouched",
+    "WordPad": "untouched",
+    "XboxApp": "keep",
+    "XboxGameBar": "keep",
+    "XboxIdentityProvider": "keep",
+    "YourPhone": "keep",
+    "ZuneMusic": "keep",
+    "ZuneVideo": "remove"
+  },
+  "virtualization": {
+    "disableCoreIsolation": false,
+    "vboxGuestAdditions": false,
+    "vmwareTools": false,
+    "virtioGuestTools": false,
+    "parallelsTools": false
+  },
+  "wifi": {
+    "mode": "interactive",
+    "ssid": "",
+    "password": "",
+    "authentication": "WPA2PSK",
+    "nonBroadcast": false,
+    "connectAutomatically": true,
+    "profileXml": ""
+  },
+  "scripts": {
+    "system": [],
+    "defaultUser": [],
+    "firstLogon": [],
+    "userOnce": [],
+    "restartExplorer": false
+  },
+  "advancedXml": {
+    "components": []
+  },
+  "output": {
+    "answerFileName": "autounattend.xml"
+  },
+  "deferred": {
+    "installPowerShell7": true
+  }
+}

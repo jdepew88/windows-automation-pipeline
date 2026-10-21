@@ -4,7 +4,7 @@ import installerSource from './scripts/Install-ApplicationEngine.ps1?raw';
 import type { Profile } from '../schema/profile';
 import type { AdditionalItem } from '../schema/applications';
 import { DATA_ROOT, RESULT_FILE as WU_RESULT_FILE, TASK_NAME as WU_TASK_NAME, TASK_PATH, type DeploymentAsset } from '../windows-update';
-import { installable, resolveSelection, type PlannedPackage, type SelectionResult } from './selection';
+import { allProfiles, installable, manualItems, resolveSelection, type PlannedPackage, type SelectionResult } from './selection';
 import { exportWinGetJson } from './winget-json';
 import { exportAppProfiles } from './profiles';
 import { RESULTS_JSON_SCHEMA } from './results';
@@ -16,7 +16,7 @@ import { RESULTS_JSON_SCHEMA } from './results';
  * native WinGet package list, which the engine reads at run time.
  */
 
-export const APP_ENGINE_VERSION = '1.0.0';
+export const APP_ENGINE_VERSION = '1.1.0';
 export const APP_STAGING_DIR = 'C:\\Windows\\Setup\\Scripts\\Applications';
 export const APP_ROOT = `${DATA_ROOT}\\Applications`;
 export const APP_TASK_NAME = 'Applications';
@@ -126,8 +126,24 @@ export interface ApplicationsConfig {
   waitForUpdatesHours: number;
   lockWaitMinutes: number;
   rebootWarningSeconds: number;
-  packages: { key: string; packageIdentifier: string; source: string; displayName: string; version: string; scope: string; interaction: string; after: string[] }[];
+  packages: {
+    key: string;
+    packageIdentifier: string;
+    source: string;
+    displayName: string;
+    version: string;
+    scope: string;
+    interaction: string;
+    after: string[];
+    /** Engine 1.1.0: winget | msstore | portable (portable = winget package + Start menu shortcut). */
+    method: 'winget' | 'msstore' | 'portable';
+    portable?: { executable: string; shortcut: string };
+  }[];
   unresolved: { key: string; packageIdentifier: string; source: string; displayName: string; reason: string }[];
+  /** Engine 1.1.0: catalog entries without an unattended installation, reported as manual follow-ups. */
+  manual: { key: string; displayName: string; instructions: string; url: string }[];
+  /** Engine 1.1.0: apps a profile selects but the customer deselected, reported as SkippedByUser. */
+  deselected: { key: string; packageIdentifier: string; source: string; displayName: string }[];
   additionalSoftware: {
     id: string;
     name: string;
@@ -178,10 +194,16 @@ export function applicationsConfig(p: Profile, sel: SelectionResult = resolveSel
       scope: x.ref.scope,
       interaction: x.interaction,
       after: x.after,
+      method: x.method === 'portable' ? ('portable' as const) : x.ref.source.toLowerCase() === 'msstore' ? ('msstore' as const) : ('winget' as const),
+      ...(x.method === 'portable' && x.catalog?.portable ? { portable: { ...x.catalog.portable } } : {}),
     })),
     unresolved: sel.packages
       .filter((x) => x.resolution === 'unresolved')
       .map((x) => ({ key: x.key, packageIdentifier: x.ref.packageIdentifier, source: x.ref.source, displayName: x.displayName, reason: x.reason ?? '' })),
+    manual: manualItems(sel).map((x) => ({ key: x.key, displayName: x.displayName, instructions: x.catalog?.manual?.instructions ?? 'Install it manually.', url: x.catalog?.manual?.url ?? '' })),
+    deselected: sel.removed
+      .filter((x) => x.resolution !== 'unresolved')
+      .map((x) => ({ key: x.key, packageIdentifier: x.ref.packageIdentifier, source: x.ref.source.toLowerCase(), displayName: x.displayName })),
     additionalSoftware: p.additionalSoftware.items.map((i) => ({
       id: i.id,
       name: i.name || i.fileName || 'Unnamed installer',
@@ -209,6 +231,9 @@ function note(x: PlannedPackage): string {
   if (x.accountSignIn) n.push('needs an account sign-in after installation');
   if (x.reboot === 'mayRequire') n.push('may need a restart');
   if (x.after.length) n.push(`after ${x.after.join(', ')}`);
+  if (x.method === 'portable' && x.catalog?.portable) n.push(`portable: machine-wide, Start menu shortcut "${x.catalog.portable.shortcut}" (${x.catalog.portable.executable})`);
+  if (x.ref.source.toLowerCase() === 'msstore') n.push('Microsoft Store package');
+  if (x.origins.includes('required')) n.push('added as a dependency');
   return n.join('; ');
 }
 
@@ -242,8 +267,13 @@ export function planPreview(p: Profile, sel: SelectionResult = resolveSelection(
     lines.push('', 'Not installed (unresolved; reported as Unavailable):');
     for (const x of unresolved) lines.push(`  - ${x.displayName} [${x.ref.source}: ${x.ref.packageIdentifier}]: ${x.reason}`);
   }
+  const manual = manualItems(sel);
+  if (manual.length) {
+    lines.push('', 'Manual follow-up (no unattended installation; reported as RequiresInteraction):');
+    for (const x of manual) lines.push(`  - ${x.displayName}: ${x.catalog?.manual?.instructions ?? ''}${x.catalog?.manual?.url ? ` ${x.catalog.manual.url}` : ''}`);
+  }
   if (sel.removed.length) {
-    lines.push('', 'Removed from the selection (not installed):');
+    lines.push('', 'Deselected (not installed; reported as SkippedByUser):');
     for (const x of sel.removed) lines.push(`  - ${x.displayName} [${x.ref.source}: ${x.ref.packageIdentifier}]`);
   }
   const items = applicationsConfig(p, sel).additionalSoftware;
@@ -298,6 +328,12 @@ What happens
   install lock, so Windows Update cannot restart the computer in the middle. Failures are retried
   up to the attempt limit; packages that need a restart get one (policy) and are verified after
   it. Packages marked as needing interaction are not attempted.
+  Portable tools (for example Rufus, Ventoy) are WinGet portable packages: WinGet downloads them
+  from the publisher URL in the manifest, checks the SHA-256 and installs them machine-wide under
+  %ProgramFiles%\\WinGet\\Packages; the engine then adds a Start menu shortcut under "Windows
+  Deployment Tools". Nothing ever runs them. Apps without an unattended installation are listed
+  as manual follow-ups with official download instructions; deselected apps are recorded as
+  SkippedByUser.
 
 Results
   Log:      ${APP_ROOT}\\logs\\engine.log  (WinGet output: logs\\packages\\*.log)
@@ -323,17 +359,21 @@ export function applicationAssets(p: Profile): DeploymentAsset[] {
     id: 'deployment-selection',
     name: p.profileName ? `${p.profileName}: application selection` : 'Application selection',
     category: 'custom' as const,
-    description: `Combined selection exported with this deployment (${p.applications.selection.selectedProfiles.join(', ') || 'no profiles'} + individual changes).`,
+    description: `Effective, flattened selection of this deployment (${sel.activeProfiles.map((id) => allProfiles(p.applications.selection).find((x) => x.id === id)?.name ?? id).join(', ') || 'no profiles'} + individual changes): exactly the applications in the installation plan.`.slice(0, 500),
     builtin: false,
     inherits: [],
     packages: refs,
   };
   const json = (v: unknown) => crlf(JSON.stringify(v, null, 2) + '\n');
+  // Non-ASCII escaped (\uXXXX): Windows PowerShell 5.1 reads the config in the ANSI code page, which
+  // matches the answer-file extraction but not the UTF-8 copy in the ZIP; escaped JSON reads the same
+  // either way. ASCII-only content is unchanged.
+  const asciiJson = (v: unknown) => json(v).replace(/[\u007f-￿]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
   return [
     { name: APP_ENGINE_FILE, content: crlf(engineSource), mime: 'text/plain', description: 'Application engine (runs as the signed-in user, elevated)', group: 'applications' },
     { name: APP_BOOTSTRAP_FILE, content: crlf(bootstrapSource), mime: 'text/plain', description: 'WinGet check and documented repair (-Mode Check is read-only)', group: 'applications' },
     { name: APP_INSTALLER_FILE, content: crlf(installerSource), mime: 'text/plain', description: 'Installs the engine, registers the per-user task and confirms it starts', group: 'applications' },
-    { name: APP_CONFIG_FILE, content: json(applicationsConfig(p, sel)), mime: 'application/json', description: 'Order, metadata, policy and limits', group: 'applications' },
+    { name: APP_CONFIG_FILE, content: asciiJson(applicationsConfig(p, sel)), mime: 'application/json', description: 'Order, metadata, policy and limits', group: 'applications' },
     { name: APP_PACKAGES_FILE, content: crlf(exportWinGetJson(refs, null)), mime: 'application/json', description: 'Native WinGet package list (works with winget import)', group: 'applications' },
     { name: APP_PROFILE_FILE, content: crlf(exportAppProfiles([effective], null)), mime: 'application/json', description: "The selection in this builder's profile format", group: 'applications' },
     { name: APP_PLAN_FILE, content: crlf(planPreview(p, sel)), mime: 'text/plain', description: 'Installation plan preview with the exact commands', group: 'applications' },

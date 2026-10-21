@@ -36,11 +36,11 @@ describe('owner-default profile', () => {
     expect(p.deferred).toEqual({ installPowerShell7: true });
   });
 
-  it('starts application provisioning empty: six empty profiles, nothing selected', () => {
+  it('starts application provisioning with Core Essentials only (Phase 4.2), no saved profiles, no devices', () => {
     const sel = p.applications.selection;
-    expect(sel.profiles.map((x) => x.id)).toEqual(['everyday', 'gaming', 'developer', 'laptop', 'touch', 'custom']);
-    expect(sel.profiles.every((x) => x.builtin && x.packages.length === 0 && x.inherits.length === 0)).toBe(true);
-    expect(sel.selectedProfiles).toEqual([]);
+    expect(sel.profiles).toEqual([]);
+    expect(sel.selectedProfiles).toEqual(['core']);
+    expect(sel.devices).toEqual({ phone: 'none', ipad: false, extraIphone: false, androidTablet: false });
     expect(sel.added).toEqual([]);
     expect(sel.removed).toEqual([]);
     expect(p.additionalSoftware.items).toEqual([]);

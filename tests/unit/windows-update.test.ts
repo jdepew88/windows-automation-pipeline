@@ -13,7 +13,7 @@ import {
 } from '../../src/engine/windows-update';
 import engineSource from '../../src/engine/windows-update/scripts/WindowsUpdateEngine.ps1?raw';
 import installerSource from '../../src/engine/windows-update/scripts/Install-UpdateEngine.ps1?raw';
-import { commandLines, embedded, errorsOf, generateOk, profile } from './helpers';
+import { commandLines, embedded, errorsOf, generateOk, noApps, profile } from './helpers';
 
 const fixture = (name: string) => readFileSync(new URL(`./fixtures/${name}`, import.meta.url), 'utf8');
 /** Owner-default answer file for "Alex" as published with Milestone 1 (commit 24854a4). */
@@ -21,7 +21,10 @@ const M1_XML = fixture('m1-owner-default-alex.xml');
 
 describe('Milestone 1 output is preserved', () => {
   it('engine disabled: owner defaults produce the Milestone 1 answer file byte for byte', () => {
-    const r = generate(profile((p) => (p.windowsUpdate.enabled = false)));
+    const r = generate(profile((p) => {
+      p.windowsUpdate.enabled = false;
+      noApps(p);
+    }));
     expect(r.ok).toBe(true);
     expect(r.xml).toBe(M1_XML);
     expect(r.assets).toEqual([]);
@@ -144,7 +147,7 @@ describe('engine configuration', () => {
     }
     expect(assets[3]!.content).toContain(COMPLETION_MARKER);
     // The pipeline adds the orchestration contract next to the engine files (Phase 3).
-    expect(generateOk(profile()).assets.map((a) => a.name)).toEqual([...assets.map((a) => a.name), 'orchestration.json']);
+    expect(generateOk(profile(noApps)).assets.map((a) => a.name)).toEqual([...assets.map((a) => a.name), 'orchestration.json']);
   });
 
   it('keeps the TypeScript and PowerShell engine versions in step', () => {

@@ -28,8 +28,9 @@ function Assert-True($Value, [string] $Message) { if (-not $Value) { throw "ASSE
 # ------------------------------------------------------------------------------------------------
 
 function New-SimPackage {
-    param([string] $Id, [string] $Behavior = 'ok', [string] $Source = 'winget', [string] $Interaction = 'unknown', [string[]] $After = @())
-    @{ Id = $Id; Source = $Source; Behavior = $Behavior; Interaction = $Interaction; After = $After; Installed = ($Behavior -eq 'installed'); InstallCalls = 0; ListCalls = 0; ShowCalls = 0; Args = @() }
+    param([string] $Id, [string] $Behavior = 'ok', [string] $Source = 'winget', [string] $Interaction = 'unknown', [string[]] $After = @(), [string] $Method = '', [hashtable] $Portable = $null)
+    @{ Id = $Id; Source = $Source; Behavior = $Behavior; Interaction = $Interaction; After = $After; Installed = ($Behavior -eq 'installed'); InstallCalls = 0; ListCalls = 0; ShowCalls = 0; Args = @()
+       Method = $Method; Portable = $Portable }
 }
 
 function Reset-Sim {
@@ -41,6 +42,21 @@ function Reset-Sim {
         WinGetHealthy = $true; WinGetVersion = '1.29.250'; RegisterFixes = $true; RegisterCalls = 0; RegisterThrows = $false
         Offline = $null; SignatureValid = $true; OfflineInstalls = 0; OfflineFixes = $true; OnlineRepairs = 0; OnlineFixes = $true
         Hashes = @{}; Executed = @(); ExecExit = 0
+        PortableRoot = (Join-Path ([IO.Path]::GetTempPath()) ("wda-test-portable-" + [Guid]::NewGuid().ToString('N')))
+        ShortcutFolder = (Join-Path ([IO.Path]::GetTempPath()) ("wda-test-startmenu-" + [Guid]::NewGuid().ToString('N')))
+        Shortcuts = @{}; Order = @()
+    }
+}
+
+<# Files WinGet would extract for a portable package: <root>\<Id>_<source id>\... #>
+function New-SimPortableFiles {
+    param([hashtable] $S, [string[]] $Files = @())
+    $dir = Join-Path $script:Sim.PortableRoot "$($S.Id)_Microsoft.Winget.Source_8wekyb3d8bbwe"
+    if (-not $Files.Count) { $Files = @($S.PortableFiles) }
+    foreach ($rel in $Files) {
+        $p = Join-Path $dir $rel
+        New-Item -ItemType Directory -Path (Split-Path -Parent $p) -Force | Out-Null
+        [IO.File]::WriteAllText($p, 'MZ')
     }
 }
 
@@ -61,6 +77,10 @@ function Wait-WdbLockPoll { $script:Sim.LockPolls++ }
 function Get-WdaFileHash { param([string] $Path) $script:Sim.Hashes[(Split-Path $Path -Leaf)] }
 function Test-WdaSignature { param([string] $Path) $script:Sim.SignatureValid }
 function Start-WdaInstaller { param([string] $Path, [string] $Type, [string[]] $Arguments, [int] $TimeoutMinutes) $script:Sim.Executed += , @((Split-Path $Path -Leaf), $Arguments); $script:Sim.ExecExit }
+
+function Get-WdaPortableRoots { @($script:Sim.PortableRoot) }
+function Get-WdaShortcutFolder { $script:Sim.ShortcutFolder }
+function New-WdaShortcutFile { param([string] $Path, [string] $Target) $script:Sim.Shortcuts[$Path] = $Target; [IO.File]::WriteAllText($Path, $Target) }
 
 function Test-WdaInstalled {
     param([hashtable] $P, [string] $LogFile = '')
@@ -83,10 +103,11 @@ function Install-WdaPackage {
     param([hashtable] $P, [int] $TimeoutMinutes, [string] $LogFile = '')
     $s = Get-SimPackage $P
     $s.InstallCalls++
+    $script:Sim.Order += $s.Id
     $s.Args = Get-WdaArguments 'install' $P
     $code = 0
     switch ($s.Behavior) {
-        'ok'            { $s.Installed = $true }
+        'ok'            { $s.Installed = $true; if ($s.Method -eq 'portable') { New-SimPortableFiles $s } }
         'fail'          { $code = 0x8A150008 }
         'fail-once'     { if ($s.InstallCalls -ge 2) { $s.Installed = $true } else { $code = 0x8A150008 } }
         'hash'          { $code = 0x8A150011 }
@@ -132,7 +153,14 @@ function New-AppTestConfig {
         restartPolicy = 'whenRequired'; registerAppInstaller = $true; onlineRepair = $false; minimumWinGetVersion = '1.6.0'
         maxReboots = 3; maxAttemptsPerPackage = 2; packageTimeoutMinutes = 30; networkWaitMinutes = 15; maxRuntimeHours = 4
         waitForUpdatesHours = 8; gatePollMinutes = 5; lockWaitMinutes = 1; maxErrors = 5; rebootWarningSeconds = 60; retryDelaySeconds = 30
-        packages = @($Packages | ForEach-Object { @{ key = "$($_.Source):$($_.Id.ToLowerInvariant())"; packageIdentifier = $_.Id; source = $_.Source; displayName = "App $($_.Id)"; version = ''; scope = ''; interaction = $_.Interaction; after = @($_.After) } })
+        packages = @($Packages | ForEach-Object {
+            $e = @{ key = "$($_.Source):$($_.Id.ToLowerInvariant())"; packageIdentifier = $_.Id; source = $_.Source; displayName = "App $($_.Id)"; version = ''; scope = ''; interaction = $_.Interaction; after = @($_.After) }
+            # Engine 1.1.0 fields only when a scenario sets them (configs written for 1.0.0 have none).
+            if ($_.Method) { $e.method = $_.Method }
+            if ($_.Method -eq 'portable') { $e.scope = 'machine' }
+            if ($_.Portable) { $e.portable = $_.Portable }
+            $e
+        })
         unresolved = @($Unresolved); additionalSoftware = @($Additional)
     }
     foreach ($k in $Overrides.Keys) { $c[$k] = $Overrides[$k] }
@@ -503,6 +531,189 @@ $tests['unresolved and invalid entries are Unavailable and never reach WinGet'] 
     Assert-Equal $evil.ShowCalls 0 'never queried'
 }
 
+
+# ------------------------------------------------------------------------------------------------
+# Phase 4.2 (engine 1.1.0): portable, Store, manual, deselected, dependencies
+# ------------------------------------------------------------------------------------------------
+
+function New-PortableRufus { New-SimPackage 'Rufus.Rufus' -Method 'portable' -Portable @{ executable = 'rufus*.exe'; shortcut = 'Rufus' } }
+
+$tests['portable: machine scope, Start menu shortcut to the versioned file, nothing run'] = {
+    $rufus = New-PortableRufus
+    $rufus.PortableFiles = @('rufus-4.15.exe')
+    Reset-Sim @($rufus)
+    $c = New-AppTestConfig $script:Sim.Packages
+    $o = Invoke-Logons $c
+    Assert-Equal $o[-1] 'Finished:Succeeded' 'outcome'
+    Assert-True (($rufus.Args -join ' ') -match '--scope machine') 'installed machine-wide'
+    $lnk = Join-Path $script:Sim.ShortcutFolder 'Rufus.lnk'
+    Assert-True $script:Sim.Shortcuts.ContainsKey($lnk) 'shortcut created'
+    Assert-True ($script:Sim.Shortcuts[$lnk] -like '*\Rufus.Rufus_Microsoft.Winget.Source_8wekyb3d8bbwe\rufus-4.15.exe') 'points at the installed file'
+    Assert-Equal $script:Sim.Executed.Count 0 'the tool itself is never executed'
+    Assert-True ((Get-Pkg (Get-Result $c) 'Rufus.Rufus').message -match 'Start menu shortcut') 'recorded in the result'
+}
+
+$tests['portable: already installed keeps the package and repairs the shortcut; repeating creates no duplicate'] = {
+    $rufus = New-PortableRufus
+    $rufus.Installed = $true
+    Reset-Sim @($rufus)
+    New-SimPortableFiles $rufus @('rufus.exe')
+    $c = New-AppTestConfig $script:Sim.Packages
+    [void] (Invoke-Logons $c)
+    Assert-Equal (Get-Pkg (Get-Result $c) 'Rufus.Rufus').status 'AlreadyInstalled' 'status'
+    Assert-Equal $rufus.InstallCalls 0 'not reinstalled'
+    $c2 = New-AppTestConfig $script:Sim.Packages
+    [void] (Invoke-Logons $c2)
+    Assert-Equal @(Get-ChildItem -LiteralPath $script:Sim.ShortcutFolder -Filter '*.lnk').Count 1 'one shortcut after two runs'
+}
+
+$tests['portable: Ventoy picks the top-level executable (shortest path), never one in a subfolder first'] = {
+    $v = New-SimPackage 'Ventoy.Ventoy' -Method 'portable' -Portable @{ executable = 'Ventoy2Disk.exe'; shortcut = 'Ventoy2Disk' }
+    $v.PortableFiles = @('ventoy-1.1.17\altexe\Ventoy2Disk.exe', 'ventoy-1.1.17\Ventoy2Disk.exe')
+    Reset-Sim @($v)
+    $c = New-AppTestConfig $script:Sim.Packages
+    [void] (Invoke-Logons $c)
+    $target = $script:Sim.Shortcuts[(Join-Path $script:Sim.ShortcutFolder 'Ventoy2Disk.lnk')]
+    Assert-True ($target -like '*\ventoy-1.1.17\Ventoy2Disk.exe') "top-level file chosen ($target)"
+}
+
+$tests['portable: missing executable is reported as a follow-up, the package stays installed'] = {
+    $rufus = New-PortableRufus
+    $rufus.PortableFiles = @('readme.txt')
+    Reset-Sim @($rufus)
+    $c = New-AppTestConfig $script:Sim.Packages
+    [void] (Invoke-Logons $c)
+    $r = Get-Result $c
+    Assert-Equal (Get-Pkg $r 'Rufus.Rufus').status 'Succeeded' 'installed'
+    Assert-True ((Get-Pkg $r 'Rufus.Rufus').message -match 'shortcut not created') 'reason recorded'
+    Assert-True (($r.followUp -join ' ') -match 'Rufus.Rufus \[shortcut\]') 'listed for follow-up'
+    Assert-Equal $script:Sim.Shortcuts.Count 0 'no shortcut'
+}
+
+$tests['portable: links and junctions are never followed; a shortcut cannot point outside the package folder'] = {
+    $rufus = New-PortableRufus
+    $rufus.PortableFiles = @('readme.txt')
+    Reset-Sim @($rufus)
+    $outside = Join-Path ([IO.Path]::GetTempPath()) ("wda-test-outside-" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $outside -Force | Out-Null
+    [IO.File]::WriteAllText((Join-Path $outside 'rufus.exe'), 'MZ')
+    $c = New-AppTestConfig $script:Sim.Packages
+    New-SimPortableFiles $rufus @('readme.txt')
+    $pkgDir = Join-Path $script:Sim.PortableRoot 'Rufus.Rufus_Microsoft.Winget.Source_8wekyb3d8bbwe'
+    cmd /c mklink /J "$(Join-Path $pkgDir 'link')" "$outside" | Out-Null
+    Assert-True (Test-Path -LiteralPath (Join-Path $pkgDir 'link\rufus.exe')) 'junction exists for the test'
+    [void] (Invoke-Logons $c)
+    Assert-Equal $script:Sim.Shortcuts.Count 0 'file behind the junction ignored'
+    Assert-Equal (Find-WdaPortableExe @($script:Sim.PortableRoot) 'Rufus.Rufus' 'rufus*.exe') $null 'finder returns nothing'
+    [IO.Directory]::Delete((Join-Path $pkgDir 'link'))
+    Remove-Item -LiteralPath $outside -Recurse -Force
+}
+
+$tests['portable: unsafe patterns, names or scopes are rejected before WinGet is called'] = {
+    $bad = @(
+        @{ executable = '..\..\Windows\System32\cmd.exe'; shortcut = 'X' },
+        @{ executable = 'C:\x.exe'; shortcut = 'X' },
+        @{ executable = 'rufus.exe'; shortcut = '..\..\Startup\evil' },
+        @{ executable = 'rufus.exe" & calc'; shortcut = 'X' }
+    )
+    foreach ($p in $bad) {
+        $s = New-SimPackage 'Rufus.Rufus' -Method 'portable' -Portable $p
+        Reset-Sim @($s)
+        $c = New-AppTestConfig $script:Sim.Packages
+        [void] (Invoke-Logons $c)
+        Assert-Equal (Get-Pkg (Get-Result $c) 'Rufus.Rufus').status 'Unavailable' "rejected: $($p.executable) / $($p.shortcut)"
+        Assert-Equal $s.InstallCalls 0 'never installed'
+    }
+    Assert-Equal (Find-WdaPortableExe @('C:\') 'Rufus.Rufus' '..\cmd.exe') $null 'finder refuses a path pattern'
+    $s = New-SimPackage 'Rufus.Rufus' -Method 'portable' -Portable @{ executable = 'rufus.exe'; shortcut = 'Rufus' }
+    Reset-Sim @($s)
+    $c = New-AppTestConfig $script:Sim.Packages
+    $c.packages[0].scope = 'user'
+    $q = Get-WdaQueue $c
+    Assert-True ((Test-WdaPackageSpec $q[0]) -match 'machine scope') 'user scope refused for portable'
+}
+
+$tests['mixed plan: WinGet, Microsoft Store and portable packages each use their own source'] = {
+    $rufus = New-PortableRufus
+    $rufus.PortableFiles = @('rufus.exe')
+    $store = New-SimPackage '9NP83LWLPZ9K' -Source msstore -Method 'msstore'
+    Reset-Sim @((New-SimPackage 'Google.Chrome'), $store, $rufus)
+    $c = New-AppTestConfig $script:Sim.Packages
+    $o = Invoke-Logons $c
+    Assert-Equal $o[-1] 'Finished:Succeeded' 'outcome'
+    Assert-Equal ($script:Sim.Order -join ',') 'Google.Chrome,9NP83LWLPZ9K,Rufus.Rufus' 'order'
+    Assert-Equal ($store.Args -join ' ') 'install --id 9NP83LWLPZ9K --exact --source msstore --silent --no-upgrade --accept-package-agreements --accept-source-agreements --disable-interactivity' 'Store command'
+    Assert-Equal ($script:Sim.Packages[0].Args -join ' ') 'install --id Google.Chrome --exact --source winget --silent --no-upgrade --accept-package-agreements --accept-source-agreements --disable-interactivity' 'WinGet command unchanged'
+}
+
+$tests['manual follow-ups and deselected apps are recorded, never installed, and do not hide real results'] = {
+    Reset-Sim @((New-SimPackage 'Google.Chrome'))
+    $manual = @(
+        @{ key = 'catalog:rustdesk'; displayName = 'RustDesk'; instructions = 'Download the signed installer.'; url = 'https://github.com/rustdesk/rustdesk/releases/latest' },
+        @{ key = 'catalog:evil'; displayName = 'Evil'; instructions = 'x'; url = 'https://x.example/" & calc' },
+        @{ key = '..\bad'; displayName = 'Bad key'; instructions = 'x'; url = '' }
+    )
+    $deselected = @(@{ key = 'winget:epicgames.epicgameslauncher'; packageIdentifier = 'EpicGames.EpicGamesLauncher'; source = 'winget'; displayName = 'Epic Games Launcher' })
+    $c = New-AppTestConfig $script:Sim.Packages -Overrides @{ manual = $manual; deselected = $deselected }
+    $o = Invoke-Logons $c
+    Assert-Equal $o[-1] 'Finished:CompletedWithFollowUp' 'manual items make it a follow-up, not a success'
+    $r = Get-Result $c
+    $rd = Get-Pkg $r 'rustdesk'
+    Assert-Equal $rd.status 'RequiresInteraction' 'manual status'
+    Assert-True ($rd.message -match '^Manual action required: Download the signed installer\. \(https://github\.com/rustdesk') 'instructions and URL'
+    Assert-True ((Get-Pkg $r 'evil').message -notmatch 'calc') 'unsafe URL dropped'
+    Assert-Equal @($r.packages | Where-Object { $_.name -eq 'Bad key' }).Count 0 'invalid key ignored'
+    Assert-Equal (Get-Pkg $r 'EpicGames.EpicGamesLauncher').status 'SkippedByUser' 'deselected'
+    Assert-Equal $r.counts.skippedByUser 1 'counted'
+    Assert-Equal (Get-Pkg $r 'Google.Chrome').status 'Succeeded' 'real package installed'
+    Assert-Equal ($script:Sim.Order -join ',') 'Google.Chrome' 'only the real package reached WinGet'
+    Assert-True (($r.followUp -join ' ') -match 'RustDesk') 'manual in follow-up'
+    Assert-True (($r.followUp -join ' ') -notmatch 'Epic') 'deselected is not a follow-up'
+}
+
+$tests['deselected only: Succeeded (a customer choice is not a failure)'] = {
+    Reset-Sim @((New-SimPackage 'Valve.Steam'))
+    $c = New-AppTestConfig $script:Sim.Packages -Overrides @{ deselected = @(@{ key = 'winget:epicgames.epicgameslauncher'; packageIdentifier = 'EpicGames.EpicGamesLauncher'; source = 'winget'; displayName = 'Epic' }) }
+    $o = Invoke-Logons $c
+    Assert-Equal $o[-1] 'Finished:Succeeded' 'outcome'
+}
+
+$tests['dependencies: a required runtime installs first; an already installed one is not reinstalled'] = {
+    Reset-Sim @((New-SimPackage 'Docker.DockerDesktop' -After @('winget:microsoft.wsl')), (New-SimPackage 'Microsoft.WSL'))
+    $c = New-AppTestConfig $script:Sim.Packages
+    [void] (Invoke-Logons $c)
+    Assert-Equal ($script:Sim.Order -join ',') 'Microsoft.WSL,Docker.DockerDesktop' 'dependency first even when listed later'
+    Reset-Sim @((New-SimPackage 'Microsoft.VCRedist.2015+.x64' 'installed'), (New-SimPackage 'HandBrake.HandBrake' -After @('winget:microsoft.vcredist.2015+.x64')))
+    $c = New-AppTestConfig $script:Sim.Packages
+    [void] (Invoke-Logons $c)
+    $r = Get-Result $c
+    Assert-Equal (Get-Pkg $r 'Microsoft.VCRedist.2015+.x64').status 'AlreadyInstalled' 'compatible runtime detected by winget list'
+    Assert-Equal $script:Sim.Packages[0].InstallCalls 0 'not reinstalled'
+    Assert-Equal (Get-Pkg $r 'HandBrake.HandBrake').status 'Succeeded' 'dependent installed'
+}
+
+$tests['a 1.0.0-format configuration (no method, manual or deselected keys) still runs unchanged'] = {
+    Reset-Sim @((New-SimPackage 'Git.Git'))
+    $c = New-AppTestConfig $script:Sim.Packages
+    $raw = Get-Content -LiteralPath (Join-Path $c.configDirectory 'applications-config.json') -Raw | ConvertFrom-Json
+    Assert-True (-not ($raw.PSObject.Properties.Name -contains 'manual')) 'fixture has no 1.1.0 keys'
+    Assert-True (-not ($raw.packages[0].PSObject.Properties.Name -contains 'method')) 'no method key'
+    $o = Invoke-Logons $c
+    Assert-Equal $o[-1] 'Finished:Succeeded' 'outcome'
+}
+
+$tests['Plan mode lists portable, manual and deselected entries without installing'] = {
+    $rufus = New-PortableRufus
+    Reset-Sim @($rufus)
+    $c = New-AppTestConfig $script:Sim.Packages -Overrides @{ manual = @(@{ key = 'catalog:filezilla'; displayName = 'FileZilla'; instructions = 'Download it.'; url = '' }); deselected = @(@{ key = 'winget:valve.steam'; packageIdentifier = 'Valve.Steam'; source = 'winget'; displayName = 'Steam' }) }
+    $plan = Invoke-WdaPlan $c
+    $actions = ($plan.Rows | ForEach-Object { "$($_.Name)=$($_.Action)" }) -join '; '
+    Assert-True ($actions -match 'Install \(portable\) \+ shortcut Rufus') "portable ($actions)"
+    Assert-True ($actions -match 'FileZilla=Manual action required') 'manual'
+    Assert-True ($actions -match 'Steam=SkippedByUser') 'deselected'
+    Assert-Equal $rufus.InstallCalls 0 'nothing installed'
+}
+
 $tests['Invoke-WdaWinGet refuses unsafe argument tokens'] = {
     $script:WinGet = 'C:\nonexistent\winget.exe'
     foreach ($bad in @('Foo.Bar;calc', 'a b', '"x"', '$(calc)', '--id=x&y', 'x|y')) {
@@ -683,6 +894,8 @@ foreach ($name in $tests.Keys) {
         Write-Output "  FAIL  $name`n        $($_.Exception.Message)`n        $($_.InvocationInfo.PositionMessage -replace "`n", "`n        ")"
     }
 }
+# Junctions created by the traversal scenario are removed first (without following them).
+Get-ChildItem -LiteralPath ([IO.Path]::GetTempPath()) -Filter 'wda-test-portable-*' -Directory -ErrorAction SilentlyContinue | ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -Recurse -Directory -Attributes ReparsePoint -ErrorAction SilentlyContinue | ForEach-Object { [IO.Directory]::Delete($_.FullName) } }
 Get-ChildItem -LiteralPath ([IO.Path]::GetTempPath()) -Filter 'wda-test-*' -Directory -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 Write-Output "$($script:Passed) passed, $($script:Failures) failed"
 if ($script:Failures -gt 0) { exit 1 }
