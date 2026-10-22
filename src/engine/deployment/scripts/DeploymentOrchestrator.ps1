@@ -14,7 +14,9 @@
       3. Reads what each engine wrote (result.json, status.json, its task) and writes
          <dataRoot>\Deployment\status.json. Completion markers are not trusted on their own:
          the final status always comes from result.json.
-      4. When every enabled stage is final, or the deadline has passed, runs
+      4. Once the windowsUpdate stage is final, applies the ongoing update policy if the package
+         carries one (Set-UpdatePolicy.ps1, Phase 4.3).
+      5. When every enabled stage is final, or the deadline has passed, runs
          Complete-Deployment.ps1 (report, marker, event, cleanup).
 
     It never launches or re-launches an engine. A stage whose task disappeared without a result is
@@ -55,6 +57,11 @@ function Invoke-WddMonitor {
         $state.monitorRuns = [int] $state.monitorRuns + 1
         $state.lastMonitorUtc = (Get-WddNow).ToString('o')
         $snapshot = Get-WddSnapshot $manifest $Paths $state
+        # Phase 4.3: the ongoing update policy, once the initial Windows Update stage is final.
+        if (Get-Command Step-WddUpdatePolicy -ErrorAction SilentlyContinue) {
+            $policy = Step-WddUpdatePolicy $manifest $Paths $state $snapshot
+            if ($policy) { $snapshot.updatePolicy = $policy }
+        }
         Save-WddState $Paths $state
         Write-WddJson $Paths.Status $snapshot
         $summary = (@($snapshot.stages) | ForEach-Object { "$($_.id)=$($_.state)$(if ($_.status) { "/$($_.status)" })" }) -join ', '

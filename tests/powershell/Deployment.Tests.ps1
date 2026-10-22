@@ -55,6 +55,12 @@ function Reset-Sim {
     $script:AclCalls = 0
     $script:Paths = Get-WddPaths (Join-Path $script:Tmp 'ProgramData\WindowsDeploymentBuilder')
     $script:Manifest = Read-WddManifest $manifestPath
+    # Phase 4.3 ongoing update policy: edition, management and the AU policy values.
+    $script:SimEdition = 'Professional'
+    $script:SimManaged = @()
+    $script:SimAu = @{}
+    $script:SimAuWrites = 0
+    $script:SimAuFail = $false
 }
 
 function Get-WddNow { $script:SimNow }
@@ -83,6 +89,15 @@ function Invoke-WddInstaller {
     $script:SimTasks[$task] = $script:SimIdentity.Name
     return 0
 }
+
+function Get-WddEditionId { $script:SimEdition }
+function Get-WddUpdateManagement { $script:SimManaged }
+function Get-WddAuPolicyValues {
+    $o = @{}
+    foreach ($n in 'NoAutoUpdate', 'AUOptions', 'ScheduledInstallDay', 'ScheduledInstallTime', 'NoAutoRebootWithLoggedOnUsers') { $o[$n] = $(if ($script:SimAu.ContainsKey($n)) { $script:SimAu[$n] } else { $null }) }
+    return $o
+}
+function Set-WddAuPolicyValue { param([string] $Name, [int] $Value) if ($script:SimAuFail) { throw 'Access is denied' }; $script:SimAuWrites++; $script:SimAu[$Name] = $Value }
 
 # Engines write these files themselves; the simulation writes them for the scenarios.
 function Set-EngineResult {
@@ -493,6 +508,123 @@ Test-Scenario 'offline target: stages end Offline, the deployment ends Incomplet
     Assert-Equal (Invoke-WddMonitor $script:Paths) 'Completed:Incomplete' 'offline'
     $r = Read-WddJson $script:Paths.ReportJson
     Assert-Equal @($r.incompleteStages).Count 2 'both stages incomplete'
+}
+
+# ------------------------------------------------------------------------------------------------
+# Phase 4.3: ongoing Windows Update policy, applied only after the initial update stage
+# ------------------------------------------------------------------------------------------------
+
+Test-Scenario 'update policy: the package carries it; the answer file no longer writes AUOptions during specialize' {
+    Assert-True ($script:Manifest.updatePolicy) 'manifest has updatePolicy'
+    Assert-Equal $script:Manifest.updatePolicy.mode 'notifyInstall' 'mode'
+    Assert-Equal $script:Manifest.updatePolicy.values.AUOptions 3 'AUOptions 3 = download automatically, notify to install'
+    Assert-Equal $script:Manifest.updatePolicy.applyAfter 'windowsUpdate' 'ordering recorded'
+    Assert-True (Test-Path -LiteralPath (Join-Path $pkgRoot $script:Manifest.updatePolicy.script)) 'Set-UpdatePolicy.ps1 in the package'
+    Assert-True (@($script:Manifest.files | Where-Object { $_.path -eq $script:Manifest.updatePolicy.script -and $_.embedded }).Count -eq 1) 'and embedded in the answer file'
+    $xml = [System.IO.File]::ReadAllText((Join-Path $usb 'autounattend.xml'))
+    Assert-True ($xml -notmatch '/v "AUOptions"') 'no AUOptions written during specialize'
+    Assert-True ($xml -match 'ExcludeWUDriversInQualityUpdate') 'driver exclusion still written during specialize'
+}
+
+Test-Scenario 'update policy ordering: not applied while Windows Update runs; applied once when its stage is final' {
+    Initialize-Embedded | Out-Null
+    Set-EngineStatus 'windowsUpdate' 'Installing'
+    Assert-Equal (Invoke-WddMonitor $script:Paths) 'InProgress' 'run 1'
+    Assert-Equal $script:SimAu.Count 0 'nothing written during initial updates'
+    Assert-True (-not (Read-WddJson $script:Paths.State).ContainsKey('updatePolicy')) 'no policy state yet'
+    # Restart in the middle of the update stage: still nothing.
+    $script:SimBoot = $script:SimNow.AddMinutes(2); $script:SimNow = $script:SimNow.AddMinutes(30)
+    Assert-Equal (Invoke-WddMonitor $script:Paths) 'InProgress' 'run 2 after restart'
+    Assert-Equal $script:SimAu.Count 0 'still nothing after the restart'
+    Set-EngineResult 'windowsUpdate' 'Succeeded'
+    Assert-Equal (Invoke-WddMonitor $script:Paths) 'InProgress' 'WU final, apps still running'
+    Assert-Equal $script:SimAu.AUOptions 3 'AUOptions written after the update stage'
+    Assert-Equal $script:SimAu.NoAutoUpdate 0 'NoAutoUpdate 0 (Windows Update stays on)'
+    Assert-Equal (Read-WddJson $script:Paths.State).updatePolicy.status 'Applied' 'completion state recorded'
+    Assert-Equal (Read-WddJson (Join-Path $script:Paths.Root 'Updates\policy-result.json')).status 'Applied' 'result file'
+    Assert-Equal (Read-WddJson $script:Paths.Status).updatePolicy.status 'Applied' 'shown in status.json'
+    $writes = $script:SimAuWrites
+    Assert-Equal (Invoke-WddMonitor $script:Paths) 'InProgress' 'next run'
+    Assert-Equal $script:SimAuWrites $writes 'applied only once'
+    Set-EngineResult 'applications' 'Succeeded'
+    Assert-Equal (Invoke-WddMonitor $script:Paths) 'Completed:Succeeded' 'deployment succeeds'
+    $r = Read-WddJson $script:Paths.ReportJson
+    Assert-Equal $r.updatePolicy.status 'Applied' 'in the report'
+    Assert-True ([System.IO.File]::ReadAllText($script:Paths.ReportText) -match 'Ongoing Windows Update policy') 'in the text report'
+}
+
+Test-Scenario 'update policy: Windows Home is reported Unsupported, nothing is written, follow-up listed' {
+    Initialize-Embedded | Out-Null
+    $script:SimEdition = 'Core'
+    Set-EngineResult 'windowsUpdate' 'Succeeded'
+    Set-EngineResult 'applications' 'Succeeded'
+    Assert-Equal (Invoke-WddMonitor $script:Paths) 'Completed:CompletedWithFollowUp' 'not a silent success'
+    Assert-Equal $script:SimAu.Count 0 'nothing written'
+    $r = Read-WddJson $script:Paths.ReportJson
+    Assert-Equal $r.updatePolicy.status 'Unsupported' 'unsupported'
+    Assert-True (@($r.remainingTasks | Where-Object { $_ -match 'Ongoing Windows Update policy: Unsupported' }).Count -eq 1) 'follow-up listed'
+}
+
+Test-Scenario 'update policy: domain/MDM/WSUS management and existing values are never overridden' {
+    Initialize-Embedded | Out-Null
+    $script:SimManaged = @('joined to an Active Directory domain')
+    Set-EngineResult 'windowsUpdate' 'Succeeded'
+    Invoke-WddMonitor $script:Paths | Out-Null
+    Assert-Equal (Read-WddJson $script:Paths.State).updatePolicy.status 'ManagedByOrganization' 'managed'
+    Assert-Equal $script:SimAu.Count 0 'nothing written on a managed computer'
+
+    Reset-Sim; Initialize-Embedded | Out-Null
+    $script:SimAu = @{ AUOptions = 4; ScheduledInstallDay = 0 }
+    Set-EngineResult 'windowsUpdate' 'Succeeded'
+    Invoke-WddMonitor $script:Paths | Out-Null
+    Assert-Equal (Read-WddJson $script:Paths.State).updatePolicy.status 'Conflict' 'conflict'
+    Assert-Equal $script:SimAu.AUOptions 4 'existing value unchanged'
+    Assert-Equal $script:SimAuWrites 0 'no write'
+
+    Reset-Sim; Initialize-Embedded | Out-Null
+    $script:SimAu = @{ AUOptions = 3; NoAutoUpdate = 0 }
+    Set-EngineResult 'windowsUpdate' 'Succeeded'
+    Invoke-WddMonitor $script:Paths | Out-Null
+    Assert-Equal (Read-WddJson $script:Paths.State).updatePolicy.status 'AlreadyApplied' 'already applied'
+}
+
+Test-Scenario 'update policy: a write failure is reported, the deployment still finishes' {
+    Initialize-Embedded | Out-Null
+    $script:SimAuFail = $true
+    Set-EngineResult 'windowsUpdate' 'Succeeded'
+    Set-EngineResult 'applications' 'Succeeded'
+    Assert-Equal (Invoke-WddMonitor $script:Paths) 'Completed:CompletedWithFollowUp' 'follow-up'
+    $r = Read-WddJson $script:Paths.ReportJson
+    Assert-Equal $r.updatePolicy.status 'Failed' 'failed'
+    Assert-True ($r.updatePolicy.message -match 'Access is denied') 'reason kept'
+}
+
+Test-Scenario 'update policy: an Offline update stage still counts as final; the deadline applies it with a note' {
+    Initialize-Embedded | Out-Null
+    Set-EngineResult 'windowsUpdate' 'Offline'
+    Invoke-WddMonitor $script:Paths | Out-Null
+    Assert-Equal (Read-WddJson $script:Paths.State).updatePolicy.status 'Applied' 'applied after an Offline update stage'
+
+    Reset-Sim; Initialize-Embedded | Out-Null
+    Set-EngineStatus 'windowsUpdate' 'Installing'
+    $state = Read-WddJson $script:Paths.State
+    $script:SimNow = (ConvertTo-WddDate $state.deadlineUtc).AddMinutes(1)
+    $out = Invoke-WddMonitor $script:Paths
+    Assert-True ($out -like 'Completed:*') 'deadline completes'
+    $r = Read-WddJson $script:Paths.ReportJson
+    Assert-Equal $r.updatePolicy.status 'Applied' 'applied at the end'
+    Assert-True ($r.updatePolicy.note -match 'had not reported a final result') 'note explains the timing'
+}
+
+Test-Scenario 'Wi-Fi result: a profile that could not be added is listed as a follow-up in the report' {
+    Initialize-Embedded | Out-Null
+    Write-WddJson (Join-Path $script:Paths.Root 'Network\wifi-result.json') @{ status = 'NoWirelessAdapter'; stage = 'FirstLogon'; final = $true; profileName = 'Home'; adapters = 0; message = 'No Wi-Fi adapter with a working driver was found.' }
+    Set-EngineResult 'windowsUpdate' 'Succeeded'
+    Set-EngineResult 'applications' 'Succeeded'
+    Invoke-WddMonitor $script:Paths | Out-Null
+    $r = Read-WddJson $script:Paths.ReportJson
+    Assert-Equal $r.wifi.status 'NoWirelessAdapter' 'wifi in report'
+    Assert-True (@($r.remainingTasks | Where-Object { $_ -match '^Wi-Fi: NoWirelessAdapter' }).Count -eq 1) 'follow-up'
 }
 
 Write-Output ''

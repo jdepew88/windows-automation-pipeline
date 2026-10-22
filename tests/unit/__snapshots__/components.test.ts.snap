@@ -384,10 +384,6 @@ $scripts = @(
 		reg.exe add "HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Device Installer" /v "DisableCoInstallers" /t REG_DWORD /d 1 /f;
 	};
 	{
-		reg.exe add "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsUpdate\\AU" /v "NoAutoUpdate" /t REG_DWORD /d 0 /f;
-		reg.exe add "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsUpdate\\AU" /v "AUOptions" /t REG_DWORD /d 3 /f;
-	};
-	{
 		reg.exe add "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsUpdate" /v "ExcludeWUDriversInQualityUpdate" /t REG_DWORD /d 1 /f;
 	};
 	{
@@ -4263,7 +4259,9 @@ if ($script:InitMain) {
       3. Reads what each engine wrote (result.json, status.json, its task) and writes
          &lt;dataRoot&gt;\\Deployment\\status.json. Completion markers are not trusted on their own:
          the final status always comes from result.json.
-      4. When every enabled stage is final, or the deadline has passed, runs
+      4. Once the windowsUpdate stage is final, applies the ongoing update policy if the package
+         carries one (Set-UpdatePolicy.ps1, Phase 4.3).
+      5. When every enabled stage is final, or the deadline has passed, runs
          Complete-Deployment.ps1 (report, marker, event, cleanup).
 
     It never launches or re-launches an engine. A stage whose task disappeared without a result is
@@ -4304,6 +4302,11 @@ function Invoke-WddMonitor {
         $state.monitorRuns = [int] $state.monitorRuns + 1
         $state.lastMonitorUtc = (Get-WddNow).ToString('o')
         $snapshot = Get-WddSnapshot $manifest $Paths $state
+        # Phase 4.3: the ongoing update policy, once the initial Windows Update stage is final.
+        if (Get-Command Step-WddUpdatePolicy -ErrorAction SilentlyContinue) {
+            $policy = Step-WddUpdatePolicy $manifest $Paths $state $snapshot
+            if ($policy) { $snapshot.updatePolicy = $policy }
+        }
         Save-WddState $Paths $state
         Write-WddJson $Paths.Status $snapshot
         $summary = (@($snapshot.stages) | ForEach-Object { "$($_.id)=$($_.state)$(if ($_.status) { "/$($_.status)" })" }) -join ', '
@@ -4526,6 +4529,9 @@ param(
 $script:CompleteMain = $MyInvocation.InvocationName -ne '.'
 $script:CompleteArgs = @{ Preview = [bool] $Preview; Finish = [bool] $Finish }
 . (Join-Path $PSScriptRoot '..\\common\\DeploymentCommon.ps1')
+# Phase 4.3: present only when the ongoing update policy is applied after the initial updates.
+$script:PolicyScript = Join-Path $PSScriptRoot 'Set-UpdatePolicy.ps1'
+if (Test-Path -LiteralPath $script:PolicyScript) { . $script:PolicyScript }
 
 function Get-WddSystemInfo {
     $os = Get-CimInstance -ClassName Win32_OperatingSystem
@@ -4576,6 +4582,14 @@ function New-WddReport {
         elseif ($apps.status -eq 'Failed') { $errors += "Application setup failed: $($apps.detail)" }
     }
     foreach ($n in @($Snapshot.needsAttention)) { $errors += $n }
+    # Phase 4.3: written by Add-WifiProfile.ps1 when the answer file adds a Wi-Fi profile (never contains the key).
+    $wifi = Read-WddJson (Join-Path $Paths.Root 'Network\\wifi-result.json')
+    if ($wifi -and $wifi.status -notin 'Added', 'ConnectRequested', 'ConnectFailed') { $remaining += "Wi-Fi: $($wifi.status). $($wifi.message)" }
+    $policy = $(if ($State.ContainsKey('updatePolicy')) { $State.updatePolicy } else { $null })
+    if ($Manifest.ContainsKey('updatePolicy') -and $Manifest.updatePolicy) {
+        if (-not $policy) { $remaining += 'Ongoing Windows Update policy: not applied. Set it under Settings &gt; Windows Update or re-run the deployment.' }
+        elseif ($policy.status -notin 'Applied', 'AlreadyApplied') { $remaining += "Ongoing Windows Update policy: $($policy.status). $($policy.message)" }
+    }
     $remaining += 'Manufacturer drivers: not part of this deployment (driver stage not implemented). Install chipset, graphics and OEM drivers manually if Windows Update did not provide them.'
     [ordered]@{
         format             = 'windows-deployment-builder/deployment-report'
@@ -4591,6 +4605,8 @@ function New-WddReport {
         system             = $system
         windowsUpdate      = $wuReport
         applications       = $appsReport
+        updatePolicy       = $policy
+        wifi               = $wifi
         drivers            = [ordered]@{ state = 'NotImplemented'; note = 'No driver was installed or changed by this deployment.' }
         restarts           = [ordered]@{ windowsUpdate = $(if ($wu) { $wu.reboots } else { 0 }); applications = $(if ($apps) { $apps.reboots } else { 0 }) }
         incompleteStages   = $incomplete
@@ -4631,6 +4647,16 @@ function Format-WddReport {
         foreach ($s in @($a.additionalSoftware)) { $l.Add(('  {0,-20} {1} (Additional Software) {2}' -f $s.status, $s.name, $s.message)) }
     } else { $l.Add('  Not part of this deployment.') }
     $l.Add('')
+    if ($Report.Contains('updatePolicy') -and $Report.updatePolicy) {
+        $l.Add('Ongoing Windows Update policy (after the initial updates)')
+        $l.Add("  $($Report.updatePolicy.status). $($Report.updatePolicy.message)")
+        $l.Add('')
+    }
+    if ($Report.Contains('wifi') -and $Report.wifi) {
+        $l.Add('Wi-Fi profile')
+        $l.Add("  $($Report.wifi.status) ($($Report.wifi.profileName)). $($Report.wifi.message)")
+        $l.Add('')
+    }
     $l.Add('Manufacturer drivers')
     $l.Add('  Not implemented in this version; nothing was installed or changed.')
     $l.Add('')
@@ -4661,7 +4687,10 @@ function Write-WddReport {
 #&gt;
 function Complete-WddDeployment {
     param([hashtable] $Manifest, [hashtable] $Paths, [hashtable] $State, $Snapshot, [switch] $DeadlineReached)
+    if (Get-Command Step-WddUpdatePolicy -ErrorAction SilentlyContinue) { $null = Step-WddUpdatePolicy $Manifest $Paths $State $Snapshot -Force }
     $overall = Get-WddOverall $Snapshot.stages -DeadlineReached:$DeadlineReached
+    # A policy that could not be applied is a follow-up, never a silent success.
+    if ($overall -eq 'Succeeded' -and $Manifest.ContainsKey('updatePolicy') -and $Manifest.updatePolicy -and -not ($State.ContainsKey('updatePolicy') -and $State.updatePolicy -and $State.updatePolicy.status -in 'Applied', 'AlreadyApplied')) { $overall = 'CompletedWithFollowUp' }
     $reason = if ($DeadlineReached -and -not $Snapshot.allFinal) { "The deployment deadline ($($State.deadlineUtc)) passed before every stage finished." } elseif (@($Snapshot.stages).Count -eq 0) { 'No post-installation stage was enabled.' } else { 'Every enabled stage has a final result.' }
     $report = New-WddReport $Manifest $Paths $State $Snapshot $overall $reason
     Write-WddReport $report $Paths
@@ -4699,6 +4728,134 @@ if ($script:CompleteMain) {
         Format-WddReport $report
     }
     exit 0
+}
+		</File>
+		<File path="C:\\Windows\\Setup\\Scripts\\Deployment\\scripts\\finalization\\Set-UpdatePolicy.ps1">
+#Requires -Version 5.1
+&lt;#
+.SYNOPSIS
+    Applies the ongoing (post-deployment) Windows Update policy after the initial update stage.
+
+.DESCRIPTION
+    Phase 4.3. Dot-sourced by Complete-Deployment.ps1 (and so by DeploymentOrchestrator.ps1). It is
+    part of the package only when the deployment runs the initial Windows Update engine AND the
+    chosen ongoing policy is a "notify" mode; otherwise the answer file writes the policy during
+    specialize exactly as before.
+
+    The initial update engine (WindowsUpdateEngine.ps1) is not changed and does not read this
+    policy. This step runs from the SYSTEM monitor only once the windowsUpdate stage has a final
+    result (or when the deployment ends at its deadline), applies the documented
+    "Configure Automatic Updates" registry policy once, reads it back and records the outcome:
+
+      Applied               NoAutoUpdate/AUOptions written and read back
+      AlreadyApplied        the values were already exactly these
+      Unsupported           Windows Home: the policy is not supported; Windows defaults stay
+      ManagedByOrganization domain, MDM or update-server management detected; nothing written
+      Conflict              other Automatic Updates policy values already exist; left unchanged
+      Failed                writing or reading back failed
+
+    The outcome is stored in the deployment state (explicit completion state) and in
+    &lt;dataRoot&gt;\\&lt;updatePolicy.result&gt;. It never stops the Windows Update service, never blocks
+    endpoints and never touches Defender security intelligence updates.
+#&gt;
+
+$script:WddPolicyWuKey = 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsUpdate'
+$script:WddPolicyAuKey = 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsUpdate\\AU'
+$script:WddPolicyOkStatuses = @('Applied', 'AlreadyApplied')
+
+# Adapters (replaced by the scenario tests) --------------------------------------------------------
+
+function Get-WddEditionId {
+    $cv = Get-ItemProperty -LiteralPath 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion' -ErrorAction SilentlyContinue
+    if ($cv -and $cv.PSObject.Properties['EditionID']) { [string] $cv.EditionID } else { '' }
+}
+
+&lt;# Reasons why the computer is managed by an organization (empty when it is not). #&gt;
+function Get-WddUpdateManagement {
+    $reasons = @()
+    try { if ((Get-CimInstance -ClassName Win32_ComputerSystem).PartOfDomain) { $reasons += 'joined to an Active Directory domain' } } catch { }
+    $wu = Get-ItemProperty -LiteralPath $script:WddPolicyWuKey -ErrorAction SilentlyContinue
+    if ($wu -and $wu.PSObject.Properties['WUServer'] -and [string] $wu.WUServer) { $reasons += 'configured for an update server (WSUS)' }
+    $mdm = Get-ItemProperty -LiteralPath 'HKLM:\\SOFTWARE\\Microsoft\\PolicyManager\\current\\device\\Update' -ErrorAction SilentlyContinue
+    if ($mdm -and $mdm.PSObject.Properties['AllowAutoUpdate']) { $reasons += 'Windows Update is managed by device management (MDM)' }
+    $reasons
+}
+
+function Get-WddAuPolicyValues {
+    $k = Get-ItemProperty -LiteralPath $script:WddPolicyAuKey -ErrorAction SilentlyContinue
+    $o = @{}
+    foreach ($n in 'NoAutoUpdate', 'AUOptions', 'ScheduledInstallDay', 'ScheduledInstallTime', 'NoAutoRebootWithLoggedOnUsers') {
+        $o[$n] = $(if ($k -and $k.PSObject.Properties[$n]) { [int] $k.$n } else { $null })
+    }
+    return $o
+}
+
+function Set-WddAuPolicyValue {
+    param([string] $Name, [int] $Value)
+    if (-not (Test-Path -LiteralPath $script:WddPolicyAuKey)) { New-Item -Path $script:WddPolicyAuKey -Force | Out-Null }
+    New-ItemProperty -LiteralPath $script:WddPolicyAuKey -Name $Name -Value $Value -PropertyType DWord -Force | Out-Null
+}
+
+# Policy -------------------------------------------------------------------------------------------
+
+function Invoke-WddUpdatePolicy {
+    param([hashtable] $Policy, [hashtable] $Paths)
+    $want = [ordered]@{ NoAutoUpdate = [int] $Policy.values.NoAutoUpdate; AUOptions = [int] $Policy.values.AUOptions }
+    $r = [ordered]@{ status = ''; mode = [string] $Policy.mode; values = $want; appliedUtc = (Get-WddNow).ToString('o'); message = '' }
+    try {
+        $edition = Get-WddEditionId
+        if ($edition -match '^Core') {
+            $r.status = 'Unsupported'
+            $r.message = "Windows $edition (Home) does not support the Configure Automatic Updates policy. Windows' default update behaviour stays in place."
+        } else {
+            $managed = @(Get-WddUpdateManagement | Where-Object { $_ })
+            $have = Get-WddAuPolicyValues
+            if ($managed.Count -gt 0) {
+                $r.status = 'ManagedByOrganization'
+                $r.message = "This computer is $($managed -join '; '). Organizational policy takes precedence, so the ongoing update policy was not written."
+            } elseif ($have.NoAutoUpdate -eq $want.NoAutoUpdate -and $have.AUOptions -eq $want.AUOptions) {
+                $r.status = 'AlreadyApplied'
+                $r.message = 'The Automatic Updates policy already had these values.'
+            } elseif (@($have.Keys | Where-Object { $null -ne $have[$_] }).Count -gt 0) {
+                $r.status = 'Conflict'
+                $r.existing = $have
+                $r.message = 'Automatic Updates policy values already exist on this computer and were left unchanged.'
+            } else {
+                foreach ($n in $want.Keys) { Set-WddAuPolicyValue $n $want[$n] }
+                $check = Get-WddAuPolicyValues
+                if ($check.NoAutoUpdate -eq $want.NoAutoUpdate -and $check.AUOptions -eq $want.AUOptions) {
+                    $r.status = 'Applied'
+                    $r.message = "Configure Automatic Updates = $($want.AUOptions) ($(if ($want.AUOptions -eq 3) { 'download automatically, notify before installing' } else { 'notify before downloading and installing' }))."
+                } else {
+                    $r.status = 'Failed'
+                    $r.message = 'The policy values could not be read back after writing them.'
+                }
+            }
+        }
+    } catch {
+        $r.status = 'Failed'
+        $r.message = "Applying the update policy failed: $($_.Exception.Message)"
+    }
+    Write-WddLog "Ongoing update policy: $($r.status). $($r.message)" $(if ($r.status -in $script:WddPolicyOkStatuses) { 'INFO' } else { 'WARN' })
+    try { Write-WddJson (Join-Path $Paths.Root ([string] $Policy.result)) $r } catch { Write-WddLog "Could not write the update policy result: $($_.Exception.Message)" 'WARN' }
+    return $r
+}
+
+&lt;#
+    Applies the policy once: only after the windowsUpdate stage is Final, or with -Force when the
+    deployment ends. Returns the recorded result, or $null while it is still waiting.
+#&gt;
+function Step-WddUpdatePolicy {
+    param([hashtable] $Manifest, [hashtable] $Paths, [hashtable] $State, $Snapshot, [switch] $Force)
+    if (-not $Manifest.ContainsKey('updatePolicy') -or -not $Manifest.updatePolicy) { return $null }
+    if ($State.ContainsKey('updatePolicy') -and $State.updatePolicy) { return $State.updatePolicy }
+    $wu = @(@($Snapshot.stages) | Where-Object { $_ -and $_.id -eq 'windowsUpdate' }) | Select-Object -First 1
+    $final = [bool] ($wu -and $wu.state -eq 'Final')
+    if (-not $final -and -not $Force) { return $null }
+    $r = Invoke-WddUpdatePolicy $Manifest.updatePolicy $Paths
+    if (-not $final) { $r.note = 'Applied when the deployment ended; the initial Windows Update stage had not reported a final result.' }
+    $State.updatePolicy = $r
+    return $r
 }
 		</File>
 		<File path="C:\\Windows\\Setup\\Scripts\\Deployment\\config\\orchestration.json">
@@ -4787,7 +4944,7 @@ if ($script:CompleteMain) {
   "format": "windows-deployment-builder/deployment-manifest",
   "manifestVersion": 1,
   "packageVersion": "1.0.0",
-  "packageId": "9EA4568473D73984",
+  "packageId": "58A777EECBF8A01F",
   "scope": "answerFile",
   "generator": {
     "name": "Windows Deployment Builder",
@@ -5024,6 +5181,26 @@ if ($script:CompleteMain) {
     "removedFromProfiles": [],
     "additionalSoftware": []
   },
+  "updatePolicy": {
+    "mode": "notifyInstall",
+    "applyAfter": "windowsUpdate",
+    "context": "SYSTEM",
+    "script": "scripts/finalization/Set-UpdatePolicy.ps1",
+    "key": "HKLM\\\\SOFTWARE\\\\Policies\\\\Microsoft\\\\Windows\\\\WindowsUpdate\\\\AU",
+    "values": {
+      "NoAutoUpdate": 0,
+      "AUOptions": 3
+    },
+    "result": "Updates\\\\policy-result.json",
+    "finalStatuses": [
+      "Applied",
+      "AlreadyApplied",
+      "Unsupported",
+      "ManagedByOrganization",
+      "Conflict",
+      "Failed"
+    ]
+  },
   "restartPolicy": {
     "windowsUpdate": {
       "maxReboots": 10,
@@ -5107,9 +5284,9 @@ if ($script:CompleteMain) {
     {
       "path": "scripts/orchestrator/DeploymentOrchestrator.ps1",
       "role": "orchestrator",
-      "size": 4837,
-      "sha256": "427A6488968AD887C487D38773204C493289ABDCC1E0D0C111E8EBB6DF203A16",
-      "textSha256": "56751C8C5336AE86FE85BBEC9084D89B75FE73C9C6D2F0392D286077BAA88726",
+      "size": 5320,
+      "sha256": "FB75099CE3A9E7BF1B56C49131D7C9516FA1421B58F8F87F262CC25E92167148",
+      "textSha256": "B0820109FA843002BE18D1FD4176116B3248AE6CAED728A29D890DE4B649E01C",
       "embedded": "Deployment\\\\scripts\\\\orchestrator\\\\DeploymentOrchestrator.ps1"
     },
     {
@@ -5131,10 +5308,18 @@ if ($script:CompleteMain) {
     {
       "path": "scripts/finalization/Complete-Deployment.ps1",
       "role": "orchestrator",
-      "size": 12755,
-      "sha256": "C77FF013E69D85214B7BF2FDBADDE983EF2803BCAC8BADA4F905F32B8A28058D",
-      "textSha256": "1BFA977A8061BC39CD92FF8878CF1086FC9CE68046E55D18AFD758B8193166A9",
+      "size": 14893,
+      "sha256": "C8C77899CFAE84BEEB58337ABEB6F4834A44B04B9A3769EF148790DAEB486DBA",
+      "textSha256": "9B2C5392126D7B3793BF4F2B1C8DF0D684C8E6E6A742CF792F61E88381E2CF55",
       "embedded": "Deployment\\\\scripts\\\\finalization\\\\Complete-Deployment.ps1"
+    },
+    {
+      "path": "scripts/finalization/Set-UpdatePolicy.ps1",
+      "role": "orchestrator",
+      "size": 7602,
+      "sha256": "504CFC50AFE4290F23C9C9E6A446EE8D210C9F387C0B781515CEBFC59ED58B0C",
+      "textSha256": "3B28A2C605D7C21F97BDA67D5F1B90772D0EF12E47AE1417657BAFC9A68178C7",
+      "embedded": "Deployment\\\\scripts\\\\finalization\\\\Set-UpdatePolicy.ps1"
     },
     {
       "path": "scripts/windows-update/WindowsUpdateEngine.ps1",

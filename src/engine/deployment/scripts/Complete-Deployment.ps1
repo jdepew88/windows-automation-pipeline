@@ -22,6 +22,9 @@ param(
 $script:CompleteMain = $MyInvocation.InvocationName -ne '.'
 $script:CompleteArgs = @{ Preview = [bool] $Preview; Finish = [bool] $Finish }
 . (Join-Path $PSScriptRoot '..\common\DeploymentCommon.ps1')
+# Phase 4.3: present only when the ongoing update policy is applied after the initial updates.
+$script:PolicyScript = Join-Path $PSScriptRoot 'Set-UpdatePolicy.ps1'
+if (Test-Path -LiteralPath $script:PolicyScript) { . $script:PolicyScript }
 
 function Get-WddSystemInfo {
     $os = Get-CimInstance -ClassName Win32_OperatingSystem
@@ -72,6 +75,14 @@ function New-WddReport {
         elseif ($apps.status -eq 'Failed') { $errors += "Application setup failed: $($apps.detail)" }
     }
     foreach ($n in @($Snapshot.needsAttention)) { $errors += $n }
+    # Phase 4.3: written by Add-WifiProfile.ps1 when the answer file adds a Wi-Fi profile (never contains the key).
+    $wifi = Read-WddJson (Join-Path $Paths.Root 'Network\wifi-result.json')
+    if ($wifi -and $wifi.status -notin 'Added', 'ConnectRequested', 'ConnectFailed') { $remaining += "Wi-Fi: $($wifi.status). $($wifi.message)" }
+    $policy = $(if ($State.ContainsKey('updatePolicy')) { $State.updatePolicy } else { $null })
+    if ($Manifest.ContainsKey('updatePolicy') -and $Manifest.updatePolicy) {
+        if (-not $policy) { $remaining += 'Ongoing Windows Update policy: not applied. Set it under Settings > Windows Update or re-run the deployment.' }
+        elseif ($policy.status -notin 'Applied', 'AlreadyApplied') { $remaining += "Ongoing Windows Update policy: $($policy.status). $($policy.message)" }
+    }
     $remaining += 'Manufacturer drivers: not part of this deployment (driver stage not implemented). Install chipset, graphics and OEM drivers manually if Windows Update did not provide them.'
     [ordered]@{
         format             = 'windows-deployment-builder/deployment-report'
@@ -87,6 +98,8 @@ function New-WddReport {
         system             = $system
         windowsUpdate      = $wuReport
         applications       = $appsReport
+        updatePolicy       = $policy
+        wifi               = $wifi
         drivers            = [ordered]@{ state = 'NotImplemented'; note = 'No driver was installed or changed by this deployment.' }
         restarts           = [ordered]@{ windowsUpdate = $(if ($wu) { $wu.reboots } else { 0 }); applications = $(if ($apps) { $apps.reboots } else { 0 }) }
         incompleteStages   = $incomplete
@@ -127,6 +140,16 @@ function Format-WddReport {
         foreach ($s in @($a.additionalSoftware)) { $l.Add(('  {0,-20} {1} (Additional Software) {2}' -f $s.status, $s.name, $s.message)) }
     } else { $l.Add('  Not part of this deployment.') }
     $l.Add('')
+    if ($Report.Contains('updatePolicy') -and $Report.updatePolicy) {
+        $l.Add('Ongoing Windows Update policy (after the initial updates)')
+        $l.Add("  $($Report.updatePolicy.status). $($Report.updatePolicy.message)")
+        $l.Add('')
+    }
+    if ($Report.Contains('wifi') -and $Report.wifi) {
+        $l.Add('Wi-Fi profile')
+        $l.Add("  $($Report.wifi.status) ($($Report.wifi.profileName)). $($Report.wifi.message)")
+        $l.Add('')
+    }
     $l.Add('Manufacturer drivers')
     $l.Add('  Not implemented in this version; nothing was installed or changed.')
     $l.Add('')
@@ -157,7 +180,10 @@ function Write-WddReport {
 #>
 function Complete-WddDeployment {
     param([hashtable] $Manifest, [hashtable] $Paths, [hashtable] $State, $Snapshot, [switch] $DeadlineReached)
+    if (Get-Command Step-WddUpdatePolicy -ErrorAction SilentlyContinue) { $null = Step-WddUpdatePolicy $Manifest $Paths $State $Snapshot -Force }
     $overall = Get-WddOverall $Snapshot.stages -DeadlineReached:$DeadlineReached
+    # A policy that could not be applied is a follow-up, never a silent success.
+    if ($overall -eq 'Succeeded' -and $Manifest.ContainsKey('updatePolicy') -and $Manifest.updatePolicy -and -not ($State.ContainsKey('updatePolicy') -and $State.updatePolicy -and $State.updatePolicy.status -in 'Applied', 'AlreadyApplied')) { $overall = 'CompletedWithFollowUp' }
     $reason = if ($DeadlineReached -and -not $Snapshot.allFinal) { "The deployment deadline ($($State.deadlineUtc)) passed before every stage finished." } elseif (@($Snapshot.stages).Count -eq 0) { 'No post-installation stage was enabled.' } else { 'Every enabled stage has a final result.' }
     $report = New-WddReport $Manifest $Paths $State $Snapshot $overall $reason
     Write-WddReport $report $Paths

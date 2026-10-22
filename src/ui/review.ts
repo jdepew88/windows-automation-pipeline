@@ -15,6 +15,7 @@ import { codeView } from './code-view';
 import { choicesOf } from './form';
 import { PACKAGE_FILE_NAME } from '../engine/deployment';
 import { currentPackage, downloadPackage } from './deployment';
+import { considerations } from '../engine/quick';
 
 export function labelFor(path: string): string {
   const exact = SETTINGS_BY_PATH.get(path);
@@ -234,6 +235,7 @@ function issueLine(i: Issue): HTMLElement {
 
 export function renderReview(): ReviewHandle {
   const status = h('div', { class: 'status-card', 'data-testid': 'status', 'aria-live': 'polite' });
+  const considerationsList = h('ul', { class: 'considerations', 'data-testid': 'advanced-considerations' });
   const summary = h('div', { class: 'summary-grid', 'data-testid': 'summary' });
   const diff = h('div', { class: 'diff', 'data-testid': 'diff' });
   const xml = codeView({ 'data-testid': 'xml-preview', 'aria-label': 'Generated answer file' });
@@ -309,6 +311,7 @@ export function renderReview(): ReviewHandle {
         'div',
         { class: 'review-main' },
         status,
+        card('considerations-card', cardHead('Security & licensing considerations', 'shield', 'Risks that apply to this configuration. Quick Deployment asks for confirmation of the critical ones in its Final Review.'), considerationsList),
         card('summary-card', cardHead('Configuration summary', null, 'The settings that matter most, as they will be generated.', copySummaryBtn), summary),
       ),
       h(
@@ -363,6 +366,10 @@ export function renderReview(): ReviewHandle {
     update(p, result) {
       current = result;
       currentProfile = p;
+      clear(considerationsList);
+      const cons = considerations(p);
+      if (!cons.length) considerationsList.append(h('li', { class: 'empty' }, 'Nothing to consider for this configuration.'));
+      for (const c of cons) considerationsList.append(h('li', { class: `consideration ${c.severity}`, 'data-consideration': c.id }, icon(c.severity === 'info' ? 'info' : 'alert'), h('div', {}, h('strong', {}, c.title), h('p', {}, c.detail))));
       const tiles = summaryTiles(p, result);
       clear(summary);
       for (const t of tiles) {

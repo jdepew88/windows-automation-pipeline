@@ -30,6 +30,15 @@ tests at three sizes), plus read-only WinGet verification and an engine Plan run
 **Not validated in a VM or on hardware**; see `phase-4-2-application-profiles/testing.md`. Report:
 `phase-4-2-application-profiles/implementation-report.md`.
 
+## Phase 4.3: Quick Deployment wizard (branch `feature/phase-4-3-quick-deployment-wizard`)
+
+Quick Deployment wizard sharing one configuration with the unchanged Advanced Configuration, four
+catalog layouts with logos, Final Review & Considerations, the ongoing Windows Update policy applied
+after the initial updates, and Wi-Fi provisioning with adapter checks. Covered by automated tests
+(simulated machine, real generated package, browser tests at three sizes). **Not validated in a VM
+or on hardware**; see `phase-4-3-quick-deployment-wizard/testing.md`. Report:
+`phase-4-3-quick-deployment-wizard/implementation-report.md`.
+
 ## Milestone 2: validation and hardening
 
 - Run WSIM validation and both VM runs (with and without Internet). Fix any findings and record a `docs/validation-log.md`.
@@ -44,6 +53,9 @@ tests at three sizes), plus read-only WinGet verification and an engine Plan run
 - Run the Phase 4.2 application checks (`phase-4-2-application-profiles/testing.md`): Core
   Essentials, Store and portable packages, antivirus listings, the Network Engineer profile.
 - Consider a reviewed, hash-pinned vendor installer for RustDesk (currently a manual follow-up).
+- Run the Phase 4.3 checks: `AUOptions=3` applied after the initial updates on Windows 11 Pro (and
+  reported Unsupported on Home), Wi-Fi with a real adapter, a VM without Wi-Fi, and the predefined
+  region skipping Setup's region pages.
 
 ## Next: manufacturer drivers
 

@@ -1,4 +1,5 @@
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
+import { promisify } from 'node:util';
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,6 +9,7 @@ import { generateOk, profile } from './helpers';
 import { wingetArguments } from '../../src/engine/applications';
 import { ApplicationsResultSchema, WINGET_EXIT_CODES } from '../../src/engine/applications/results';
 import { writeDeploymentFixture } from '../powershell/deployment-fixture';
+import { writeWifiFixture } from '../powershell/wifi-fixture';
 
 /**
  * Runs Windows PowerShell 5.1 against the generated scripts. Only possible on Windows; skipped
@@ -15,6 +17,12 @@ import { writeDeploymentFixture } from '../powershell/deployment-fixture';
  */
 const onWindows = process.platform === 'win32';
 const ps = (args: string[]) => execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', ...args], { encoding: 'utf8' });
+/**
+ * The scenario suites run for a minute or more: run them without blocking the worker's event loop
+ * (a blocked worker misses Vitest's RPC heartbeat and the run fails with "Timeout calling onTaskUpdate").
+ */
+const run = promisify(execFile);
+const psAsync = async (args: string[]) => (await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', ...args], { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 })).stdout;
 const script = (rel: string) => fileURLToPath(new URL(rel, import.meta.url));
 const stripBom = (s: string) => (s.charCodeAt(0) === 0xfeff ? s.slice(1) : s);
 
@@ -47,22 +55,22 @@ describe.skipIf(!onWindows)('PowerShell (Windows only)', () => {
     expect(parseAll(files).trim().split(/\r?\n/).at(-1)).toBe('bad=0');
   }, 60_000);
 
-  it('Windows Update engine scenarios pass against the simulated Windows Update Agent', () => {
+  it('Windows Update engine scenarios pass against the simulated Windows Update Agent', async () => {
     let out: string;
     try {
-      out = ps(['-File', script('../powershell/Engine.Tests.ps1')]);
+      out = await psAsync(['-File', script('../powershell/Engine.Tests.ps1')]);
     } catch (e) {
       throw new Error(`Engine.Tests.ps1 failed:\n${(e as { stdout?: string }).stdout ?? e}`);
     }
     expect(out).toMatch(/\b\d+ passed, 0 failed/);
   }, 180_000);
 
-  it('application engine and bootstrap scenarios pass; every result.json matches the published schema', () => {
+  it('application engine and bootstrap scenarios pass; every result.json matches the published schema', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'wda-results-'));
     try {
       let out: string;
       try {
-        out = ps(['-File', script('../powershell/Applications.Tests.ps1'), '-ResultOut', dir]);
+        out = await psAsync(['-File', script('../powershell/Applications.Tests.ps1'), '-ResultOut', dir]);
       } catch (e) {
         throw new Error(`Applications.Tests.ps1 failed:\n${(e as { stdout?: string }).stdout ?? e}`);
       }
@@ -78,13 +86,13 @@ describe.skipIf(!onWindows)('PowerShell (Windows only)', () => {
     }
   }, 240_000);
 
-  it('deployment orchestrator scenarios pass against the real generated package (Phase 4)', () => {
+  it('deployment orchestrator scenarios pass against the real generated package (Phase 4)', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'wdd-fixture-'));
     try {
       writeDeploymentFixture(dir);
       let out: string;
       try {
-        out = ps(['-File', script('../powershell/Deployment.Tests.ps1'), '-Fixture', dir]);
+        out = await psAsync(['-File', script('../powershell/Deployment.Tests.ps1'), '-Fixture', dir]);
       } catch (e) {
         throw new Error(`Deployment.Tests.ps1 failed:\n${(e as { stdout?: string }).stdout ?? e}`);
       }
@@ -93,6 +101,22 @@ describe.skipIf(!onWindows)('PowerShell (Windows only)', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   }, 240_000);
+
+  it('Wi-Fi profile script scenarios pass against the generated Wifi.xml and script (Phase 4.3)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'wdw-fixture-'));
+    try {
+      writeWifiFixture(dir);
+      let out: string;
+      try {
+        out = await psAsync(['-File', script('../powershell/Wifi.Tests.ps1'), '-Fixture', dir]);
+      } catch (e) {
+        throw new Error(`Wifi.Tests.ps1 failed:\n${(e as { stdout?: string }).stdout ?? e}`);
+      }
+      expect(out).toMatch(/\b\d+ passed, 0 failed/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 120_000);
 
   it('the engine builds exactly the WinGet commands the preview shows', () => {
     const engine = script('../../src/engine/applications/scripts/ApplicationEngine.ps1');

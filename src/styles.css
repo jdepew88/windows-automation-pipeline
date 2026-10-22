@@ -2942,3 +2942,1001 @@ pre.preview {
     transition: none !important;
   }
 }
+
+/* ------------------------------------------------------------------------------------------------
+   Phase 4.3: Quick Deployment, Advanced Configuration mode switch, application catalog layouts
+   ------------------------------------------------------------------------------------------------ */
+
+/* Mode switch: one of the two editors is shown; both edit the same configuration. */
+.mode-switch button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.mode-switch .ico {
+  width: 15px;
+  height: 15px;
+}
+body[data-mode='quick'] .shell,
+body[data-mode='quick'] .mobile-bar,
+body[data-mode='quick'] .view-tool {
+  display: none;
+}
+body[data-mode='advanced'] .wizard-shell {
+  display: none;
+}
+.wizard-shell {
+  padding: 22px clamp(var(--gutter), 3vw, 40px) 48px;
+  max-width: 1500px;
+  margin: 0 auto;
+}
+
+/* Wizard frame */
+.wizard {
+  display: grid;
+  gap: 16px;
+  scroll-margin-top: calc(var(--header-h) + 8px);
+}
+.wiz-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px 20px;
+}
+.wiz-kicker {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--accent-text);
+  font-size: 12.5px;
+  font-weight: 650;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.wiz-kicker .ico {
+  width: 14px;
+  height: 14px;
+}
+.wiz-heading h2 {
+  font-family: var(--font-display);
+  font-size: 24px;
+  font-weight: 650;
+  margin: 2px 0 0;
+  outline: none;
+}
+.wiz-count {
+  color: var(--muted);
+  font-size: 13.5px;
+  margin-top: 2px;
+}
+.wiz-topnav,
+.wiz-bottomnav {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.wiz-bottomnav {
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+.wiz-bottomnav .spacer {
+  flex: 1;
+}
+.wiz-topnav [hidden],
+.wiz-bottomnav [hidden] {
+  display: none;
+}
+
+/* Progress */
+.wiz-progress {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.wiz-step button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  height: 100%;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.wiz-step button:hover {
+  border-color: var(--border-strong);
+}
+.wiz-step button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.wiz-step.current button {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent) inset;
+  background: var(--accent-soft);
+}
+.wiz-num {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 1px solid var(--border-strong);
+  font-weight: 700;
+  font-size: 13px;
+}
+.wiz-step.current .wiz-num {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+}
+.wiz-step-text {
+  display: grid;
+  min-width: 0;
+}
+.wiz-step-title {
+  font-weight: 600;
+  font-size: 13.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wiz-step-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.wiz-step-status .ico {
+  width: 13px;
+  height: 13px;
+}
+.wiz-step.st-complete .wiz-step-status {
+  color: var(--ok-text);
+}
+.wiz-step.st-customized .wiz-step-status {
+  color: var(--accent-text);
+}
+.wiz-step.st-incomplete .wiz-step-status {
+  color: var(--warn-text);
+}
+.wiz-step.st-attention .wiz-step-status {
+  color: var(--err-text);
+}
+.wiz-step.st-attention button {
+  border-color: var(--err-border);
+}
+.wiz-blocked {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--err-border);
+  background: var(--err-soft);
+  font-size: 14px;
+}
+.wiz-blocked .ico {
+  flex: none;
+  color: var(--err-text);
+  margin-top: 2px;
+}
+.wiz-panel {
+  display: grid;
+  gap: 16px;
+  padding: 20px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  min-width: 0;
+}
+.wiz-panel.review-final {
+  padding: 0;
+  border: 0;
+  background: none;
+  box-shadow: none;
+}
+.wiz-lead {
+  color: var(--text-2);
+  max-width: 95ch;
+}
+.wiz-sub {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 15px;
+  margin-top: 6px;
+}
+
+/* Two-column data entry: field on the left, explanation on the right (stacked on small screens). */
+.form-2col {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
+  gap: 18px 36px;
+  align-items: start;
+}
+.f-field {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.f-label {
+  font-weight: 650;
+  font-size: 14.5px;
+  color: var(--text);
+}
+.big-input {
+  width: 100%;
+  padding: 11px 13px;
+  font-size: 16px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--bg-2);
+  color: var(--text);
+}
+.big-input:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-color: var(--accent);
+}
+.f-field.has-error .big-input {
+  border-color: var(--err);
+}
+.f-help {
+  padding: 4px 0 4px 16px;
+  border-left: 2px solid var(--border);
+  color: var(--muted);
+  font-size: 13.5px;
+}
+.f-help strong {
+  display: block;
+  color: var(--text-2);
+  font-size: 13.5px;
+  margin-bottom: 2px;
+}
+.derived {
+  color: var(--muted);
+  font-size: 13px;
+}
+.f-field .linkish {
+  justify-self: start;
+}
+.f-field [hidden] {
+  display: none;
+}
+.static-value {
+  color: var(--text-2);
+  font-size: 14px;
+}
+.span-2 {
+  grid-column: 1 / -1;
+}
+.pw-row {
+  display: flex;
+  gap: 8px;
+}
+.pw-row .big-input {
+  flex: 1;
+  min-width: 0;
+}
+.pw-toggle {
+  flex: none;
+}
+.check-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  cursor: pointer;
+  font-size: 14px;
+}
+.check-row input {
+  flex: none;
+  width: 17px;
+  height: 17px;
+  margin-top: 2px;
+  accent-color: var(--accent);
+}
+.callout {
+  padding: 12px 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--accent-ring);
+  background: var(--accent-soft);
+}
+div.callout {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+.customized-note {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+  font-size: 13.5px;
+  color: var(--text-2);
+}
+.customized-note .ico {
+  color: var(--accent-text);
+  width: 15px;
+  height: 15px;
+}
+.risk-note {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--warn-border);
+  background: var(--warn-soft);
+  font-size: 13.5px;
+}
+.risk-note .ico {
+  color: var(--warn-text);
+  width: 16px;
+  height: 16px;
+}
+.risk-note[hidden] {
+  display: none;
+}
+
+/* Windows settings disclosure */
+.win-defaults {
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.win-defaults > summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  cursor: pointer;
+  list-style: none;
+}
+.win-defaults > summary::-webkit-details-marker {
+  display: none;
+}
+.win-defaults > summary::after {
+  content: '';
+  margin-left: auto;
+  width: 8px;
+  height: 8px;
+  border-right: 2px solid var(--muted);
+  border-bottom: 2px solid var(--muted);
+  transform: rotate(45deg);
+  flex: none;
+}
+.win-defaults[open] > summary::after {
+  transform: rotate(-135deg);
+}
+.win-defaults > summary .ico {
+  flex: none;
+  color: var(--accent-text);
+}
+.win-summary {
+  color: var(--muted);
+  font-size: 13.5px;
+}
+.win-box {
+  padding: 4px 14px 16px;
+}
+.win-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px 28px;
+}
+.win-grid select {
+  max-width: 100%;
+}
+
+/* Customer types */
+.type-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  gap: 10px;
+}
+.type-grid .span-all {
+  grid-column: 1 / -1;
+}
+.type-card {
+  position: relative;
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  cursor: pointer;
+}
+.type-card:hover {
+  border-color: var(--border-strong);
+}
+.type-card input {
+  position: absolute;
+  opacity: 0;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  cursor: pointer;
+}
+.type-card:has(input:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.type-card.on {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.type-icon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  background: var(--surface-3);
+  color: var(--accent-text);
+}
+.type-card.on .type-icon {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+.type-text {
+  display: grid;
+  gap: 2px;
+  padding-right: 20px;
+}
+.type-card .tile-mark {
+  top: 10px;
+  right: 10px;
+}
+
+/* Network */
+.wifi-form {
+  display: grid;
+  gap: 14px;
+}
+.wifi-form[hidden] {
+  display: none;
+}
+.wifi-more > summary {
+  cursor: pointer;
+  color: var(--accent-text);
+  font-size: 14px;
+  margin-bottom: 10px;
+}
+.choice.on {
+  border-color: var(--accent);
+}
+
+/* Applications step */
+.apps-context {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  align-items: center;
+}
+.chip.static {
+  cursor: default;
+  background: var(--surface-3);
+}
+.apps-split.no-plan {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+/* Final Review */
+.review-cols {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  align-items: start;
+}
+.review-col {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+.review-sec .card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.kv {
+  display: grid;
+  grid-template-columns: minmax(120px, 34%) minmax(0, 1fr);
+  gap: 7px 14px;
+  margin: 12px 0 0;
+  font-size: 14px;
+}
+.kv dt {
+  color: var(--muted);
+}
+.kv dd {
+  margin: 0;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.err-text {
+  color: var(--err-text);
+}
+.warn-text {
+  color: var(--warn-text);
+}
+.considerations {
+  display: grid;
+  gap: 10px;
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+}
+.consideration {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 11px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  font-size: 13.5px;
+}
+.consideration > .ico {
+  flex: none;
+  margin-top: 2px;
+}
+.consideration p {
+  margin: 3px 0 6px;
+  color: var(--text-2);
+}
+.consideration.critical {
+  border-color: var(--err-border);
+  background: var(--err-soft);
+}
+.consideration.critical > .ico {
+  color: var(--err-text);
+}
+.consideration.warning {
+  border-color: var(--warn-border);
+  background: var(--warn-soft);
+}
+.consideration.warning > .ico {
+  color: var(--warn-text);
+}
+.consideration.info > .ico {
+  color: var(--accent-text);
+}
+.consideration .ack {
+  margin: 6px 0;
+  font-weight: 600;
+}
+.generate-box {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 18px;
+  align-items: center;
+  margin-top: 16px;
+  padding: 16px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+.generate-box .desc {
+  flex: 1 1 280px;
+}
+
+/* Account & computer name (Advanced): field on the left, explanation on the right. */
+.page[data-page='accounts'] .field.layout-inline .field-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
+  grid-template-areas: 'label help' 'control help';
+  gap: 6px 36px;
+  align-items: start;
+}
+.page[data-page='accounts'] .field.layout-inline .field-text {
+  display: contents;
+}
+.page[data-page='accounts'] .field.layout-inline .field-label {
+  grid-area: label;
+}
+.page[data-page='accounts'] .field.layout-inline .desc {
+  grid-area: help;
+  margin: 0;
+  padding: 2px 0 2px 16px;
+  border-left: 2px solid var(--border);
+}
+.page[data-page='accounts'] .field.layout-inline .field-control {
+  grid-area: control;
+  flex: none;
+}
+.page[data-page='accounts'] .field.layout-inline .field-control input[type='text'],
+.page[data-page='accounts'] .field.layout-inline .field-control input[type='password'] {
+  width: 100%;
+  padding: 10px 12px;
+  font-size: 15.5px;
+}
+
+/* Logos */
+.app-logo {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  overflow: hidden;
+}
+.app-logo.sm {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  font-size: 11px;
+}
+.app-logo.lg {
+  width: 52px;
+  height: 52px;
+  border-radius: 13px;
+  font-size: 15px;
+}
+.app-logo img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.app-logo.plain {
+  padding: 4px;
+  background: #ffffff;
+  border: 1px solid var(--border);
+}
+.app-logo.avatar {
+  color: #fff;
+}
+.app-item > .app-logo {
+  margin-top: 2px;
+}
+
+/* View switcher */
+.view-box {
+  margin-left: auto;
+}
+.view-switch button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.view-switch .ico {
+  width: 14px;
+  height: 14px;
+}
+
+/* Layouts */
+.app-items {
+  display: grid;
+  gap: 6px;
+}
+.app-items.view-grid {
+  grid-template-columns: repeat(auto-fill, minmax(128px, 1fr));
+  gap: 8px;
+}
+.app-items.view-logos {
+  grid-template-columns: repeat(auto-fill, minmax(76px, 1fr));
+  gap: 8px;
+}
+.app-items.view-compact {
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: 4px 10px;
+}
+.app-tile {
+  position: relative;
+  display: grid;
+  justify-items: center;
+  align-content: start;
+  gap: 8px;
+  padding: 14px 8px 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  cursor: pointer;
+  min-width: 0;
+  transition: border-color 0.12s, background 0.12s;
+}
+.view-logos .app-tile {
+  padding: 11px 6px;
+}
+.app-tile:hover {
+  border-color: var(--border-strong);
+}
+.app-tile.on {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  box-shadow: 0 0 0 1px var(--accent) inset;
+}
+.app-tile.rec:not(.on) {
+  border-style: dashed;
+  border-color: var(--accent-ring);
+}
+.app-tile.disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+.app-tile:has(input:focus-visible),
+.app-row-compact:has(input:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.tile-check {
+  position: absolute;
+  opacity: 0;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  cursor: inherit;
+}
+.tile-name {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  text-align: center;
+  font-size: 12.5px;
+  font-weight: 550;
+  line-height: 1.3;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+/* Selected state is a check mark in a filled circle, not colour alone. */
+.tile-mark {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 1.5px solid var(--border-strong);
+  background: var(--surface);
+  color: transparent;
+}
+.tile-mark .ico {
+  width: 13px;
+  height: 13px;
+  stroke-width: 3;
+}
+.on > .tile-mark,
+.type-card.on .tile-mark {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--on-accent);
+}
+.type-card .tile-mark {
+  position: absolute;
+}
+.tile-flags {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  display: flex;
+  gap: 3px;
+}
+.tile-flag {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  background: var(--surface-3);
+}
+.tile-flag .ico {
+  width: 12px;
+  height: 12px;
+}
+.tile-flag.manual {
+  color: var(--manual);
+  background: var(--manual-soft);
+}
+.tile-flag.warn {
+  color: var(--warn-text);
+  background: var(--warn-soft);
+}
+.tile-flag.muted {
+  color: var(--muted);
+}
+.app-row-compact {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 40px;
+  padding: 5px 9px;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  cursor: pointer;
+  min-width: 0;
+}
+.app-row-compact:hover {
+  background: var(--surface-2);
+}
+.app-row-compact.on {
+  background: var(--accent-soft);
+  border-color: var(--accent-ring);
+}
+.app-row-compact.disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.app-row-compact input {
+  flex: none;
+  width: 17px;
+  height: 17px;
+  accent-color: var(--accent);
+}
+.compact-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13.5px;
+}
+.app-row-compact .tile-flags {
+  position: static;
+}
+.cat-badge {
+  font-weight: 500;
+}
+
+@media (max-width: 1240px) {
+  .wiz-step-title {
+    white-space: normal;
+  }
+}
+@media (max-width: 960px) {
+  .wizard-shell {
+    padding-top: 14px;
+  }
+  .wiz-progress {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 4px;
+  }
+  .wiz-step button {
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: 4px;
+    padding: 8px 4px;
+  }
+  .wiz-step-title {
+    font-size: 12px;
+  }
+  .review-cols {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .app-items.view-grid {
+    grid-template-columns: repeat(auto-fill, minmax(112px, 1fr));
+  }
+  .mode-switch span {
+    font-size: 13px;
+  }
+}
+@media (max-width: 640px) {
+  .form-2col,
+  .win-grid,
+  .page[data-page='accounts'] .field.layout-inline .field-main {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .page[data-page='accounts'] .field.layout-inline .field-main {
+    grid-template-areas: 'label' 'control' 'help';
+  }
+  .f-help {
+    margin-top: -10px;
+  }
+  .wiz-panel {
+    padding: 14px;
+  }
+  .wiz-heading h2 {
+    font-size: 20px;
+  }
+  .wiz-step-text {
+    display: none;
+  }
+  .wiz-step.current .wiz-step-text {
+    display: none;
+  }
+  .wiz-topnav {
+    width: 100%;
+  }
+  .wiz-topnav [data-wiz='open-advanced'] span,
+  .wiz-topnav [data-wiz='go-review'] span {
+    display: none;
+  }
+  .wiz-topnav [data-wiz='top-next'] {
+    margin-left: auto;
+  }
+  .kv {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px 0;
+  }
+  .kv dd {
+    margin-bottom: 6px;
+  }
+  .app-items.view-grid {
+    grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  }
+  .app-items.view-logos {
+    grid-template-columns: repeat(auto-fill, minmax(64px, 1fr));
+  }
+  .app-items.view-compact {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .view-box {
+    margin-left: 0;
+    width: 100%;
+  }
+  .view-switch {
+    display: flex;
+    width: 100%;
+  }
+  .view-switch button {
+    flex: 1;
+    justify-content: center;
+    padding-inline: 4px;
+  }
+  .mode-switch {
+    display: flex;
+    width: 100%;
+  }
+  .mode-switch button {
+    flex: 1;
+    justify-content: center;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .app-tile {
+    transition: none;
+  }
+}
+.wizard {
+  grid-template-columns: minmax(0, 1fr);
+}
+.wizard > *,
+.review-final > * {
+  min-width: 0;
+}
+.generate-box .btn.hero {
+  max-width: 100%;
+  white-space: normal;
+  text-align: left;
+}
+.generate-box .btn-sub {
+  overflow-wrap: anywhere;
+}
+/* Final Review: valid, but a risk still has to be confirmed. */
+.status-card.pending {
+  border-color: var(--warn-border);
+  background: linear-gradient(0deg, var(--warn-soft), var(--warn-soft)), var(--surface);
+}
+.status-card.pending .status-icon {
+  background: var(--warn);
+}

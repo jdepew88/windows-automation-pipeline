@@ -37,6 +37,8 @@ import {
 import { exportWinGetJson } from '../engine/applications/winget-json';
 import { planPreview, wingetArguments } from '../engine/applications';
 import { clear, download, h, uid } from './dom';
+import { appLogo } from './app-icon';
+import { loadCatalogView, renderTile, saveCatalogView, viewSwitcher, type CatalogView, type ItemModel } from './catalog-view';
 import { customShell, type CustomRenderer } from './form';
 import { icon, type IconName } from './icons';
 import { profileLibrary } from './library';
@@ -48,10 +50,11 @@ import { profileLibrary } from './library';
  * never edited.
  */
 
-type Filter = 'relevant' | 'selected' | 'recommended' | 'deselected' | 'all' | 'manual' | 'excluded';
+type Filter = 'relevant' | 'selected' | 'defaults' | 'recommended' | 'deselected' | 'all' | 'manual' | 'excluded';
 const FILTERS: [Filter, string][] = [
   ['relevant', 'Suggested'],
   ['selected', 'Selected'],
+  ['defaults', 'Profile defaults'],
   ['recommended', 'Recommended'],
   ['deselected', 'Unticked by you'],
   ['all', 'All apps'],
@@ -106,9 +109,9 @@ export function explainOrigin(sel: ApplicationsSelection, x: PlannedPackage, r: 
     return x.removedBy === 'user' ? `Unticked by you${from}` : `Left out by saved profile "${profileName(sel, x.removedBy)}"${from}`;
   }
   const parts: string[] = [];
-  if (profiles.some((o) => UNIVERSAL_PROFILES.includes(o))) parts.push('Universal default');
-  const others = profiles.filter((o) => !UNIVERSAL_PROFILES.includes(o));
-  if (others.length) parts.push(`Default in ${others.map((o) => profileName(sel, o)).join(', ')}`);
+  // Universal profiles (Core Essentials) first, then the others, as "Selected by …".
+  const ordered = [...profiles.filter((o) => UNIVERSAL_PROFILES.includes(o)), ...profiles.filter((o) => !UNIVERSAL_PROFILES.includes(o))];
+  if (ordered.length) parts.push(`Selected by ${ordered.map((o) => profileName(sel, o)).join(', ')}`);
   if (x.origins.includes(ADDED)) parts.push('Added by you');
   if (x.origins.includes(REQUIRED)) {
     const by = x.requiredBy.map((k) => r.packages.find((p) => p.key === k)?.displayName ?? k);
@@ -122,11 +125,25 @@ function methodBadge(method: InstallMethod): HTMLElement {
   return badge(label, kind, title);
 }
 
-export const applicationsEditor: CustomRenderer = (def, store) => {
+export interface EditorOptions {
+  /** Which blocks to show (all by default). The wizard shows the catalog and the plan only. */
+  profiles?: boolean;
+  devices?: boolean;
+  plan?: boolean;
+  troubleshooting?: boolean;
+  /** Initial filter: the wizard opens on the whole catalog. */
+  filter?: Filter;
+}
+
+export const applicationsEditor: CustomRenderer = (def, store) => createApplicationsEditor(def, store, {});
+
+export function createApplicationsEditor(def: Parameters<CustomRenderer>[0], store: Parameters<CustomRenderer>[1], opts: EditorOptions): ReturnType<CustomRenderer> {
+  const show = { profiles: opts.profiles ?? true, devices: opts.devices ?? true, plan: opts.plan ?? true, troubleshooting: opts.troubleshooting ?? true };
   // Local view state (never stored in the profile).
   let query = '';
   let category: CatalogCategory | '' = '';
-  let filter: Filter = 'relevant';
+  let filter: Filter = opts.filter ?? 'relevant';
+  let view: CatalogView = loadCatalogView();
 
   const mutate = (fn: (sel: ApplicationsSelection) => void) => store.update((p) => fn(p.applications.selection), true);
   const status = h('div', { class: 'app-status', 'data-testid': 'app-import-status', 'aria-live': 'polite' });
@@ -142,7 +159,7 @@ export const applicationsEditor: CustomRenderer = (def, store) => {
   if (profileLibrary.warnings.length) say('error', 'Saved profiles in this browser', profileLibrary.warnings);
 
   // Toolbar -------------------------------------------------------------------------------------
-  const stats = h('div', { class: 'app-stats', 'data-testid': 'app-stats' });
+  const stats = h('div', { class: 'app-stats', 'data-testid': 'app-stats', 'aria-live': 'polite', 'aria-atomic': 'true' });
   const fileInput = h('input', {
     type: 'file',
     accept: '.json,application/json',
@@ -353,6 +370,19 @@ export const applicationsEditor: CustomRenderer = (def, store) => {
     ...(Object.entries(CATALOG_CATEGORIES) as [CatalogCategory, string][]).map(([v, l]) => h('option', { value: v }, `${l} (${CATALOG.filter((e) => e.category === v).length})`)),
   );
   const filterChips = h('div', { class: 'chips', role: 'group', 'aria-label': 'Show', 'data-testid': 'app-filter' });
+  const viewBox = h('div', { class: 'view-box' });
+  const renderViewSwitch = () => {
+    clear(viewBox);
+    viewBox.append(
+      viewSwitcher(view, (v) => {
+        view = v;
+        saveCatalogView(v);
+        renderViewSwitch();
+        renderList();
+        viewBox.querySelector<HTMLElement>(`[data-view-mode="${v}"]`)?.focus();
+      }),
+    );
+  };
   const list = h('div', { class: 'app-list', 'data-testid': 'app-catalog' });
 
   const manualId = h('input', { type: 'text', placeholder: 'Publisher.Package or 9XXXXXXXXXXX', 'aria-label': 'Package identifier', 'data-testid': 'app-manual-id', autocomplete: 'off', spellcheck: 'false' });
@@ -413,7 +443,7 @@ export const applicationsEditor: CustomRenderer = (def, store) => {
     { class: 'apps' },
     status,
     toolbar,
-    h(
+    !show.profiles ? null : h(
       'div',
       { class: 'apps-block', id: 'app-profiles' },
       h(
@@ -426,7 +456,7 @@ export const applicationsEditor: CustomRenderer = (def, store) => {
       h('div', { class: 'block-head saved-head' }, h('h4', {}, icon('folder'), 'Saved profiles'), storageNote),
       customGrid,
     ),
-    h(
+    !show.devices ? null : h(
       'div',
       { class: 'apps-block', id: 'app-devices' },
       h('div', { class: 'block-head' }, h('h4', {}, icon('laptop'), 'Mobile devices & ecosystem'), h('p', { class: 'desc' }, 'Answer for every device the customer owns; Apple and Android can be combined.')),
@@ -435,7 +465,7 @@ export const applicationsEditor: CustomRenderer = (def, store) => {
     ),
     h(
       'div',
-      { class: 'apps-split' },
+      { class: `apps-split${show.plan ? '' : ' no-plan'}` },
       h(
         'section',
         { class: 'panel catalog-panel', 'aria-label': 'Applications' },
@@ -446,12 +476,13 @@ export const applicationsEditor: CustomRenderer = (def, store) => {
           h('label', { for: searchId, class: 'sr-only' }, 'Search the catalog'),
           h('div', { class: 'search-box' }, icon('search'), search),
           h('div', { class: 'inline-label' }, h('label', { for: catId }, 'Category'), catSelect),
+          viewBox,
         ),
         filterChips,
         list,
         manualAdd,
       ),
-      h(
+      !show.plan ? null : h(
         'section',
         { class: 'panel selected-panel', 'aria-label': 'Installation plan' },
         h('div', { class: 'panel-head' }, h('h4', {}, icon('check'), 'Installation plan'), count),
@@ -462,7 +493,7 @@ export const applicationsEditor: CustomRenderer = (def, store) => {
         h('details', { class: 'advanced' }, h('summary', {}, 'Full plan with every command (applications-plan.txt)'), planText),
       ),
     ),
-    h(
+    !show.troubleshooting ? null : h(
       'details',
       { class: 'advanced troubleshooting' },
       h('summary', {}, icon('info'), 'Troubleshooting'),
@@ -487,17 +518,15 @@ export const applicationsEditor: CustomRenderer = (def, store) => {
     mutate((s) => (on ? addPackage(s, ref) : removePackage(s, packageKey(ref))));
   };
 
-  function appRow(e: CatalogEntry, sel: ApplicationsSelection, r: SelectionResult): HTMLElement {
+  function itemModel(e: CatalogEntry, sel: ApplicationsSelection, r: SelectionResult): ItemModel & { planned: boolean; removed: boolean; stateKind: string } {
     const key = entryKey(e);
     const planned = r.packages.find((p) => p.key === key);
     const removed = r.removed.find((p) => p.key === key);
     const rec = r.recommended.find((p) => p.key === key);
-    const method = methodOf(e);
     const unresolved = !key;
     const rivals = e.conflictGroup ? r.packages.filter((p) => p.key !== key && p.catalog?.conflictGroup === e.conflictGroup) : [];
     const blocked = !planned && rivals.length > 0;
-    const id = uid('app');
-    const state = planned
+    const reason = planned
       ? explainOrigin(sel, planned, r)
       : removed
         ? explainOrigin(sel, removed, r)
@@ -506,20 +535,43 @@ export const applicationsEditor: CustomRenderer = (def, store) => {
           : unresolved
             ? 'Unavailable: no verified package'
             : 'Available';
-    const stateKind = planned ? 'ok' : removed ? 'warn' : rec ? 'info' : 'muted';
-    const conflictText = blocked ? `Cannot be combined with ${rivals.map((p) => p.displayName).join(', ')} (${CONFLICT_GROUPS[e.conflictGroup!]}: keep only one). Untick it first.` : '';
+    return {
+      entry: e,
+      state: planned ? 'selected' : removed ? 'deselected' : rec ? 'recommended' : unresolved ? 'unavailable' : 'available',
+      reason,
+      checked: !!planned,
+      disabled: unresolved || blocked,
+      blockedText: blocked ? `Cannot be combined with ${rivals.map((p) => p.displayName).join(', ')} (${CONFLICT_GROUPS[e.conflictGroup!]}: keep only one). Untick it first.` : '',
+      method: methodOf(e),
+      manual: isManual(e),
+      planned: !!planned,
+      removed: !!removed,
+      stateKind: planned ? 'ok' : removed ? 'warn' : rec ? 'info' : 'muted',
+    };
+  }
+
+  function appRow(e: CatalogEntry, sel: ApplicationsSelection, r: SelectionResult): HTMLElement {
+    const m = itemModel(e, sel, r);
+    const planned = m.planned;
+    const removed = m.removed;
+    const method = m.method;
+    const unresolved = m.state === 'unavailable';
+    const id = uid('app');
+    const state = m.reason;
+    const stateKind = m.stateKind;
+    const conflictText = m.blockedText;
     return h(
       'div',
-      { class: `app-item${planned ? ' on' : ''}${removed ? ' removed' : ''}${unresolved ? ' unresolved' : ''}`, 'data-app': e.id, 'data-state': planned ? 'selected' : removed ? 'deselected' : rec ? 'recommended' : 'available' },
+      { class: `app-item${planned ? ' on' : ''}${removed ? ' removed' : ''}${unresolved ? ' unresolved' : ''}`, 'data-app': e.id, 'data-state': m.state === 'unavailable' ? 'available' : m.state },
       h('input', {
         type: 'checkbox',
         id,
-        checked: !!planned,
-        disabled: unresolved || blocked,
+        checked: m.checked,
+        disabled: m.disabled,
         'aria-describedby': `${id}-d`,
         onchange: (ev: Event) => setApp(e, (ev.target as HTMLInputElement).checked),
       }),
-      avatar(e.displayName, e.category),
+      appLogo(e.id, e.displayName, e.category, 'sm'),
       h(
         'div',
         { class: 'app-main' },
@@ -533,6 +585,7 @@ export const applicationsEditor: CustomRenderer = (def, store) => {
           e.accountSignIn ? badge('sign-in after install', '', 'Installation is unattended; the customer signs in later. No account is configured.') : null,
           e.interaction === 'mayPrompt' ? badge('may prompt', 'warn', 'The installer is known to prompt or bundle offers in some versions.') : null,
           e.reboot === 'mayRequire' ? badge('may restart') : null,
+          h('span', { class: 'badge muted cat-badge' }, CATALOG_CATEGORIES[e.category]),
         ),
         h('span', { class: 'choice-desc', id: `${id}-d` }, e.description, conflictText ? ` ${conflictText}` : ''),
         e.selectionWarning && planned ? h('span', { class: 'app-warning' }, icon('alert'), e.selectionWarning) : null,
@@ -557,7 +610,7 @@ export const applicationsEditor: CustomRenderer = (def, store) => {
       'div',
       { class: `app-item${removed ? ' removed' : ' on'}${x.resolution === 'unresolved' ? ' unresolved' : ''}`, 'data-package': x.key, 'data-state': removed ? 'deselected' : 'selected' },
       h('input', { type: 'checkbox', id, checked: !removed, disabled: x.resolution === 'unresolved' && removed, onchange: (ev: Event) => mutate((s) => ((ev.target as HTMLInputElement).checked ? restorePackage(s, x.key) : removePackage(s, x.key))) }),
-      avatar(x.displayName),
+      appLogo(undefined, x.displayName, undefined, 'sm'),
       h(
         'div',
         { class: 'app-main' },
@@ -599,6 +652,8 @@ export const applicationsEditor: CustomRenderer = (def, store) => {
       selected: new Set(r.packages.map((p) => p.key)),
       removed: new Set(r.removed.map((p) => p.key)),
       recommended: new Set(r.recommended.map((p) => p.key)),
+      // Defaults of the active profiles, whether still ticked or unticked by you.
+      defaults: new Set([...r.packages, ...r.removed].filter((p) => p.origins.some((o) => o !== ADDED && o !== REQUIRED)).map((p) => p.key)),
     };
     const show = (e: CatalogEntry) => {
       const k = entryKey(e);
@@ -607,6 +662,8 @@ export const applicationsEditor: CustomRenderer = (def, store) => {
           return keys.selected.has(k) || keys.removed.has(k) || keys.recommended.has(k);
         case 'selected':
           return keys.selected.has(k);
+        case 'defaults':
+          return keys.defaults.has(k);
         case 'recommended':
           return keys.recommended.has(k);
         case 'deselected':
@@ -620,11 +677,13 @@ export const applicationsEditor: CustomRenderer = (def, store) => {
     const entries = searchCatalog(query, category).filter(show);
     const groups = new Map<CatalogCategory, CatalogEntry[]>();
     for (const e of entries) groups.set(e.category, [...(groups.get(e.category) ?? []), e]);
+    list.dataset.view = view;
     for (const [cat, items] of [...groups].sort((a, b) => Object.keys(CATALOG_CATEGORIES).indexOf(a[0]) - Object.keys(CATALOG_CATEGORIES).indexOf(b[0]))) {
-      list.append(h('h5', { class: 'app-group' }, CATALOG_CATEGORIES[cat], h('span', { class: 'chip-count' }, String(items.length))), ...items.map((e) => appRow(e, sel, r)));
+      const drawn = view === 'detailed' ? items.map((e) => appRow(e, sel, r)) : items.map((e) => renderTile(view as Exclude<CatalogView, 'detailed'>, itemModel(e, sel, r), (on) => setApp(e, on)));
+      list.append(h('h5', { class: 'app-group' }, CATALOG_CATEGORIES[cat], h('span', { class: 'chip-count' }, String(items.length))), h('div', { class: `app-items view-${view}` }, drawn));
     }
     // Packages added by custom ID (not in the catalog).
-    if (!query && !category && filter !== 'recommended' && filter !== 'manual') {
+    if (!query && !category && filter !== 'recommended' && filter !== 'manual' && filter !== 'defaults') {
       const custom = [...(filter === 'deselected' ? [] : r.packages.filter((p) => !p.catalog)), ...(filter === 'selected' ? [] : r.removed.filter((p) => !p.catalog))];
       if (custom.length) list.append(h('h5', { class: 'app-group' }, 'Added by ID', h('span', { class: 'chip-count' }, String(custom.length))), ...custom.map((x) => customRow(x, sel, r, !!x.removedBy)));
     }
@@ -641,13 +700,18 @@ export const applicationsEditor: CustomRenderer = (def, store) => {
 
     clear(stats);
     const stat = (n: number, label: string, tone = '', testid = '') => h('div', { class: `stat${tone ? ` ${tone}` : ''}`, 'data-testid': testid || undefined }, h('strong', {}, String(n)), h('span', {}, label));
+    const deps = r.packages.filter((x) => x.origins.length === 1 && x.origins[0] === REQUIRED).length;
+    const chosen = r.packages.length - deps;
+    const warningCount = r.groupConflicts.length + r.conflicts.length + r.notices.filter((n) => n.kind !== 'info').length + unresolved.length;
     stats.append(
+      stat(CATALOG.length, 'in the catalog', '', 'app-catalog-size'),
+      stat(chosen, deps ? `selected (+${deps} required)` : 'selected', chosen ? 'ok' : '', 'app-selected'),
       stat(queue.length, 'to install', queue.length ? 'ok' : '', 'app-total'),
-      stat(manual.length, 'manual follow-up', manual.length ? 'warn' : ''),
+      stat(manual.length, 'manual follow-up', manual.length ? 'warn' : '', 'app-manual-count'),
+      stat(warningCount, warningCount === 1 ? 'warning or conflict' : 'warnings or conflicts', r.groupConflicts.length ? 'err' : warningCount ? 'warn' : '', 'app-warning-count'),
       stat(r.removed.length, 'unticked by you'),
       stat(r.activeProfiles.length, `profile${r.activeProfiles.length === 1 ? '' : 's'} active`),
     );
-    if (r.groupConflicts.length) stats.append(stat(r.groupConflicts.length, 'conflict', 'err'));
 
     clear(warnings);
     for (const g of r.groupConflicts) warnings.append(h('p', { class: 'error', 'data-kind': 'conflict-group' }, g.message));
@@ -703,6 +767,8 @@ export const applicationsEditor: CustomRenderer = (def, store) => {
     const focusDevice = active?.getAttribute('data-device');
     current = selection;
     result = resolveSelection(selection);
+    view = loadCatalogView();
+    renderViewSwitch();
     const r = result;
 
     clear(builtinGrid);
@@ -714,7 +780,7 @@ export const applicationsEditor: CustomRenderer = (def, store) => {
       ? 'Saved profiles are kept in this browser only (local storage). That is not a backup: clearing site data removes them, and other browsers or computers do not see them. Use Export for a portable copy.'
       : 'This browser does not allow local storage here, so saved profiles last only until the page is closed. Use Export to keep them.';
 
-    renderDevices(selection, r);
+    if (show.devices) renderDevices(selection, r);
     renderPlan(selection, r);
     renderList();
 
@@ -730,4 +796,4 @@ export const applicationsEditor: CustomRenderer = (def, store) => {
 
   const el = customShell(def, body);
   return { el, sync: (p) => render(p.applications.selection) };
-};
+}

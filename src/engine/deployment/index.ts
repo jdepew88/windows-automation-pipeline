@@ -6,6 +6,7 @@ import showSource from './scripts/Show-DeploymentStatus.ps1?raw';
 import resumeSource from './scripts/Resume-Deployment.ps1?raw';
 import completeSource from './scripts/Complete-Deployment.ps1?raw';
 import setupSource from './scripts/setup.ps1?raw';
+import policySource from './scripts/Set-UpdatePolicy.ps1?raw';
 import type { GenContext } from '../context';
 import type { GenerateResult } from '../pipeline';
 import type { Profile } from '../schema/profile';
@@ -13,7 +14,7 @@ import { lookup } from '../../data';
 import { resolveIdentity } from '../naming';
 import { exportProfile, hasSecrets } from '../profiles';
 import { orchestrationAsset } from '../orchestration';
-import { DATA_ROOT, EMBEDDED_UPDATE_FILES, ENGINE_VERSION, TASK_NAME, TASK_PATH, resolveDrivers, updateEngineAssets } from '../windows-update';
+import { DATA_ROOT, EMBEDDED_UPDATE_FILES, ENGINE_VERSION, POLICY_RESULT_FILE, TASK_NAME, TASK_PATH, ongoingPolicyDeferred, resolveDrivers, updateEngineAssets } from '../windows-update';
 import { APP_ENGINE_VERSION, APP_PROFILE_FILE, APP_TASK_NAME, EMBEDDED_APP_FILES, applicationAssets, applicationsActive } from '../applications';
 import { allProfiles, effectiveDevices, resolveSelection } from '../applications/selection';
 import { DRIVER_STAGE } from '../drivers/contract';
@@ -81,6 +82,23 @@ const ORCHESTRATOR_SCRIPTS: { path: string; source: string; description: string 
   { path: 'scripts/finalization/Complete-Deployment.ps1', source: completeSource, description: 'Final report, completion marker and cleanup' },
 ];
 
+export const POLICY_SCRIPT = 'scripts/finalization/Set-UpdatePolicy.ps1';
+
+/** Phase 4.3: the ongoing Windows Update policy the monitor applies after the initial update stage. */
+export function updatePolicyPlan(p: Profile) {
+  if (!ongoingPolicyDeferred(p)) return null;
+  return {
+    mode: p.updates.mode,
+    applyAfter: 'windowsUpdate',
+    context: 'SYSTEM',
+    script: POLICY_SCRIPT,
+    key: 'HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsUpdate\\AU',
+    values: { NoAutoUpdate: 0, AUOptions: p.updates.mode === 'notifyInstall' ? 3 : 2 },
+    result: POLICY_RESULT_FILE,
+    finalStatuses: ['Applied', 'AlreadyApplied', 'Unsupported', 'ManagedByOrganization', 'Conflict', 'Failed'],
+  };
+}
+
 const embeddedDeploymentPath = (path: string) => `Deployment\\${path.replace(/\//g, '\\')}`;
 
 /** Every file of the WindowsDeployment folder except the manifest itself. */
@@ -91,6 +109,9 @@ export function packageFiles(p: Profile): PackageFile[] {
     { path: 'setup.ps1', content: crlf(setupSource), role: 'entry', description: 'Verifies the package and starts the deployment on an installed Windows', embedded: null },
     ...ORCHESTRATOR_SCRIPTS.map((s) => ({ path: s.path, content: crlf(s.source), role: 'orchestrator' as const, description: s.description, embedded: embeddedDeploymentPath(s.path) })),
   ];
+  if (updatePolicyPlan(p)) {
+    files.push({ path: POLICY_SCRIPT, content: crlf(policySource), role: 'orchestrator', description: 'Applies the ongoing Windows Update policy once the initial update stage is final', embedded: embeddedDeploymentPath(POLICY_SCRIPT) });
+  }
   for (const a of updateEngineAssets(p)) {
     files.push({
       path: `scripts/windows-update/${a.name}`,
@@ -274,6 +295,8 @@ export function buildManifest(p: Profile) {
       removedFromProfiles: sel.removed.map((x) => x.key),
       additionalSoftware: p.additionalSoftware.items.map((i) => ({ name: i.name, execution: i.execution })),
     },
+    // Phase 4.3: only when the policy is deferred, so other manifests keep their Phase 4 shape.
+    ...(updatePolicyPlan(p) ? { updatePolicy: updatePolicyPlan(p) } : {}),
     restartPolicy: {
       windowsUpdate: { maxReboots: wu.maxReboots, rebootWarningSeconds: wu.rebootWarningSeconds },
       applications: { restartPolicy: a.restartPolicy, maxReboots: a.maxReboots, rebootWarningSeconds: a.rebootWarningSeconds },
@@ -374,6 +397,9 @@ function stageLines(p: Profile): string {
   return [
     `  1. Windows Update        ${p.windowsUpdate.enabled ? 'on   (SYSTEM task; restarts and resumes by itself)' : 'off'}`,
     `  2. Applications (WinGet) ${applicationsActive(p) ? `on   (${resolveSelection(p.applications.selection).packages.length} package(s); as the signed-in user, after Windows Update)` : 'off'}`,
+    ...(updatePolicyPlan(p)
+      ? [`     Ongoing update policy, set once Windows Update has finished: ${p.updates.mode === 'notifyInstall' ? 'download automatically, notify before installing' : 'notify before downloading and installing'}`]
+      : []),
     '  3. Manufacturer drivers  not implemented in this version (nothing is installed)',
     '  4. Report               C:\\ProgramData\\WindowsDeploymentBuilder\\reports\\deployment-report.txt',
   ].join('\n');

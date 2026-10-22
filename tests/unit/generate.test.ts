@@ -99,7 +99,10 @@ describe('owner-default answer file', () => {
     expect(sp).toContain('/v "HiberbootEnabled" /t REG_DWORD /d 0');
     expect(sp).not.toMatch(/powercfg|hibernate/i);
     expect(sp).toContain("-ExecutionPolicy 'RemoteSigned'");
-    expect(sp).toContain('/v "AUOptions" /t REG_DWORD /d 3');
+    // Phase 4.3: with the update engine on, the ongoing policy is applied after the initial
+    // update stage by the deployment monitor (see 'ongoing update policy' below), not here.
+    expect(sp).not.toContain('/v "AUOptions"');
+    expect(files.get('Set-UpdatePolicy.ps1')).toContain('function Step-WddUpdatePolicy');
     expect(sp).toContain('ExcludeWUDriversInQualityUpdate');
     expect(sp).not.toMatch(/SmartScreenEnabled|VerifiedAndReputablePolicyState|PreventDeviceEncryption|fDenyTSConnections|EnableVirtualizationBasedSecurity/);
     const du = files.get('DefaultUser.ps1')!;
@@ -208,7 +211,15 @@ describe('variations', () => {
     expect(wifi).toContain('<keyMaterial>pa&amp;ss"word&lt;1&gt;</keyMaterial>');
     expect(wifi).toContain('<name>Caf&#xE9; &amp; Bar\'s &lt;Net&gt;</name>');
     expect(wifi).toContain('<hex>436166C3A9'); // UTF-8 bytes of "Café"
-    expect(embedded(r.root).get('Specialize.ps1')).toContain("netsh.exe wlan connect name='Café & Bar''s <Net>'");
+    // Phase 4.3: the profile name is a netsh-safe label; the exact SSID is matched by its hex bytes.
+    expect(wifi).toMatch(/<WLANProfile[^>]*>\s*<name>WiFi-436166C3A920<\/name>/);
+    const sp = embedded(r.root).get('Specialize.ps1')!;
+    expect(sp).toContain("& 'C:\\Windows\\Setup\\Scripts\\Add-WifiProfile.ps1' -Stage Specialize -ProfilePath 'C:\\Windows\\Setup\\Scripts\\Wifi.xml' -Connect;");
+    expect(sp).not.toContain('pa&ss"word');
+    const fl = embedded(r.root).get('FirstLogon.ps1')!;
+    expect(fl).toContain("Add-WifiProfile.ps1' -Stage FirstLogon");
+    // The retry runs before the sensitive-file cleanup deletes Wifi.xml.
+    expect(fl.indexOf('-Stage FirstLogon')).toBeLessThan(fl.indexOf("'C:\\Windows\\Setup\\Scripts\\Wifi.xml';"));
   });
 
   it('skip Wi-Fi hides the OOBE wireless page', () => {

@@ -25,6 +25,17 @@ export const README_FILE = 'README-WindowsUpdate.txt';
 /** Files embedded in the answer file (extracted to STAGING_DIR during specialize). */
 export const EMBEDDED_UPDATE_FILES: readonly string[] = [ENGINE_FILE, INSTALLER_FILE, CONFIG_FILE];
 
+/**
+ * Phase 4.3: the ongoing ("Configure Automatic Updates") policy is a different concept from the
+ * initial update provisioning above. When this engine runs, a notify-mode policy is applied only
+ * after its stage is final (Set-UpdatePolicy.ps1, from the deployment monitor) instead of during
+ * specialize. Without the engine the answer file writes it during specialize as before.
+ */
+export const POLICY_RESULT_FILE = 'Updates\\policy-result.json';
+export function ongoingPolicyDeferred(p: Profile): boolean {
+  return p.windowsUpdate.enabled && (p.updates.mode === 'notifyInstall' || p.updates.mode === 'notifyDownload');
+}
+
 /** Numeric limits, shared by validation and the UI. */
 export const LIMITS = {
   maxReboots: [1, 30],

@@ -24,7 +24,16 @@ async function setName(page: Page, name: string) {
   await page.locator('input[name="accounts.personName"]').fill(name);
 }
 
+// This suite covers Advanced Configuration (every section) with the detailed catalog list, as
+// before Phase 4.3; Quick Deployment and the other catalog layouts are covered in quick.spec.ts.
 test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => {
+    if (!sessionStorage.getItem('e2e-init')) {
+      localStorage.setItem('wdb.mode', 'advanced');
+      localStorage.setItem('wdb.catalogView', 'detailed');
+      sessionStorage.setItem('e2e-init', '1');
+    }
+  });
   await page.goto('/');
 });
 
@@ -44,13 +53,16 @@ test('loads the owner profile into the exact controls', async ({ page }) => {
   await expect(checkbox(page, 'desktop.icons.ThisPC')).not.toBeChecked();
   await expect(checkbox(page, 'start.folders.Downloads')).toBeChecked();
   await expect(checkbox(page, 'start.folders.Documents')).not.toBeChecked();
-  await page.getByRole('button', { name: 'Advanced' }).click();
+  await page.getByRole('button', { name: 'Advanced', exact: true }).click();
   await expect(radio(page, 'bloatware.Clipchamp', 'remove')).toBeChecked();
   await expect(radio(page, 'bloatware.Calculator', 'keep')).toBeChecked();
   await expect(radio(page, 'bloatware.Cortana', 'untouched')).toBeChecked();
   await expect(radio(page, 'bloatware.WindowsBackup', 'remove')).toBeDisabled();
   await go(page, 'accounts');
-  await expect(page.getByTestId('autologon-warning')).toBeVisible();
+  // Phase 4.3: a one-line pointer on the account page; the full warning is in the considerations.
+  await expect(page.getByTestId('autologon-note')).toBeVisible();
+  await go(page, 'review');
+  await expect(page.locator('[data-testid="advanced-considerations"] [data-consideration="autologon-admin"]')).toContainText('physical access');
 });
 
 test('requires a name, then derives username and computer name live', async ({ page }) => {
@@ -80,16 +92,16 @@ test('Basic/Advanced toggle hides rare settings without resetting values', async
   await expect(field(page, 'advancedXml.components')).toBeHidden();
   await expect(page.locator('.sidebar a.nav-item[data-target="section-advancedXml"]')).toBeHidden();
 
-  await page.getByRole('button', { name: 'Advanced' }).click();
+  await page.getByRole('button', { name: 'Advanced', exact: true }).click();
   await expect(field(page, 'scripts.system')).toBeVisible();
   await go(page, 'system');
   await checkbox(page, 'system.enableLongPaths').check();
   await go(page, 'taskbar');
   await radio(page, 'taskbar.search', 'hide').check();
 
-  await page.getByRole('button', { name: 'Basic' }).click();
+  await page.getByRole('button', { name: 'Basic', exact: true }).click();
   await expect(field(page, 'system.enableLongPaths')).toBeHidden();
-  await page.getByRole('button', { name: 'Advanced' }).click();
+  await page.getByRole('button', { name: 'Advanced', exact: true }).click();
   await expect(checkbox(page, 'system.enableLongPaths')).toBeChecked();
   await expect(radio(page, 'taskbar.search', 'hide')).toBeChecked();
   await expect(page.locator('input[name="accounts.personName"]')).toHaveValue('Kim');
@@ -111,7 +123,7 @@ test('FirstLogon script is escaped into the XML; blank scripts add nothing', asy
 
 test('validation errors are shown at the field and block output', async ({ page }) => {
   await setName(page, 'Alex');
-  await page.getByRole('button', { name: 'Advanced' }).click();
+  await page.getByRole('button', { name: 'Advanced', exact: true }).click();
   await go(page, 'wifi');
   await radio(page, 'wifi.mode', 'parameters').check();
   await page.locator('input[name="wifi.ssid"]').fill('Home');
@@ -144,7 +156,7 @@ test('downloads autounattend.xml matching the preview', async ({ page }) => {
 
 test('export → change → import round-trips; reset restores owner defaults', async ({ page }) => {
   await setName(page, 'Alex');
-  await page.getByRole('button', { name: 'Advanced' }).click();
+  await page.getByRole('button', { name: 'Advanced', exact: true }).click();
   await go(page, 'taskbar');
   await radio(page, 'taskbar.search', 'label').check();
   await go(page, 'bloatware');
@@ -176,7 +188,7 @@ test('rejects an invalid profile import with messages', async ({ page }) => {
 
 test('no horizontal page scroll on any section', async ({ page }) => {
   await setName(page, 'Alex');
-  await page.getByRole('button', { name: 'Advanced' }).click();
+  await page.getByRole('button', { name: 'Advanced', exact: true }).click();
   const targets = await page.locator('.sidebar a.nav-item').evaluateAll((as) => as.map((a) => (a as HTMLElement).dataset.target!));
   expect(targets.length).toBeGreaterThanOrEqual(20);
   for (const t of targets) {
@@ -204,7 +216,7 @@ test('Windows Update automation: on by default, assets downloadable, policy conf
   const config = JSON.parse(await readFile((await dl.path())!, 'utf8'));
   expect(config).toMatchObject({ drivers: 'exclude', featureUpdates: 'skip', maxReboots: 10 });
 
-  await page.getByRole('button', { name: 'Advanced' }).click();
+  await page.getByRole('button', { name: 'Advanced', exact: true }).click();
   await go(page, 'windowsUpdate');
   await page.locator('input[name="windowsUpdate.maxReboots"]').fill('3');
   await page.locator('input[name="windowsUpdate.excludedKbs"]').fill('KB5034441');
@@ -298,7 +310,7 @@ test('mobile devices: Android phone plus iPad recommends Apple Devices; it can b
   await expect(page.locator('[data-app="apple-devices"]')).toHaveCount(0);
   await page.locator('[data-device="ipad"]').check();
   await expect(appBox(page, 'apple-devices')).toBeChecked();
-  await expect(page.locator('[data-app="apple-devices"]')).toContainText('Default in iPhone / iPad');
+  await expect(page.locator('[data-app="apple-devices"]')).toContainText('Selected by iPhone / iPad');
   await expect(appBox(page, 'apple-music')).not.toBeChecked();
   await expect(page.locator('[data-app="icloud"]')).toContainText('Recommended by iPhone / iPad');
   await appBox(page, 'icloud').check();
@@ -425,7 +437,7 @@ test('application provisioning: WinGet import adds a profile without overwriting
 
 test('application provisioning (Advanced): package IDs, install order with dependencies, custom IDs, policies and validation', async ({ page }) => {
   await setName(page, 'Alex');
-  await page.getByRole('button', { name: 'Advanced' }).click();
+  await page.getByRole('button', { name: 'Advanced', exact: true }).click();
   await go(page, 'applications');
   await showAll(page);
   await appBox(page, 'docker-desktop').check();
@@ -477,8 +489,8 @@ test('application selection survives navigation, Basic/Advanced switches, profil
   await checkbox(page, 'applications.profile.music').check();
   await go(page, 'review');
   await go(page, 'applications');
-  await page.getByRole('button', { name: 'Advanced' }).click();
-  await page.getByRole('button', { name: 'Basic' }).click();
+  await page.getByRole('button', { name: 'Advanced', exact: true }).click();
+  await page.getByRole('button', { name: 'Basic', exact: true }).click();
   await expect(appBox(page, 'chrome')).not.toBeChecked();
   await expect(appBox(page, 'musicbee')).toBeChecked();
   // Adding another profile does not tick Chrome again.
@@ -542,9 +554,9 @@ test('sections are separate pages: current section highlighted, Previous/Next, v
   await expect(checkbox(page, 'privacy.disableLocation')).not.toBeChecked();
 
   // Basic/Advanced never changes values, and a page hidden in Basic falls back to a visible one.
-  await page.getByRole('button', { name: 'Advanced' }).click();
+  await page.getByRole('button', { name: 'Advanced', exact: true }).click();
   await go(page, 'bloatware');
-  await page.getByRole('button', { name: 'Basic' }).click();
+  await page.getByRole('button', { name: 'Basic', exact: true }).click();
   await expect(page.locator('#section-setup')).toBeVisible();
   await go(page, 'accounts');
   await expect(page.locator('input[name="accounts.personName"]')).toHaveValue('Robin');
@@ -606,7 +618,7 @@ test('Windows 11 requirement bypass controls are present (Advanced), off by defa
   await expect(checkbox(page, 'setup.bypassRequirementsCheck')).not.toBeChecked();
   await expect(checkbox(page, 'setup.bypassNetworkCheck')).not.toBeChecked();
   await expect(preview(page)).not.toContainText('LabConfig');
-  await page.getByRole('button', { name: 'Advanced' }).click();
+  await page.getByRole('button', { name: 'Advanced', exact: true }).click();
   await go(page, 'setup');
   await checkbox(page, 'setup.bypassRequirementsCheck').check();
   for (const v of ['BypassTPMCheck', 'BypassSecureBootCheck', 'BypassRAMCheck']) await expect(preview(page)).toContainText(v);

@@ -15,7 +15,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
-    "test:ps": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/powershell/Engine.Tests.ps1 && powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/powershell/Applications.Tests.ps1 && vite-node tests/powershell/make-deployment-fixture.ts node_modules/.cache/wdd-fixture && powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/powershell/Deployment.Tests.ps1 -Fixture node_modules/.cache/wdd-fixture",
+    "test:ps": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/powershell/Engine.Tests.ps1 && powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/powershell/Applications.Tests.ps1 && vite-node tests/powershell/make-deployment-fixture.ts node_modules/.cache/wdd-fixture && powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/powershell/Deployment.Tests.ps1 -Fixture node_modules/.cache/wdd-fixture && vite-node tests/powershell/make-wifi-fixture.ts node_modules/.cache/wifi-fixture && powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/powershell/Wifi.Tests.ps1 -Fixture node_modules/.cache/wifi-fixture",
     "generate:sample": "vite-node scripts/generate-sample.ts",
     "docs:settings": "vite-node scripts/generate-settings-doc.ts",
     "check": "npm run typecheck && npm run lint && npm test"
@@ -26,6 +26,7 @@
     "@types/node": "^22.20.5",
     "eslint": "^9.39.5",
     "globals": "^15.15.0",
+    "simple-icons": "16.33.0",
     "typescript": "~5.7",
     "typescript-eslint": "^8.71.2",
     "vite": "^6.4.4",

@@ -6,7 +6,6 @@ import type { Profile } from './engine/schema/profile';
 import type { SettingDef } from './engine/settings/types';
 import type { Issue } from './engine/validation/issues';
 import { ALL_SETTINGS, SECTIONS, SETTINGS_BY_PATH } from './features';
-import { AUTOLOGON_WARNING } from './features/accounts';
 import { CUSTOM_RENDERERS } from './ui/editors';
 import { clear, download, h } from './ui/dom';
 import { renderField, type FieldHandle } from './ui/form';
@@ -16,11 +15,16 @@ import { renderReview } from './ui/review';
 import { renderDeploymentPage } from './ui/deployment';
 import { Store } from './ui/store';
 import { profileLibrary } from './ui/library';
+import { renderWizard } from './ui/wizard';
+import { ackKey, isEmptyPasswordAutoAdmin, wifiSecretEmbedded } from './engine/quick';
 
 type View = 'basic' | 'advanced';
 type Theme = 'dark' | 'light' | 'system';
+/** Phase 4.3: Quick Deployment (wizard) or Advanced Configuration (every section). */
+type Mode = 'quick' | 'advanced';
 const VIEW_KEY = 'wdb.view';
 const THEME_KEY = 'wdb.theme';
+const MODE_KEY = 'wdb.mode';
 
 // View and appearance are per-browser conveniences; configuration itself is never stored.
 function loadPref(key: string): string | null {
@@ -82,6 +86,11 @@ const fileInput = h('input', {
 
 const includeSecrets = h('input', { type: 'checkbox', id: 'include-secrets', 'data-testid': 'include-secrets' });
 
+const modeSwitch = h('div', { class: 'seg mode-switch', role: 'group', 'aria-label': 'Configuration mode', 'data-testid': 'mode-switch' });
+for (const [m, label, ico] of [['quick', 'Quick Deployment', 'zap'], ['advanced', 'Advanced Configuration', 'sliders']] as [Mode, string, IconName][]) {
+  modeSwitch.append(h('button', { type: 'button', 'data-mode': m, 'aria-pressed': 'false', onclick: () => setMode(m) }, icon(ico), h('span', {}, label)));
+}
+
 const viewSwitch = h('div', { class: 'seg', role: 'group', 'aria-label': 'Settings view' });
 let view: View = loadPref(VIEW_KEY) === 'advanced' ? 'advanced' : 'basic';
 for (const v of ['basic', 'advanced'] as View[]) {
@@ -130,7 +139,8 @@ const header = h(
   h(
     'div',
     { class: 'toolbar' },
-    h('div', { class: 'tool-group' }, viewSwitch),
+    h('div', { class: 'tool-group' }, modeSwitch),
+    h('div', { class: 'tool-group view-tool' }, viewSwitch),
     h(
       'div',
       { class: 'tool-group' },
@@ -183,17 +193,14 @@ const header = h(
 
 // Pages ------------------------------------------------------------------------------------------
 const identity = h('p', { class: 'identity', 'data-testid': 'identity' });
+// Phase 4.3: the detailed risk explanation lives in Final Review & Considerations; the data-entry
+// page keeps only this one-line pointer when the risky combination is selected.
 const autologonBanner = h(
-  'div',
-  { class: 'hazard', role: 'note', 'data-testid': 'autologon-warning' },
+  'p',
+  { class: 'risk-note', role: 'note', 'data-testid': 'autologon-note' },
   icon('alert'),
-  h(
-    'p',
-    {},
-    h('strong', {}, 'Security warning: '),
-    AUTOLOGON_WARNING,
-    ' This is the requested owner default. Choose a password and "once" or "none" under Advanced for a safer setup. Initial auto-login is separate from the Windows Update restart sign-on setting under System tweaks.',
-  ),
+  h('span', {}, 'Administrator without a password, signing in automatically. '),
+  h('a', { href: '#section-review', 'data-review-link': 'true' }, 'See the security considerations'),
 );
 
 interface GroupCard {
@@ -303,13 +310,78 @@ const mobileStatus = h('a', { class: 'mobile-status', href: '#section-review', '
 const mobileBar = h('div', { class: 'mobile-bar' }, menuButton('in-bar'), mobileTitle, mobileStatus);
 
 const main = h('main', { id: 'main', tabindex: -1 }, notice, pagesEl);
+
+// Quick Deployment -------------------------------------------------------------------------------
+/** Risks confirmed in this session (shared by Final Review and the Advanced download buttons). */
+const acks = new Set<string>();
+const wizard = renderWizard({ store, acks, openAdvanced: (target) => openAdvanced(target) });
+const wizardShell = h('div', { class: 'wizard-shell', id: 'quick' });
+let mode: Mode = 'quick';
+
+function setMode(m: Mode, opts: { route?: boolean } = {}): void {
+  mode = m;
+  document.body.dataset.mode = m;
+  savePref(MODE_KEY, m);
+  for (const b of modeSwitch.querySelectorAll<HTMLButtonElement>('button')) b.setAttribute('aria-pressed', String(b.dataset.mode === m));
+  // Only one of the two editors is in the document at a time, so ids and test ids stay unique;
+  // both edit the same store, so nothing is lost by switching.
+  if (m === 'quick') {
+    if (!wizardShell.contains(wizard.el)) wizardShell.append(wizard.el);
+    wizard.update(store.get(), generate(store.get()));
+    if (location.hash.startsWith('#section-') || location.hash.startsWith('#app-') || location.hash === '#deployment-assets') history.replaceState(null, '', '#quick');
+    window.scrollTo({ top: 0 });
+  } else {
+    wizard.el.remove();
+    if (opts.route !== false) route(location.hash.startsWith('#section-') || location.hash.startsWith('#app-') ? location.hash : '#section-setup');
+  }
+}
+
+/** Opens Advanced Configuration at a page (section-…, app-…) or at a setting path. */
+function openAdvanced(target: string): void {
+  setMode('advanced', { route: false });
+  if (/^(section-|app-|deployment-assets)/.test(target)) {
+    history.pushState(null, '', `#${target}`);
+    route(`#${target}`, true);
+    return;
+  }
+  const field = document.getElementById(`field-${target}`) ?? document.querySelector(`[data-issues-for^="${CSS.escape(target)}"]`);
+  const pageEl = field?.closest<HTMLElement>('[data-page]');
+  if (!field || !pageEl) {
+    history.pushState(null, '', '#section-review');
+    route('#section-review', true);
+    return;
+  }
+  if (field.closest('.advanced') && view === 'basic') setView('advanced');
+  history.pushState(null, '', `#${pageEl.id}`);
+  showPage(pageEl.dataset.page as PageId);
+  field.scrollIntoView({ block: 'center' });
+  field.querySelector<HTMLElement>('input, select, textarea, button')?.focus({ preventScroll: true });
+}
+
+// Embedding a Wi-Fi password in the package needs a one-time confirmation in Advanced too.
+document.addEventListener(
+  'click',
+  (e) => {
+    const b = (e.target as Element).closest<HTMLElement>('[data-action="download-package"], [data-action="download-xml-only"], [data-action="download-xml"]');
+    if (!b) return;
+    const p = store.get();
+    if (!wifiSecretEmbedded(p) || acks.has(ackKey(p, 'wifi-secret'))) return;
+    if (confirm('The answer file and the ZIP will contain the Wi-Fi password in plain text. Anyone with the ZIP or the USB drive can read it.\n\nGenerate it anyway?')) {
+      acks.add(ackKey(p, 'wifi-secret'));
+      return;
+    }
+    e.preventDefault();
+    e.stopImmediatePropagation();
+  },
+  true,
+);
 const footer = h(
   'footer',
   { class: 'app-footer' },
   h('p', {}, 'Based on the option model and XML patterns of ', h('a', { href: 'https://github.com/cschneegans/unattend-generator', rel: 'noopener' }, 'cschneegans/unattend-generator'), ' (MIT), reimplemented in TypeScript. Not affiliated with Christoph Schneegans or Microsoft.'),
 );
 
-app.append(header, mobileBar, h('div', { class: 'shell' }, sidebar, backdrop, h('div', { class: 'content' }, main, footer)));
+app.append(header, mobileBar, wizardShell, h('div', { class: 'shell' }, sidebar, backdrop, h('div', { class: 'content' }, main, footer)));
 
 // Navigation -------------------------------------------------------------------------------------
 const PAGE_ORDER: PageId[] = NAV_GROUPS.flatMap((g) => g.items.filter((i) => i.target === `section-${i.page}`).map((i) => i.page)).filter((p) => pages.has(p));
@@ -356,6 +428,11 @@ function showPage(id: PageId, opts: { navTarget?: string; scrollTo?: Element | n
 }
 
 function route(hash: string, focus = false): void {
+  if (hash === '#quick') {
+    if (mode !== 'quick') setMode('quick');
+    return;
+  }
+  if (mode === 'quick' && hash && hash !== '#main') setMode('advanced', { route: false });
   const id = decodeURIComponent(hash.replace(/^#/, '')) || 'section-setup';
   const target = document.getElementById(id);
   const pageEl = target?.closest<HTMLElement>('[data-page]');
@@ -490,11 +567,12 @@ function refresh(p: Profile, structural: boolean): void {
   const id = resolveIdentity(p.accounts);
   identity.hidden = p.accounts.accountMode !== 'unattendedLocal';
   identity.textContent = `Username: ${id.username || '—'} · Display name: ${id.displayName || '—'} · Computer name: ${id.computerName ?? 'random'}`;
-  autologonBanner.hidden = !(p.accounts.accountMode === 'unattendedLocal' && p.accounts.autoLogon !== 'none' && p.accounts.accountGroup === 'Administrators');
+  autologonBanner.hidden = !isEmptyPasswordAutoAdmin(p);
   const result: GenerateResult = generate(p);
   showIssues(result.issues);
   deploymentPage.update(p, result);
   review.update(p, result);
+  if (mode === 'quick') wizard.update(p, result);
 }
 
 // Saved application profiles: restored from this browser at start-up and after a reset or an
@@ -517,4 +595,6 @@ store.subscribe(refresh);
 setTheme(theme);
 setView(view);
 refresh(store.get(), true);
-route(location.hash);
+const startHash = location.hash;
+if (startHash && startHash !== '#quick' && startHash !== '#main') setMode('advanced');
+else setMode(loadPref(MODE_KEY) === 'advanced' ? 'advanced' : 'quick');

@@ -117,7 +117,8 @@ export const settings: SettingDef[] = [
     description:
       'This is the initial desktop auto-login. It is separate from "Disable automatic sign-on of last user after a restart" (Windows Update restart sign-on) under System.',
     applicability: 'Windows 10/11. Persistent mode requires an empty password in M1.',
-    risk: AUTOLOGON_WARNING,
+    // Phase 4.3: the full explanation (AUTOLOGON_WARNING) is shown in Final Review & Considerations.
+    risk: 'With an Administrator account and no password, anyone with physical access gets an administrator session. See Final Review & Considerations.',
     stages: ['oobeSystem', 'firstLogon'],
     mapping:
       'oobeSystem › Shell-Setup › AutoLogon (Username, Enabled, LogonCount=1, Password). FirstLogon.ps1: firstLogonOnly sets Winlogon\\AutoLogonCount=0; persistent removes AutoLogonCount and sets AutoAdminLogon=1, DefaultUserName and an empty DefaultPassword.',
@@ -277,7 +278,7 @@ export function validate(p: Profile, issues: Issue[]): void {
 
   if (a.accountMode === 'unattendedLocal') {
     if (a.personName.trim() === '' && a.usernameMode === 'derived') {
-      err('accounts.personName', "Enter the person's name. The username and computer name are derived from it.");
+      err('accounts.personName', "Enter a name for the local account (the person's name). The username and computer name are derived from it.");
     } else {
       const problem = usernameProblem(id.username);
       if (problem) err(a.usernameMode === 'custom' ? 'accounts.customUsername' : 'accounts.personName', problem);

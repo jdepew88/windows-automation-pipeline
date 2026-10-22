@@ -35,8 +35,11 @@ scripts/                         sample generator, settings-doc generator
 ## Data flow
 
 1. The **UI** edits one in-memory `Profile` (`ui/store.ts`). The profile is never saved
-   automatically. Only the Basic/Advanced view, the theme and (Phase 4.2) the user's saved custom
-   application profiles (`ui/library.ts`) go to `localStorage`.
+   automatically. Only the Basic/Advanced view, the theme, (Phase 4.2) the user's saved custom
+   application profiles (`ui/library.ts`) and (Phase 4.3) the Quick/Advanced mode and the catalog
+   layout go to `localStorage`. Since Phase 4.3 two editors share this one store: Quick Deployment
+   (`ui/wizard.ts`, logic in `engine/quick.ts`) and Advanced Configuration (the section pages);
+   see `docs/phase-4-3-quick-deployment-wizard/architecture.md`.
 2. Every change calls **`generate(profile)`**:
    1. `validateProfile`: Zod schema (types, enums, unknown keys), XML-representable characters,
       then each feature's `validate` (cross-field rules). Each issue carries a dotted `path`, and the
@@ -165,6 +168,13 @@ monitor      verify …\Package → read each engine's result/status/task → De
 
 Details: `docs/phase-4-usb-deployment/architecture.md`. With both engines off nothing is added and
 the answer file stays byte-identical to Milestone 1.
+
+Phase 4.3 adds two targeted runtime steps (no engine was rewritten): the monitor applies the ongoing
+Windows Update policy (`Set-UpdatePolicy.ps1`) once the update stage is final, instead of the
+answer file writing it during specialize (only when the update engine runs; see
+`docs/phase-4-3-quick-deployment-wizard/windows-update.md`), and SSID/password Wi-Fi runs through
+`Add-WifiProfile.ps1` with an adapter check, a first-sign-in retry and a result file
+(`docs/phase-4-3-quick-deployment-wizard/wifi.md`).
 
 ## Extension points for later milestones
 

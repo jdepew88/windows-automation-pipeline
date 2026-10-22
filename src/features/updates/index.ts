@@ -3,6 +3,7 @@ import type { SettingDef } from '../../engine/settings/types';
 import type { Profile } from '../../engine/schema/profile';
 import type { Issue } from '../../engine/validation/issues';
 import { UPSTREAM_RESOURCES } from '../../engine/resources/upstream';
+import { ongoingPolicyDeferred } from '../../engine/windows-update';
 import { HKLM_POLICIES, regAdd } from '../shared';
 
 const WU = `${HKLM_POLICIES}\\Windows\\WindowsUpdate`;
@@ -23,8 +24,8 @@ export const settings: SettingDef[] = [
       'Uses the "Configure Automatic Updates" policy. Windows Update stays enabled. Security intelligence (Defender) and Store app updates are not governed by this policy, and Settings will show "Some settings are managed by your organization".',
     applicability: 'Windows 10/11 Pro and higher. Microsoft may still enforce installation of some quality updates.',
     risk: 'Manual install modes delay security fixes if nobody acts on the notifications.',
-    stages: ['specialize'],
-    mapping: `${AU}\\NoAutoUpdate = 0, AUOptions = 3 (notify install) or 2 (notify download)`,
+    stages: ['specialize', 'firstLogon'],
+    mapping: `${AU}\\NoAutoUpdate = 0, AUOptions = 3 (notify install) or 2 (notify download). With Windows Update automation on, the deployment monitor applies it (Set-UpdatePolicy.ps1) only after the initial update stage is final; skipped on Home and never written over domain, MDM or WSUS management. Otherwise during specialize.`,
     advanced: false,
     verification: 'documented',
   },
@@ -69,7 +70,8 @@ export function validate(p: Profile, issues: Issue[]): void {
 export function modify(ctx: GenContext): void {
   const u = ctx.profile.updates;
   const sp = ctx.seq.specialize;
-  if (u.mode === 'notifyInstall' || u.mode === 'notifyDownload') {
+  // With the initial update engine on, the deployment monitor applies this after its stage (Phase 4.3).
+  if ((u.mode === 'notifyInstall' || u.mode === 'notifyDownload') && !ongoingPolicyDeferred(ctx.profile)) {
     sp.append([regAdd(AU, 'NoAutoUpdate', 0), regAdd(AU, 'AUOptions', u.mode === 'notifyInstall' ? 3 : 2)].join('\n'));
   }
   if (u.excludeDrivers) sp.append(regAdd(WU, 'ExcludeWUDriversInQualityUpdate', 1));

@@ -2,7 +2,7 @@ import type { GenContext } from '../../engine/context';
 import type { SettingDef } from '../../engine/settings/types';
 import type { Profile } from '../../engine/schema/profile';
 import type { Issue } from '../../engine/validation/issues';
-import { psQuote } from '../../engine/stages/commands';
+import wifiScript from './Add-WifiProfile.ps1?raw';
 import { parseXml } from '../../engine/xml/parse';
 import { serializeFragment } from '../../engine/xml/serialize';
 import { child, el, leaf, remove, textContent, type XElement } from '../../engine/xml/tree';
@@ -30,7 +30,7 @@ export const settings: SettingDef[] = [
     risk: 'SSID/password modes put the Wi-Fi key in the answer file. It is deleted from disk at first logon unless "Keep sensitive files" is on.',
     stages: ['oobeSystem', 'specialize'],
     mapping:
-      'oobeSystem › Shell-Setup › OOBE/HideWirelessSetupInOOBE (false = interactive, true = skip). Profiles: embedded Wifi.xml, then Specialize.ps1 waits for WlanSvc and runs netsh wlan add profile … user=all [connect].',
+      'oobeSystem › Shell-Setup › OOBE/HideWirelessSetupInOOBE (false = interactive, true = skip). Profiles: embedded Wifi.xml and Add-WifiProfile.ps1. Specialize waits for WlanSvc, checks for a Wi-Fi adapter with a driver and runs netsh wlan add profile … user=all [connect]; without an adapter it retries once at the first sign-in. Result (no key): C:\\ProgramData\\WindowsDeploymentBuilder\\Network\\wifi-result.json.',
     advanced: false,
     verification: 'upstream-tested',
   },
@@ -39,11 +39,11 @@ export const settings: SettingDef[] = [
     section: 'wifi',
     label: 'Network name (SSID)',
     control: 'text',
-    description: '1–32 bytes.',
+    description: '1–32 bytes. Any characters, including spaces, quotes and non-Latin letters: the exact bytes are written as hex.',
     applicability: 'All',
     stages: ['specialize'],
     mapping: 'WLANProfile/name, SSIDConfig/SSID/name and hex',
-    advanced: true,
+    advanced: false,
     visibleWhen: params,
     verification: 'upstream-tested',
   },
@@ -75,7 +75,7 @@ export const settings: SettingDef[] = [
     risk: 'Stored in plain text in the answer file.',
     stages: ['specialize'],
     mapping: 'MSM/security/sharedKey/keyMaterial (protected=false)',
-    advanced: true,
+    advanced: false,
     visibleWhen: (p) => params(p) && p.wifi.authentication !== 'open',
     verification: 'upstream-tested',
   },
@@ -148,8 +148,21 @@ function profileFromXml(xml: string): WifiProfile | string {
   return { doc: root, name: textContent(name).trim(), connectAutomatically: mode ? textContent(mode).trim() === 'auto' : false };
 }
 
+/** Hex PSK (64 hex digits) instead of a passphrase. */
+const HEX_KEY = /^[0-9a-fA-F]{64}$/;
+
+/**
+ * The WLAN profile name is only a local label: the network is matched by SSIDConfig/SSID/hex,
+ * which carries the exact UTF-8 bytes. A name that netsh could mangle (quotes, non-ASCII) is
+ * replaced by a stable ASCII label, so SSIDs with any characters work.
+ */
+export function wlanProfileName(ssid: string): string {
+  return /^[\x20-\x7e]+$/.test(ssid) && !ssid.includes('"') && ssid.trim() === ssid ? ssid : `WiFi-${hex(ssid).slice(0, 12)}`;
+}
+
 function profileFromParameters(w: Profile['wifi']): WifiProfile {
   const ns = WLAN_NS;
+  const name = wlanProfileName(w.ssid);
   const ssidConfig = el('SSIDConfig', ns, [el('SSID', ns, [leaf('hex', hex(w.ssid), ns), leaf('name', w.ssid, ns)])]);
   if (w.nonBroadcast) ssidConfig.children.push(leaf('nonBroadcast', 'true', ns));
   const auth = el('authEncryption', ns, [
@@ -160,16 +173,16 @@ function profileFromParameters(w: Profile['wifi']): WifiProfile {
   if (w.authentication === 'WPA3SAE') auth.children.push(leaf('transitionMode', 'true', WLAN_NS_V4));
   const security = el('security', ns, [auth]);
   if (w.authentication !== 'open') {
-    security.children.push(el('sharedKey', ns, [leaf('keyType', 'passPhrase', ns), leaf('protected', 'false', ns), leaf('keyMaterial', w.password, ns)]));
+    security.children.push(el('sharedKey', ns, [leaf('keyType', HEX_KEY.test(w.password) ? 'networkKey' : 'passPhrase', ns), leaf('protected', 'false', ns), leaf('keyMaterial', w.password, ns)]));
   }
   const doc = el('WLANProfile', ns, [
-    leaf('name', w.ssid, ns),
+    leaf('name', name, ns),
     ssidConfig,
     leaf('connectionType', 'ESS', ns),
     leaf('connectionMode', w.connectAutomatically ? 'auto' : 'manual', ns),
     el('MSM', ns, [security]),
   ]);
-  return { doc, name: w.ssid, connectAutomatically: w.connectAutomatically };
+  return { doc, name, connectAutomatically: w.connectAutomatically };
 }
 
 export function validate(p: Profile, issues: Issue[]): void {
@@ -177,10 +190,13 @@ export function validate(p: Profile, issues: Issue[]): void {
   const err = (path: string, message: string) => issues.push({ severity: 'error', path, message });
   if (w.mode === 'parameters') {
     const len = utf8Length(w.ssid);
-    if (len < 1 || len > 32) err('wifi.ssid', 'SSID must be 1–32 bytes long.');
-    if (w.ssid.includes('"')) err('wifi.ssid', 'SSIDs containing double quotes are not supported; use the profile XML option.');
-    if (w.authentication !== 'open' && (w.password.length < 8 || w.password.length > 63 || /[^\x20-\x7e]/.test(w.password))) {
-      err('wifi.password', 'WPA2/WPA3 passwords must be 8–63 printable ASCII characters.');
+    if (len === 0) err('wifi.ssid', 'Enter the Wi-Fi network name (SSID). SSID must be 1–32 bytes long.');
+    else if (len > 32) err('wifi.ssid', `SSID must be 1–32 bytes long (this one is ${len} bytes in UTF-8).`);
+    if (w.authentication !== 'open') {
+      if (w.password === '') err('wifi.password', 'Enter the Wi-Fi password, or choose "Open (no password)". WPA2/WPA3 passwords must be 8–63 printable ASCII characters.');
+      else if (!HEX_KEY.test(w.password) && (w.password.length < 8 || w.password.length > 63 || /[^\x20-\x7e]/.test(w.password))) {
+        err('wifi.password', 'WPA2/WPA3 passwords must be 8–63 printable ASCII characters (or a 64-digit hexadecimal key).');
+      }
     }
   }
   if (w.mode === 'profileXml') {
@@ -189,7 +205,7 @@ export function validate(p: Profile, issues: Issue[]): void {
     else if (r.name.includes('"')) err('wifi.profileXml', 'Profile names containing double quotes are not supported.');
   }
   if ((w.mode === 'parameters' && w.authentication !== 'open') || (w.mode === 'profileXml' && /keyMaterial/i.test(w.profileXml))) {
-    issues.push({ severity: 'warning', path: 'wifi.mode', message: 'The generated answer file will contain the Wi-Fi password in plain text. Store it like a password.' });
+    issues.push({ severity: 'warning', path: 'wifi.mode', message: 'The generated answer file (and the deployment ZIP) will contain the Wi-Fi password in plain text. Store it like a password: anyone with the USB drive or the ZIP can read it.' });
   }
 }
 
@@ -208,32 +224,11 @@ export function modify(ctx: GenContext): void {
   remove(oobe, hide);
   const profile = w.mode === 'parameters' ? profileFromParameters(w) : (profileFromXml(w.profileXml) as WifiProfile);
   const xmlFile = ctx.embedFile('Wifi.xml', serializeFragment(profile.doc));
-  ctx.seq.specialize.append(`$name = 'WlanSvc';
-$start = [datetime]::Now;
-$timeout = $start.AddMinutes( 1 );
-$params = @{
-  Id = 1;
-  ParentId = 0;
-  Activity = "Waiting for service '\${name}' to start.";
-};
-while( $true ) {
-	if( $service = Get-Service -Name $name -ErrorAction 'SilentlyContinue' ) {
-		if( $service.Status -eq 'Running' ) {
-			break;
-		}
-	}
-	if( [datetime]::Now -gt $timeout ) {
-		"Service '\${name}' did not start in time." | Write-Warning;
-		break;
-	}
-	Write-Progress @params -PercentComplete $(
-		100 * ( [datetime]::Now - $start ).Ticks / ( $timeout - $start ).Ticks
-	);
-	Start-Sleep -Seconds 5;
-}
-Write-Progress @params -Completed;`);
-  ctx.seq.specialize.append(`netsh.exe wlan add profile filename="${xmlFile}" user=all;`);
-  if (profile.connectAutomatically) {
-    ctx.seq.specialize.append(`netsh.exe wlan connect name=${psQuote(profile.name)} ssid=${psQuote(profile.name)};`);
-  }
+  // Phase 4.3: Add-WifiProfile.ps1 checks for the WLAN service and a Wi-Fi adapter with a driver,
+  // adds the profile, records a result without the key and retries once at the first sign-in
+  // (before the sensitive-file cleanup deletes Wifi.xml) if specialize had no adapter yet.
+  const script = ctx.embedFile('Add-WifiProfile.ps1', wifiScript);
+  const args = `-ProfilePath '${xmlFile}'${profile.connectAutomatically ? ' -Connect' : ''}`;
+  ctx.seq.specialize.append(`& '${script}' -Stage Specialize ${args};`);
+  ctx.seq.firstLogon.append(`& '${script}' -Stage FirstLogon ${args};`);
 }

@@ -1,4 +1,4 @@
-# Windows Deployment Builder (Milestone 1 + Phase 2 Windows Update + Phase 3 WinGet provisioning + Phase 4 USB deployment + Phase 4.2 application profiles)
+# Windows Deployment Builder (Milestone 1 + Phase 2 Windows Update + Phase 3 WinGet provisioning + Phase 4 USB deployment + Phase 4.2 application profiles + Phase 4.3 Quick Deployment)
 
 A local, offline, browser-based generator for **Windows 11 Pro `autounattend.xml`** answer files,
 written entirely in TypeScript. It is built on the option model and XML patterns of
@@ -35,6 +35,17 @@ browser's local storage (no names or passwords); export them for a backup.
 
 ## Using it
 
+**Quick Deployment** (the default view) asks only what changes between customers, in five steps:
+computer & local account, computer & customer type (Everyday, Gamer, Developer, Network Engineer /
+Developer / Technician, Music, Laptop, Touchscreen, plus phones and tablets), network (Wi-Fi is
+skipped unless you enter an SSID and password), applications (logo grid, logos only, compact or
+detailed list), and **Final Review & Considerations**, where you confirm the relevant risks and
+generate the ZIP. Next/Back sit at the top and the bottom; *Go to Applications* skips steps that are
+fine as they are; nothing invalid gets past a step. **Advanced Configuration** (header switch) is the
+full set of pages below; both edit the same configuration, so you can switch at any time.
+
+In Advanced Configuration:
+
 1. Enter **one person's name**. The username and the `<Name>-Computer` computer name (≤ 15 chars)
    are derived live.
 2. Review the sections. **Basic** shows everyday choices. **Advanced** adds rare settings, the other
@@ -60,7 +71,9 @@ browser's local storage (no names or passwords); export them for a backup.
 - Maximum practical privacy: required diagnostic data only (the minimum on Pro), and advertising
   ID, tailored experiences, inking/typing, location, suggestions, Bing results, Copilot and Recall
   are off.
-- Windows Update: download automatically, notify to install, no drivers via Windows Update.
+- Windows Update: download automatically, notify to install, no drivers via Windows Update. With
+  the update automation on, this policy is applied after the initial updates have finished
+  (Phase 4.3), not on Windows Home and never over domain/MDM/WSUS policy.
 - Fast Startup off, hibernation untouched, WER off, PowerShell `RemoteSigned`, Edge first-run,
   Startup Boost and background mode off.
 - Explorer: extensions shown, opens to This PC. Left taskbar, search icon only, no Widgets.
@@ -107,7 +120,17 @@ browser's local storage (no names or passwords); export them for a backup.
 The full per-setting mapping is in [docs/settings-mapping.md](docs/settings-mapping.md) (generated
 from code).
 
-## Quick start: a gaming PC with a PDF reader, on a USB drive
+## Quick start (Quick Deployment): a gaming laptop in a few clicks
+
+1. Open the site: Quick Deployment starts at **Computer & local account**. Type the account name
+   (for example `Sam`); the computer name `Sam-Computer` follows (type your own to override).
+2. **Next**: tick **Gamer** and **Laptop**; answer the phone question if relevant.
+3. **Go to Applications**: Steam and the Epic Games Launcher are ticked. Click a tile to untick or
+   add an app; switch layouts with Logos / Grid / Compact / Detailed.
+4. **Final Review**: check the summary, confirm the administrator-without-password consideration,
+   and **Generate Deployment ZIP**. Extract it to a Windows 11 installation USB drive.
+
+## Quick start (Advanced Configuration): a gaming PC with a PDF reader, on a USB drive
 
 1. Open the site. Enter the customer's name under **Account & computer name**.
 2. Go to **WinGet applications**. Core Essentials is already ticked.
@@ -152,6 +175,11 @@ from code).
 - [docs/phase-4-2-application-profiles/profiles.md](docs/phase-4-2-application-profiles/profiles.md): built-in profiles, devices, selection rules, saved profiles, browser storage, JSON formats
 - [docs/phase-4-2-application-profiles/testing.md](docs/phase-4-2-application-profiles/testing.md): test results, regression against Phase 4, VM/hardware checklist
 - [docs/phase-4-2-application-profiles/implementation-report.md](docs/phase-4-2-application-profiles/implementation-report.md): what Phase 4.2 changed, engine 1.1.0, ZIP integration, limitations
+- [docs/phase-4-3-quick-deployment-wizard/architecture.md](docs/phase-4-3-quick-deployment-wizard/architecture.md): Quick Deployment and Advanced Configuration on one configuration, wizard flow, defaults, Final Review, persistence
+- [docs/phase-4-3-quick-deployment-wizard/wifi.md](docs/phase-4-3-quick-deployment-wizard/wifi.md): Wi-Fi provisioning and the credential security model
+- [docs/phase-4-3-quick-deployment-wizard/windows-update.md](docs/phase-4-3-quick-deployment-wizard/windows-update.md): initial updates vs the ongoing policy, ordering, outcomes
+- [docs/phase-4-3-quick-deployment-wizard/catalog-and-icons.md](docs/phase-4-3-quick-deployment-wizard/catalog-and-icons.md): the four catalog layouts and logo sources
+- [docs/phase-4-3-quick-deployment-wizard/testing.md](docs/phase-4-3-quick-deployment-wizard/testing.md) and [implementation-report.md](docs/phase-4-3-quick-deployment-wizard/implementation-report.md)
 
 ## Not yet implemented
 

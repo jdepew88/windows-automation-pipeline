@@ -37,6 +37,10 @@ Unit test coverage by acceptance criterion:
   - busy installer, already finished, pending restart, corrupt state;
   - single instance (mutex across processes), log content, config defaults.
 
+- **Phase 4.3 (Quick Deployment, update policy timing, Wi-Fi provisioning, catalog layouts)**:
+  `quick.test.ts`, `quick.spec.ts`, the new `Deployment.Tests.ps1` scenarios and `Wifi.Tests.ps1`
+  (also run by `npm run test:ps`); see
+  [phase-4-3-quick-deployment-wizard/testing.md](phase-4-3-quick-deployment-wizard/testing.md).
 - **Phase 4.2 (catalog, profiles, devices, engine 1.1.0)**: `app-profiles.test.ts`, the new
   `Applications.Tests.ps1` scenarios and the application browser tests; see
   [phase-4-2-application-profiles/testing.md](phase-4-2-application-profiles/testing.md).
