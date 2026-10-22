@@ -59,6 +59,7 @@ export const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
       page('output', 'Output', 'file'),
       page('deferred', 'Later milestones', 'clock'),
       page('deployment', 'Deployment package', 'usb'),
+      { target: 'usb-prep', page: 'deployment', label: 'Prepare Installation USB', icon: 'usb' },
       { target: 'deployment-assets', page: 'review', label: 'Deployment assets', icon: 'archive' },
       page('review', 'Review & download', 'download'),
     ],

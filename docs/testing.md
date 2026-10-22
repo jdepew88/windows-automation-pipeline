@@ -37,6 +37,9 @@ Unit test coverage by acceptance criterion:
   - busy installer, already finished, pending restart, corrupt state;
   - single instance (mutex across processes), log content, config defaults.
 
+- **Phase 7 (USB media preparation)**: `media.test.ts`, `Media.Tests.ps1` (the assistant against
+  the real generated packages, simulated disks and synthetic Windows images) and `usb.spec.ts`; see
+  [phase-7-usb-media-preparation/testing.md](phase-7-usb-media-preparation/testing.md).
 - **Phase 6 (application inventory, backup and restore)**: `migration.test.ts`,
   `Migration.Tests.ps1` (collector, backup, validation, restore on a simulated computer), the
   Phase 6 scenarios in `Applications.Tests.ps1` and `Deployment.Tests.ps1` (a second real generated

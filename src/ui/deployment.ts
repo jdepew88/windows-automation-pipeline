@@ -2,6 +2,8 @@ import type { GenerateResult } from '../engine/pipeline';
 import type { Profile } from '../engine/schema/profile';
 import { DATA_ROOT } from '../engine/windows-update';
 import { PACKAGE_DIR, PACKAGE_ROOT, RESUME_SCRIPT, STATUS_SCRIPT, buildDeploymentPackage, type DeploymentPackage } from '../engine/deployment';
+import { ASSISTANT_BUNDLE, ASSISTANT_SCRIPT, MICROSOFT_DOWNLOAD, WINDOWS_RELEASES, assistantBundle, mediaRequirements } from '../engine/media';
+import { settingsRestoreActive } from '../engine/migration/plan';
 import { clear, download, h } from './dom';
 import { icon, type IconName } from './icons';
 
@@ -52,6 +54,14 @@ export function renderDeploymentPage(): DeploymentPageHandle {
   const contents = h('ul', { class: 'pkg-tree', 'data-testid': 'package-contents' });
   const stages = h('ol', { class: 'pkg-stages', 'data-testid': 'package-stages' });
   const usbAnswer = h('span', {});
+  const usbNeeds = h('p', { class: 'desc', 'data-testid': 'usb-requirements' });
+  const usbBackup = h('p', { class: 'desc', 'data-testid': 'usb-backup-note' });
+  const assistantBtn = h(
+    'button',
+    { type: 'button', class: 'btn primary', 'data-action': 'download-usb-assistant', onclick: () => download(ASSISTANT_BUNDLE, assistantBundle(), 'application/zip') },
+    icon('download'),
+    h('span', { class: 'btn-stack' }, h('span', { class: 'btn-label' }, 'Download the USB Preparation Assistant'), h('span', { class: 'btn-sub' }, ASSISTANT_BUNDLE)),
+  );
 
   const el = h(
     'section',
@@ -107,6 +117,43 @@ export function renderDeploymentPage(): DeploymentPageHandle {
             '. No drive letter is assumed and the USB drive is not needed after Setup.',
           ),
         ),
+        card(
+          'usb-prep-card',
+          h(
+            'div',
+            { class: 'card-head', id: 'usb-prep' },
+            h('div', { class: 'card-title' }, icon('usb'), h('h3', {}, 'Prepare Installation USB')),
+            h('p', { class: 'card-desc' }, 'A small local tool for Windows prepares and checks the drive from the package you downloaded. Drives are handled on your computer only: this website never sees or changes a disk.'),
+          ),
+          h(
+            'ol',
+            { class: 'howto' },
+            h('li', {}, h('strong', {}, 'Download the deployment package and the assistant. '), 'Extract the assistant and start ', h('code', {}, 'Prepare-InstallationUSB.cmd'), '.'),
+            h(
+              'li',
+              {},
+              h('strong', {}, 'Choose how to prepare the drive. '),
+              h('span', { class: 'badge ok' }, 'Update'),
+              ' adds this deployment to an existing Windows USB (Media Creation Tool): nothing is erased and the Windows files stay as they are; an older deployment on the drive is kept in WDB-previous. ',
+              h('span', { class: 'badge warn' }, 'Create'),
+              ' ERASES the USB flash drive you pick and builds it from a Windows 11 ISO (',
+              h('a', { href: MICROSOFT_DOWNLOAD, target: '_blank', rel: 'noopener noreferrer' }, 'official Microsoft download'),
+              '). ',
+              h('span', { class: 'badge info' }, 'Inspect'),
+              ' only reads a drive or ISO.',
+            ),
+            h('li', {}, h('strong', {}, 'Check the drive it shows. '), 'Every drive is listed with its number, model, serial, size, bus and volumes. The drive of the running Windows, internal and external hard disks and Ventoy drives are never erased; erasing needs the confirmation code of that exact drive and administrator rights.'),
+            h('li', {}, h('strong', {}, 'Read the readiness report. '), '"Ready for installation" means files, Windows image, edition, boot files and every hash were verified. It does not mean the drive was booted on a computer.'),
+          ),
+          usbNeeds,
+          usbBackup,
+          h('div', { class: 'action-stack' }, assistantBtn),
+          h('pre', { class: 'mig-cmd usb-cmd', 'aria-label': 'Assistant commands' }, `.\\${ASSISTANT_SCRIPT} -Mode Discover
+.\\${ASSISTANT_SCRIPT} -Mode Plan -Workflow Update -Package windows-deployment-package.zip -Target E:
+.\\${ASSISTANT_SCRIPT} -Mode Apply -PlanPath <plan.json>
+.\\${ASSISTANT_SCRIPT} -Mode Verify -Target E: -Package windows-deployment-package.zip`),
+          h('p', { class: 'desc' }, `Windows release information in the assistant: Microsoft release-health data verified ${WINDOWS_RELEASES.verifiedUtc}; an image older than the latest update level is flagged, and Windows Update installs the rest after setup. Prefer extracting the ZIP by hand? The steps above still work.`),
+        ),
       ),
       h(
         'aside',
@@ -142,6 +189,13 @@ export function renderDeploymentPage(): DeploymentPageHandle {
       resultRef = result;
       pkg = null;
       usbAnswer.textContent = `${p.output.answerFileName}          (this package)`;
+      const need = mediaRequirements(p);
+      usbNeeds.textContent = need.dismEditionId
+        ? `This deployment needs media with ${need.editionName} (EditionId ${need.dismEditionId}) for ${need.architectures.join('/')}; the assistant refuses media without it and never installs another edition instead.`
+        : `The edition is not fixed by a generic key (${need.editionMode}); the assistant checks the architecture (${need.architectures.join('/')}) and reports the editions on the media.`;
+      usbBackup.textContent = settingsRestoreActive(p)
+        ? `This deployment restores application settings: give the assistant the backup folder ${p.migration.backup!.folderName}. It is checked against the pinned SHA-256 and copied to WindowsDeployment\\backups\\${p.migration.backup!.folderName}. The drive then holds personal configuration data: keep it private.`
+        : 'No settings backup is needed for this deployment.';
       const errors = result.issues.filter((i) => i.severity === 'error');
       clear(status);
       clear(contents);

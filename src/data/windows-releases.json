@@ -1,0 +1,16 @@
+{
+  "$comment": "Cached Windows 11 release information, copied from Microsoft's official release-information page (tables 'Windows 11 current versions by servicing option' and the per-version sections). Used offline by the USB Preparation Assistant to judge how current a Windows image is. Refresh from the source and update verifiedUtc; values not shown on the page are null.",
+  "source": "https://learn.microsoft.com/en-us/windows/release-health/windows11-release-information",
+  "sourceUpdated": "2026-10-13",
+  "verifiedUtc": "2026-10-22",
+  "minimumBuild": 22000,
+  "releases": [
+    { "version": "26H2", "build": 26300, "availability": "2026-09-29", "endHomePro": "2028-10-10", "endEnterpriseEducation": "2029-10-09", "latestRevision": 9711, "latestRevisionDate": "2026-10-13", "note": "" },
+    { "version": "26H1", "build": 28000, "availability": "2026-02-10", "endHomePro": "2028-03-14", "endEnterpriseEducation": "2029-03-13", "latestRevision": 3231, "latestRevisionDate": "2026-10-13", "note": "Scoped to new devices that shipped with it; not offered as an in-place update from 24H2 or 25H2." },
+    { "version": "25H2", "build": 26200, "availability": "2025-09-30", "endHomePro": "2027-10-12", "endEnterpriseEducation": "2028-10-10", "latestRevision": 9711, "latestRevisionDate": "2026-10-13", "note": "" },
+    { "version": "24H2", "build": 26100, "availability": "2024-10-01", "endHomePro": "ended", "endEnterpriseEducation": "2027-10-12", "latestRevision": 9711, "latestRevisionDate": "2026-10-13", "note": "" },
+    { "version": "23H2", "build": 22631, "availability": "2023-10-31", "endHomePro": "ended", "endEnterpriseEducation": "2026-11-10", "latestRevision": 7652, "latestRevisionDate": "2026-10-13", "note": "" },
+    { "version": "22H2", "build": 22621, "availability": null, "endHomePro": "ended", "endEnterpriseEducation": "ended", "latestRevision": 6060, "latestRevisionDate": "2025-10-14", "note": "End of updates." },
+    { "version": "21H2", "build": 22000, "availability": null, "endHomePro": "ended", "endEnterpriseEducation": "ended", "latestRevision": 3260, "latestRevisionDate": "2024-10-08", "note": "End of updates." }
+  ]
+}

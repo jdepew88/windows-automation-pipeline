@@ -24,6 +24,7 @@ import { DRIVER_STAGE } from '../drivers/contract';
 import { isEffective, PHASES } from '../../features/scripts';
 import { sha256, utf8 } from './sha256';
 import { createZip } from './zip';
+import { mediaBlock } from '../media';
 
 /**
  * Phase 4: the USB deployment package and the first-boot orchestrator.
@@ -407,7 +408,7 @@ export function modify(ctx: GenContext): void {
 export interface DeploymentPackage {
   fileName: string;
   zip: Uint8Array;
-  manifest: DeploymentManifest;
+  manifest: DeploymentManifest & { media: ReturnType<typeof mediaBlock> };
   entries: { path: string; size: number; role: FileRole | 'answer-file' | 'manifest'; description: string }[];
   warnings: string[];
 }
@@ -415,9 +416,15 @@ export interface DeploymentPackage {
 /** The complete deployment ZIP: the answer file at the root plus the WindowsDeployment folder. */
 export function buildDeploymentPackage(p: Profile, result: GenerateResult): DeploymentPackage {
   if (!result.ok || !result.xml) throw new Error('The deployment package needs a valid answer file.');
-  const { manifest, json, files } = buildManifest(p);
+  const built = buildManifest(p);
+  const files = built.files;
+  // Phase 7: the package copy of the manifest also pins the answer file and states what the
+  // installation media must provide (the copy embedded in the answer file is unchanged).
+  const answerBytes = utf8(result.xml);
+  const manifest = { ...built.manifest, media: mediaBlock(p, result.fileName, answerBytes) };
+  const json = asciiJson(manifest);
   const zipEntries = [
-    { path: result.fileName, data: utf8(result.xml), role: 'answer-file' as const, description: 'Windows Setup answer file (copy to the USB root); carries the whole deployment' },
+    { path: result.fileName, data: answerBytes, role: 'answer-file' as const, description: 'Windows Setup answer file (copy to the USB root); carries the whole deployment' },
     { path: `${PACKAGE_DIR}/${MANIFEST_FILE}`, data: utf8(json), role: 'manifest' as const, description: 'Stages, selections, limits and the SHA-256 of every file' },
     ...files.map((f) => ({ path: `${PACKAGE_DIR}/${f.path}`, data: encodeFile(f.path, f.content), role: f.role, description: f.description })),
   ];

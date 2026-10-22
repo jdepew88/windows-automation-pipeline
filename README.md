@@ -1,4 +1,4 @@
-# Windows Deployment Builder (Milestone 1 + Phase 2 Windows Update + Phase 3 WinGet provisioning + Phase 4 USB deployment + Phase 4.2 application profiles + Phase 4.3 Quick Deployment + Phase 5 resilient provisioning + Phase 6 application backup and restore)
+# Windows Deployment Builder (Milestone 1 + Phase 2 Windows Update + Phase 3 WinGet provisioning + Phase 4 USB deployment + Phase 4.2 application profiles + Phase 4.3 Quick Deployment + Phase 5 resilient provisioning + Phase 6 application backup and restore + Phase 7 USB media preparation)
 
 A local, offline, browser-based generator for **Windows 11 Pro `autounattend.xml`** answer files,
 written entirely in TypeScript. It is built on the option model and XML patterns of
@@ -74,6 +74,19 @@ DeploymentRecovery.ps1 -Action Status | PendingActions | RetryFailed | Retry -Op
 Settings: Advanced Configuration › Applications › Reliability & recovery. Details:
 [docs/phase-5-resilient-provisioning/recovery.md](docs/phase-5-resilient-provisioning/recovery.md).
 New deployments start with the local username `owner` (Quick Deployment and Advanced).
+
+## Prepare the installation USB (Phase 7)
+
+**Deployment package › Prepare Installation USB** offers the local **USB Preparation Assistant**
+(`usb-preparation-assistant.zip`, Windows PowerShell 5.1). It takes the deployment package you
+downloaded and either adds it to an existing Windows USB (nothing is erased) or builds a new one from
+an official Windows 11 ISO (erases only the USB flash drive whose confirmation code you type). It
+checks the Windows image (edition by EditionId, architecture, build and how current it is), splits
+images over 4 GB for FAT32, copies a pinned Phase 6 settings backup to
+`WindowsDeployment\backups\<folder>`, verifies every file and writes a readiness report. It never
+erases the drive of the running Windows, internal or external hard disks or Ventoy drives, and never
+claims a boot test. Extracting the ZIP by hand still works. Details:
+[docs/phase-7-usb-media-preparation/user-guide.md](docs/phase-7-usb-media-preparation/user-guide.md).
 
 ## Reconstruct an existing computer (Phase 6)
 
@@ -234,6 +247,9 @@ from code).
 - [docs/phase-6-application-backup-restore/collector.md](docs/phase-6-application-backup-restore/collector.md): using `WdbMigration.ps1` on the existing computer
 - [docs/phase-6-application-backup-restore/inventory-and-matching.md](docs/phase-6-application-backup-restore/inventory-and-matching.md), [backup-format.md](docs/phase-6-application-backup-restore/backup-format.md), [adapters.md](docs/phase-6-application-backup-restore/adapters.md), [security.md](docs/phase-6-application-backup-restore/security.md)
 - [docs/phase-6-application-backup-restore/testing.md](docs/phase-6-application-backup-restore/testing.md), [bare-metal-checklist.md](docs/phase-6-application-backup-restore/bare-metal-checklist.md) and [implementation-report.md](docs/phase-6-application-backup-restore/implementation-report.md)
+- [docs/phase-7-usb-media-preparation/user-guide.md](docs/phase-7-usb-media-preparation/user-guide.md): preparing, updating, verifying and repairing installation USBs
+- [docs/phase-7-usb-media-preparation/architecture.md](docs/phase-7-usb-media-preparation/architecture.md), [disk-safety.md](docs/phase-7-usb-media-preparation/disk-safety.md), [windows-image.md](docs/phase-7-usb-media-preparation/windows-image.md), [media-layout.md](docs/phase-7-usb-media-preparation/media-layout.md), [security.md](docs/phase-7-usb-media-preparation/security.md)
+- [docs/phase-7-usb-media-preparation/testing.md](docs/phase-7-usb-media-preparation/testing.md), [physical-usb-checklist.md](docs/phase-7-usb-media-preparation/physical-usb-checklist.md) and [implementation-report.md](docs/phase-7-usb-media-preparation/implementation-report.md)
 
 ## Not yet implemented
 

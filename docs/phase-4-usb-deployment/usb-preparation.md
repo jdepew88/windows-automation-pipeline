@@ -1,5 +1,8 @@
 # Preparing a USB deployment (Phase 4)
 
+> Since Phase 7 the **USB Preparation Assistant** does steps 1 and 2 for you and verifies the drive:
+> see `../phase-7-usb-media-preparation/user-guide.md`. The manual procedure below still works.
+
 What you need: a USB drive of 8 GB or more (it is erased when the Windows media is created),
 official Windows 11 installation media from Microsoft, and the deployment package
 (`windows-deployment-package.zip`) from the website's **Deployment package** page.

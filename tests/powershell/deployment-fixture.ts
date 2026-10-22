@@ -124,5 +124,6 @@ export function writeMigrationFixture(dir: string): { packageId: string; manifes
     mkdirSync(dirname(target), { recursive: true });
     writeFileSync(target, e.data);
   }
+  writeFileSync(join(dir, 'package.zip'), pkg.zip);
   return { packageId: pkg.manifest.packageId, manifestSha256: attached.reference!.manifestSha256 };
 }

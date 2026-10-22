@@ -194,6 +194,13 @@ the application engine (1.3.0) then restores settings as `settings:<adapter>` op
 state, retry and recovery model, from a backup it finds by name and accepts only by hash, and writes
 `restoration.json`. See `docs/phase-6-application-backup-restore/architecture.md`.
 
+Phase 7 adds media preparation without touching installation: the local USB Preparation Assistant
+(`src/engine/media/scripts/WdbMediaAssistant.ps1`) reads the package's manifest, including its new
+package-scope `media` block (answer-file SHA-256, required edition and architecture, layout, pinned
+backup), and places and verifies `autounattend.xml`, `WindowsDeployment\` and the backup on an
+existing or newly created Windows USB. The website never accesses a disk and there is no local
+service. See `docs/phase-7-usb-media-preparation/architecture.md`.
+
 ## Extension points for later milestones
 
 - `profile.deferred.installPowerShell7` is recorded and round-tripped. Nothing reads it during

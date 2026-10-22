@@ -459,7 +459,7 @@ export function renderReview(): ReviewHandle {
       clear(steps);
       const engines = [p.windowsUpdate.enabled && 'Windows updates', result.assets.some((a) => a.group === 'applications') && 'the selected applications'].filter(Boolean);
       const stepList: [string, string][] = [
-        ['Download the deployment package', `Extract it to the root of your Windows 11 installation USB drive (${result.fileName} next to setup.exe).`],
+        ['Download the deployment package', `Extract it to the root of your Windows 11 installation USB drive (${result.fileName} next to setup.exe), or let the USB Preparation Assistant place and verify it (Deployment package › Prepare Installation USB).`],
         ['Boot from the installation media', 'Use Windows 11 installation media and start Setup.'],
         ['Choose the disk', 'Setup stops at disk selection: select, create and format the partition yourself.'],
         ...(engines.length ? [['After the first sign-in', `${engines.join(' and ')} install automatically. Logs and results are described in the README files under Deployment assets.`] as [string, string]] : []),

@@ -63,8 +63,17 @@ computers, including a second real generated package. **Not validated on real ha
 deferred all real installations until the roadmap is complete. Report:
 `phase-6-application-backup-restore/implementation-report.md`.
 
-The remaining roadmap: Phase 7 USB media preparation assistant (it should copy the settings backup
-to `WindowsDeployment\backups\<folder>` and check its manifest hash), Phase 8 hardware-aware
+## Phase 7: USB media preparation assistant (branch `feature/phase-7-usb-media-preparation`)
+
+A local PowerShell assistant that consumes the deployment package: updates an existing Windows USB
+without erasing it, or creates one from an official ISO on a positively identified, confirmed USB
+flash drive (FAT32 + NTFS for large drives, DISM split for images over 4 GB), checks edition,
+architecture and release freshness, copies and verifies the pinned Phase 6 backup, journals and
+repairs interrupted preparations and reports readiness (never "boot tested"). The ZIP manifest gains a
+`media` block; the answer file is unchanged. Tested with simulated disks and synthetic images only.
+Report: `phase-7-usb-media-preparation/implementation-report.md`.
+
+The remaining roadmap: Phase 8 hardware-aware
 drivers (it takes over the hardware-specific applications a migration review excludes), Phase 9
 deployment verification and health (it can read `attempts.jsonl`, `status.json` outcomes, report v2
 and `restoration.json`). The first real installation is one combined bare-metal test of all phases.
@@ -92,6 +101,9 @@ and `restoration.json`). The first real installation is one combined bare-metal 
 - Run the Phase 6 checklist (`phase-6-application-backup-restore/bare-metal-checklist.md`) as part of
   the combined test: a real inventory and backup of the owner's workstation, the migration profile,
   settings restored after installation, nothing secret restored, recovery with a supplied backup.
+- Run the Phase 7 physical USB checklist (`phase-7-usb-media-preparation/physical-usb-checklist.md`):
+  real disk listing, Create from an ISO on 16-32 GB and 64-128 GB sticks, an unplugged stick, Update
+  and replace, UEFI boot with Secure Boot, split-image installation.
 
 ## Next: manufacturer drivers
 

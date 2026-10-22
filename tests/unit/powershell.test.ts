@@ -144,6 +144,22 @@ describe.skipIf(!onWindows)('PowerShell (Windows only)', () => {
     expect(fromPs).toEqual(fromTs);
   }, 60_000);
 
+  it('USB Preparation Assistant scenarios pass against the real generated packages and simulated disks (Phase 7)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'wdm-fixture-'));
+    try {
+      writeDeploymentFixture(dir);
+      let out: string;
+      try {
+        out = await psAsync(['-File', script('../powershell/Media.Tests.ps1'), '-Fixture', dir]);
+      } catch (e) {
+        throw new Error(`Media.Tests.ps1 failed:\n${(e as { stdout?: string }).stdout ?? e}`);
+      }
+      expect(out).toMatch(/\b\d+ passed, 0 failed/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 300_000);
+
   it('Wi-Fi profile script scenarios pass against the generated Wifi.xml and script (Phase 4.3)', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'wdw-fixture-'));
     try {
