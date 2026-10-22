@@ -21,6 +21,10 @@
 
     It never launches or re-launches an engine. A stage whose task disappeared without a result is
     reported as Stalled and needs Resume-Deployment.ps1, so no stage can loop.
+
+    Phase 5: a damaged deployment.json is replaced by its last good copy; if neither is usable the
+    monitor stops (StateCorrupt) instead of acting on a guess, and the recovery tool rebuilds it.
+    status.json carries the machine-readable outcome (outcome, outcomeCode, outcomeDetail).
 #>
 [CmdletBinding()]
 param()
@@ -35,7 +39,17 @@ function Invoke-WddMonitor {
     $mutex = Enter-WddMutex 30
     if (-not $mutex) { Write-WddLog 'Monitor: another deployment process is running; skipping this run.'; return 'Busy' }
     try {
-        $state = Read-WddJson $Paths.State
+        $read = Read-WddDeploymentState $Paths
+        $state = $read.State
+        if ($read.Source -eq 'corrupt') {
+            $msg = "The deployment state is damaged and its backup is unusable ($($read.Problem)). The monitor stopped; nothing is run. Run DeploymentRecovery.ps1 -Action Resume to rebuild it."
+            Write-WddLog $msg 'ERROR'
+            $snap = [ordered]@{ updatedUtc = (Get-WddNow).ToString('o'); deploymentState = 'StateCorrupt'; overall = 'Failed'; message = $msg }
+            Set-WddSnapshotOutcome $snap $null $read.Problem
+            Write-WddJson $Paths.Status $snap
+            Write-WddEvent 3004 $msg 'Error'
+            return 'StateCorrupt'
+        }
         if (-not $state) { Write-WddLog 'Monitor: no deployment state; nothing to follow.' 'WARN'; return 'NoState' }
         if ($state.status -eq 'Completed') { Unregister-WddTask '\WindowsDeploymentBuilder\' 'Deployment'; return 'AlreadyCompleted' }
         if ($state.status -eq 'IntegrityFailed') { return 'IntegrityFailed' }
@@ -49,7 +63,9 @@ function Invoke-WddMonitor {
             Save-WddState $Paths $state
             Write-WddLog $state.message 'ERROR'
             foreach ($m in @($check.Missing) + @($check.Mismatched)) { Write-WddLog "  $m" 'ERROR' }
-            Write-WddJson $Paths.Status ([ordered]@{ packageId = $state.packageId; updatedUtc = (Get-WddNow).ToString('o'); deploymentState = 'IntegrityFailed'; overall = 'Failed'; message = $state.message })
+            $snap = [ordered]@{ packageId = $state.packageId; updatedUtc = (Get-WddNow).ToString('o'); deploymentState = 'IntegrityFailed'; overall = 'Failed'; message = $state.message }
+            Set-WddSnapshotOutcome $snap $state
+            Write-WddJson $Paths.Status $snap
             Write-WddEvent 3003 $state.message 'Error'
             return 'IntegrityFailed'
         }
@@ -89,6 +105,6 @@ if ($script:MonitorMain) {
     $manifest = Read-WddManifest (Join-Path $package 'deployment-manifest.json')
     $outcome = Invoke-WddMonitor (Get-WddPaths $manifest.dataRoot)
     Write-Output $outcome
-    if ($outcome -eq 'IntegrityFailed') { exit 1 }
+    if ($outcome -in 'IntegrityFailed', 'StateCorrupt') { exit 1 }
     exit 0
 }

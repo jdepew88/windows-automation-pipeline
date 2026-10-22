@@ -622,6 +622,7 @@ export function renderWizard(ctx: WizardContext): WizardHandle {
             ['Microsoft Store', a.store.length ? a.store.join(', ') : null],
             ['Added by dependency', a.dependencies.length ? a.dependencies.join(', ') : null],
             ['Your changes', `${a.added} added · ${a.unticked} unticked`],
+            ['If something fails', a.enabled ? a.recovery : null],
             ['Conflicts', a.conflicts.length ? h('span', { class: 'err-text' }, a.conflicts.join(' ')) : null],
           ], [], 'review-apps'),
           section('Deployment package', 'usb', { label: 'Advanced', run: () => ctx.openAdvanced('section-deployment') }, [

@@ -16,7 +16,7 @@ import { RESULTS_JSON_SCHEMA } from './results';
  * native WinGet package list, which the engine reads at run time.
  */
 
-export const APP_ENGINE_VERSION = '1.1.0';
+export const APP_ENGINE_VERSION = '1.2.0';
 export const APP_STAGING_DIR = 'C:\\Windows\\Setup\\Scripts\\Applications';
 export const APP_ROOT = `${DATA_ROOT}\\Applications`;
 export const APP_TASK_NAME = 'Applications';
@@ -33,6 +33,13 @@ export const APP_PLAN_FILE = 'applications-plan.txt';
 export const APP_RESULTS_SCHEMA_FILE = 'applications-results.schema.json';
 export const ORCHESTRATION_FILE = 'orchestration.json';
 export const APP_README_FILE = 'README-Applications.txt';
+
+/**
+ * Phase 5 retry timing (engine 1.2.0). Fixed, reviewed values rather than settings: the first retry
+ * waits a minute, each further one twice as long (plus or minus 20 %), never more than 15 minutes; a
+ * package whose source is unreachable is deferred at most six times. The engine clamps every value.
+ */
+export const RETRY_TIMING = { baseDelaySeconds: 60, maxDelaySeconds: 900, jitterRatio: 0.2, maxNetworkDeferrals: 6 } as const;
 
 /** Numeric limits, shared by validation and the UI. */
 export const APP_LIMITS = {
@@ -126,6 +133,8 @@ export interface ApplicationsConfig {
   waitForUpdatesHours: number;
   lockWaitMinutes: number;
   rebootWarningSeconds: number;
+  /** Engine 1.2.0 (Phase 5); configurations without it get the same values from the engine. */
+  retry: { automatic: boolean; continueAfterFailure: boolean; baseDelaySeconds: number; maxDelaySeconds: number; jitterRatio: number; maxNetworkDeferrals: number };
   packages: {
     key: string;
     packageIdentifier: string;
@@ -185,6 +194,7 @@ export function applicationsConfig(p: Profile, sel: SelectionResult = resolveSel
     waitForUpdatesHours: a.waitForUpdatesHours,
     lockWaitMinutes: 60,
     rebootWarningSeconds: a.rebootWarningSeconds,
+    retry: { automatic: a.recovery.automaticRetry, continueAfterFailure: a.recovery.continueAfterFailure, ...RETRY_TIMING },
     packages: installable(sel).map((x) => ({
       key: x.key,
       packageIdentifier: x.ref.packageIdentifier,
@@ -249,7 +259,8 @@ export function planPreview(p: Profile, sel: SelectionResult = resolveSelection(
     `Coordination:  ${a.coordination === 'updatesFirst' ? 'updates first' : a.coordination}${p.windowsUpdate.enabled ? ' - waits for the Windows Update stage to finish' : ' - Windows Update automation is off, so it does not wait'}`,
     `WinGet:        checked first; ${a.registerAppInstaller ? 'App Installer registration is attempted if needed' : 'no registration'}${a.onlineRepair ? ', then online repair (Microsoft.WinGet.Client)' : ''}`,
     `Restarts:      ${a.restartPolicy === 'whenRequired' ? `when a package requires one (at most ${a.maxReboots})` : 'never (packages that need one are reported RequiresRestart)'}`,
-    `Attempts:      ${a.maxAttemptsPerPackage} per package, ${a.packageTimeoutMinutes} min timeout each, ${a.maxRuntimeHours} h in total`,
+    `Attempts:      ${a.recovery.automaticRetry ? `up to ${a.maxAttemptsPerPackage} per package for temporary failures (waits ${RETRY_TIMING.baseDelaySeconds} s, then doubling, at most ${RETRY_TIMING.maxDelaySeconds / 60} min)` : '1 per package (automatic retry off; use the recovery tool)'}, ${a.packageTimeoutMinutes} min timeout each, ${a.maxRuntimeHours} h in total`,
+    `Failures:      permanent ones (hash, policy, not found, cancelled) are never retried automatically; ${a.recovery.continueAfterFailure ? 'other applications continue after a failure' : 'the queue stops after the first failure'}`,
     '',
     'For every package: "winget list" first (already installed = left unchanged), then:',
     '',
@@ -325,9 +336,13 @@ What happens
   engine only prepares (network, WinGet check, package availability). Installation starts after
   the Windows Update stage is final. Each package is checked with "winget list" first and
   installed with an explicit --id, --exact and --source, silently, while holding the shared
-  install lock, so Windows Update cannot restart the computer in the middle. Failures are retried
-  up to the attempt limit; packages that need a restart get one (policy) and are verified after
-  it. Packages marked as needing interaction are not attempted.
+  install lock, so Windows Update cannot restart the computer in the middle. Temporary failures
+  are retried up to the attempt limit with a growing wait (engine 1.2.0); permanent ones (hash
+  mismatch, policy, not found, cancelled) are not. If the network or a package source is lost, the
+  package waits for it instead of failing. Packages that need a restart get one (policy) and are
+  verified after it. Packages marked as needing interaction are not attempted. Every attempt is
+  recorded in logs\\attempts.jsonl; failed ones can be retried later with the deployment recovery
+  tool without repeating anything that succeeded.
   Portable tools (for example Rufus, Ventoy) are WinGet portable packages: WinGet downloads them
   from the publisher URL in the manifest, checks the SHA-256 and installs them machine-wide under
   %ProgramFiles%\\WinGet\\Packages; the engine then adds a Start menu shortcut under "Windows

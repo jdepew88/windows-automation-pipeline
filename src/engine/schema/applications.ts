@@ -107,6 +107,23 @@ export const ApplicationsSelectionSchema = z
   .strict();
 export type ApplicationsSelection = z.infer<typeof ApplicationsSelectionSchema>;
 
+/**
+ * Phase 5: reliability and recovery. Older profiles have no `recovery` block; the importer fills it
+ * from owner defaults (bounded automatic retry on, the recovery tool included), and the engine has
+ * the same defaults for configurations generated before engine 1.2.0.
+ */
+export const RecoverySchema = z
+  .object({
+    /** Retry transient failures automatically (bounded by maxAttemptsPerPackage, with backoff). */
+    automaticRetry: z.boolean(),
+    /** Keep installing independent applications after one fails. */
+    continueAfterFailure: z.boolean(),
+    /** Ship the technician recovery tool (DeploymentRecovery.ps1) and its desktop shortcut. */
+    includeRecoveryTool: z.boolean(),
+  })
+  .strict();
+export type Recovery = z.infer<typeof RecoverySchema>;
+
 export const ApplicationsSchema = z
   .object({
     enabled: z.boolean(),
@@ -123,6 +140,7 @@ export const ApplicationsSchema = z
     maxRuntimeHours: z.number().int(),
     waitForUpdatesHours: z.number().int(),
     rebootWarningSeconds: z.number().int(),
+    recovery: RecoverySchema,
   })
   .strict();
 export type Applications = z.infer<typeof ApplicationsSchema>;

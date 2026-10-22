@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { generate } from '../../src/engine/pipeline';
+import { resolveIdentity } from '../../src/engine/naming';
 import { exportProfile, ownerDefaults } from '../../src/engine/profiles';
 import { buildDeploymentPackage, buildManifest, updatePolicyPlan } from '../../src/engine/deployment';
 import { ongoingPolicyDeferred } from '../../src/engine/windows-update';
@@ -110,8 +111,25 @@ describe('shared configuration (wizard helpers edit the one profile)', () => {
 });
 
 describe('wizard steps and validation', () => {
+  it('new deployments start with the local username "owner"; name and computer name stay independent', () => {
+    const p = ownerDefaults();
+    expect(usernameInput(p)).toBe('owner');
+    expect(resolveIdentity(p.accounts).username).toBe('owner');
+    expect(computerNameInput(p)).toBe('owner-Computer');
+    expect(stepStatus(p, generate(p).issues, 'identity')).toBe('complete');
+    expect(blockingStep(p, generate(p).issues, 'review')).toBeNull();
+    // A typed computer name is kept when the username changes, and vice versa.
+    setComputerNameInput(p, 'SHOP-PC01');
+    setUsernameInput(p, 'Sam');
+    expect(computerNameInput(p)).toBe('SHOP-PC01');
+    expect(usernameInput(p)).toBe('Sam');
+    setComputerNameInput(p, 'SHOP-PC02');
+    expect(usernameInput(p)).toBe('Sam');
+  });
+
   it('a missing username blocks every step after the first; defaults are not "incomplete"', () => {
     const p = ownerDefaults();
+    setUsernameInput(p, '');
     const r = generate(p);
     expect(stepStatus(p, r.issues, 'identity')).toBe('incomplete');
     expect(blockingStep(p, r.issues, 'apps')).toBe('identity');

@@ -30,6 +30,7 @@ function Format-WddStatus {
     $l.Add('================================================')
     $overall = if ($State -and $State.status -eq 'Completed') { "Finished: $($State.overall)" } elseif ($State) { $State.status } else { 'Not started' }
     $l.Add("Deployment     : $overall")
+    $l.Add("Outcome        : $($s.outcome) (code $($s.outcomeCode)) $($s.outcomeDetail)")
     if ($State -and $State.message) { $l.Add("                 $($State.message)") }
     if ($State) { $l.Add("Started (UTC)  : $($State.initializedUtc)   deadline: $($State.deadlineUtc)") }
     $l.Add("Current stage  : $(if ($s.currentStage) { $s.currentStage } else { '-' })")
@@ -43,6 +44,8 @@ function Format-WddStatus {
             if ($null -ne $st.total -and [int] $st.total -gt 0) { $l.Add("  applications: $($st.done) of $($st.total) done, $([int] $st.total - [int] $st.done) remaining") }
         }
         if ($st.reboots) { $l.Add("  restarts so far: $($st.reboots)") }
+        if ($st.idle) { $l.Add("  note: $($st.idle)") }
+        if ($st.outstanding) { $l.Add("  outstanding operations: $($st.outstanding) (retry them with the deployment recovery tool)") }
     }
     $l.Add(('{0,-22} {1,-12} {2,-22} {3}' -f 'Manufacturer drivers', 'NotImplemented', '', 'Not part of this version'))
     $l.Add('')
@@ -63,7 +66,7 @@ if ($script:ShowMain) {
     $manifest = Read-WddManifest (Join-Path $package 'deployment-manifest.json')
     $paths = Get-WddPaths $manifest.dataRoot
     do {
-        $state = Read-WddJson $paths.State
+        $state = (Read-WddDeploymentState $paths).State
         $out = Format-WddStatus $manifest $paths $state
         if ($script:ShowArgs.Watch) { Clear-Host }
         Write-Output $out.Text

@@ -37,6 +37,10 @@ Unit test coverage by acceptance criterion:
   - busy installer, already finished, pending restart, corrupt state;
   - single instance (mutex across processes), log content, config defaults.
 
+- **Phase 5 (resilient provisioning, resume and retry)**: `recovery.test.ts`, the Phase 5 scenarios
+  in `Applications.Tests.ps1` (fault injection on the engine) and `Deployment.Tests.ps1` (the full
+  lifecycle: real package, real engine, monitor and recovery tool), and the Reliability & recovery
+  browser test; see [phase-5-resilient-provisioning/testing.md](phase-5-resilient-provisioning/testing.md).
 - **Phase 4.3 (Quick Deployment, update policy timing, Wi-Fi provisioning, catalog layouts)**:
   `quick.test.ts`, `quick.spec.ts`, the new `Deployment.Tests.ps1` scenarios and `Wifi.Tests.ps1`
   (also run by `npm run test:ps`); see

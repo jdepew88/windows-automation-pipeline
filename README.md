@@ -1,4 +1,4 @@
-# Windows Deployment Builder (Milestone 1 + Phase 2 Windows Update + Phase 3 WinGet provisioning + Phase 4 USB deployment + Phase 4.2 application profiles + Phase 4.3 Quick Deployment)
+# Windows Deployment Builder (Milestone 1 + Phase 2 Windows Update + Phase 3 WinGet provisioning + Phase 4 USB deployment + Phase 4.2 application profiles + Phase 4.3 Quick Deployment + Phase 5 resilient provisioning)
 
 A local, offline, browser-based generator for **Windows 11 Pro `autounattend.xml`** answer files,
 written entirely in TypeScript. It is built on the option model and XML patterns of
@@ -56,6 +56,24 @@ In Advanced Configuration:
 5. Use **Export profile** / **Import profile** (JSON) to save and reuse settings. Passwords are left
    out of exports unless you tick "include passwords". **Reset to owner defaults** restores every
    decision.
+
+## When something goes wrong (Phase 5)
+
+Progress is saved after every step on the installed computer, so restarts, power loss and lost
+connections never repeat finished work, and the deployment never reports success just because its
+scripts ran. Temporary application failures are retried automatically (3 attempts by default, with
+a growing wait; a lost connection pauses instead of failing); permanent ones (hash mismatch, policy,
+not found, cancelled) are not. What still fails is listed in the report, and a technician can retry
+it later with **Deployment recovery** on the desktop, without reinstalling Windows and without
+repeating anything that succeeded:
+
+```
+DeploymentRecovery.ps1 -Action Status | PendingActions | RetryFailed | Retry -Operation <id> | Resume | ExportDiagnostics
+```
+
+Settings: Advanced Configuration › Applications › Reliability & recovery. Details:
+[docs/phase-5-resilient-provisioning/recovery.md](docs/phase-5-resilient-provisioning/recovery.md).
+New deployments start with the local username `owner` (Quick Deployment and Advanced).
 
 ## Owner defaults (highlights)
 
@@ -180,6 +198,12 @@ from code).
 - [docs/phase-4-3-quick-deployment-wizard/windows-update.md](docs/phase-4-3-quick-deployment-wizard/windows-update.md): initial updates vs the ongoing policy, ordering, outcomes
 - [docs/phase-4-3-quick-deployment-wizard/catalog-and-icons.md](docs/phase-4-3-quick-deployment-wizard/catalog-and-icons.md): the four catalog layouts and logo sources
 - [docs/phase-4-3-quick-deployment-wizard/testing.md](docs/phase-4-3-quick-deployment-wizard/testing.md) and [implementation-report.md](docs/phase-4-3-quick-deployment-wizard/implementation-report.md)
+- [docs/phase-5-resilient-provisioning/audit.md](docs/phase-5-resilient-provisioning/audit.md): what already existed, what was incomplete, what Phase 5 changed
+- [docs/phase-5-resilient-provisioning/architecture.md](docs/phase-5-resilient-provisioning/architecture.md): state model, operation lifecycle, retry policy, failure classes, network and reboot recovery, outcomes and exit codes, compatibility
+- [docs/phase-5-resilient-provisioning/recovery.md](docs/phase-5-resilient-provisioning/recovery.md): automatic retry vs manual recovery, technician commands, a worked 20-application example
+- [docs/phase-5-resilient-provisioning/security.md](docs/phase-5-resilient-provisioning/security.md): security controls of retry and recovery
+- [docs/phase-5-resilient-provisioning/bare-metal-checklist.md](docs/phase-5-resilient-provisioning/bare-metal-checklist.md): the first real installation, step by step
+- [docs/phase-5-resilient-provisioning/testing.md](docs/phase-5-resilient-provisioning/testing.md) and [implementation-report.md](docs/phase-5-resilient-provisioning/implementation-report.md)
 
 ## Not yet implemented
 

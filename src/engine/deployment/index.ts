@@ -7,6 +7,7 @@ import resumeSource from './scripts/Resume-Deployment.ps1?raw';
 import completeSource from './scripts/Complete-Deployment.ps1?raw';
 import setupSource from './scripts/setup.ps1?raw';
 import policySource from './scripts/Set-UpdatePolicy.ps1?raw';
+import recoverySource from './scripts/DeploymentRecovery.ps1?raw';
 import type { GenContext } from '../context';
 import type { GenerateResult } from '../pipeline';
 import type { Profile } from '../schema/profile';
@@ -15,7 +16,7 @@ import { resolveIdentity } from '../naming';
 import { exportProfile, hasSecrets } from '../profiles';
 import { orchestrationAsset } from '../orchestration';
 import { DATA_ROOT, EMBEDDED_UPDATE_FILES, ENGINE_VERSION, POLICY_RESULT_FILE, TASK_NAME, TASK_PATH, ongoingPolicyDeferred, resolveDrivers, updateEngineAssets } from '../windows-update';
-import { APP_ENGINE_VERSION, APP_PROFILE_FILE, APP_TASK_NAME, EMBEDDED_APP_FILES, applicationAssets, applicationsActive } from '../applications';
+import { APP_ENGINE_VERSION, APP_PROFILE_FILE, APP_TASK_NAME, EMBEDDED_APP_FILES, RETRY_TIMING, applicationAssets, applicationsActive } from '../applications';
 import { allProfiles, effectiveDevices, resolveSelection } from '../applications/selection';
 import { DRIVER_STAGE } from '../drivers/contract';
 import { isEffective, PHASES } from '../../features/scripts';
@@ -32,7 +33,7 @@ import { createZip } from './zip';
  * verification, manual runs on other installations (setup.cmd) and recovery.
  */
 
-export const DEPLOYMENT_VERSION = '1.0.0';
+export const DEPLOYMENT_VERSION = '1.1.0';
 export const PACKAGE_DIR = 'WindowsDeployment';
 export const PACKAGE_FILE_NAME = 'windows-deployment-package.zip';
 export const MANIFEST_FILE = 'deployment-manifest.json';
@@ -49,6 +50,27 @@ export const DEPLOYMENT_REPORT = `${DATA_ROOT}\\reports\\deployment-report.txt`;
 export const INITIALIZE_SCRIPT = 'scripts/bootstrap/Initialize-Deployment.ps1';
 export const RESUME_SCRIPT = 'scripts/orchestrator/Resume-Deployment.ps1';
 export const STATUS_SCRIPT = 'scripts/orchestrator/Show-DeploymentStatus.ps1';
+/** Phase 5: the technician recovery tool (status, retry, resume, diagnostics). */
+export const RECOVERY_SCRIPT = 'scripts/recovery/DeploymentRecovery.ps1';
+export const RECOVERY_TOOL = `${PACKAGE_ROOT}\\scripts\\recovery\\DeploymentRecovery.ps1`;
+/** Machine-readable outcomes (status.json, the report and the recovery tool's exit code). */
+export const OUTCOME_CODES = {
+  Succeeded: 0,
+  CompletedWithWarnings: 10,
+  CompletedWithFailures: 20,
+  Incomplete: 25,
+  PausedAwaitingNetwork: 30,
+  PausedAwaitingReboot: 31,
+  PausedAwaitingUser: 32,
+  InProgress: 40,
+  FailedToInitialize: 50,
+  Failed: 60,
+} as const;
+/** State and result schema versions written by this package (each engine reads older ones). */
+export const STATE_SCHEMAS = { deploymentState: 2, applicationState: 2, applicationResult: 2, deploymentReport: 2 } as const;
+
+/** True when the package carries the recovery tool. */
+export const recoveryToolIncluded = (p: Profile) => p.applications.recovery.includeRecoveryTool;
 
 /** Orchestrator limits (in addition to each engine's own limits, which are unchanged). */
 export const ORCHESTRATOR_LIMITS = { launchAttempts: 2, stalledAfterMinutes: 120, monitorIntervalMinutes: 15, graceHours: 24 } as const;
@@ -111,6 +133,9 @@ export function packageFiles(p: Profile): PackageFile[] {
   ];
   if (updatePolicyPlan(p)) {
     files.push({ path: POLICY_SCRIPT, content: crlf(policySource), role: 'orchestrator', description: 'Applies the ongoing Windows Update policy once the initial update stage is final', embedded: embeddedDeploymentPath(POLICY_SCRIPT) });
+  }
+  if (recoveryToolIncluded(p)) {
+    files.push({ path: RECOVERY_SCRIPT, content: crlf(recoverySource), role: 'orchestrator', description: 'Technician recovery: status, retry failed applications, resume, pending actions, diagnostics ZIP', embedded: embeddedDeploymentPath(RECOVERY_SCRIPT) });
   }
   for (const a of updateEngineAssets(p)) {
     files.push({
@@ -297,6 +322,19 @@ export function buildManifest(p: Profile) {
     },
     // Phase 4.3: only when the policy is deferred, so other manifests keep their Phase 4 shape.
     ...(updatePolicyPlan(p) ? { updatePolicy: updatePolicyPlan(p) } : {}),
+    // Phase 5: resilience and technician recovery.
+    recovery: {
+      tool: recoveryToolIncluded(p) ? RECOVERY_SCRIPT : null,
+      shortcut: recoveryToolIncluded(p) ? 'Deployment recovery (public desktop)' : null,
+      automaticRetry: a.recovery.automaticRetry,
+      maxAttemptsPerPackage: a.recovery.automaticRetry ? a.maxAttemptsPerPackage : 1,
+      continueAfterFailure: a.recovery.continueAfterFailure,
+      retryTiming: RETRY_TIMING,
+      neverRetriedAutomatically: ['Permanent', 'Integrity', 'Policy', 'User', 'Manual'],
+      stateSchemas: STATE_SCHEMAS,
+      outcomeCodes: OUTCOME_CODES,
+      actions: recoveryToolIncluded(p) ? ['Status', 'PendingActions', 'RetryFailed', 'Retry', 'Resume', 'ExportDiagnostics'] : [],
+    },
     restartPolicy: {
       windowsUpdate: { maxReboots: wu.maxReboots, rebootWarningSeconds: wu.rebootWarningSeconds },
       applications: { restartPolicy: a.restartPolicy, maxReboots: a.maxReboots, rebootWarningSeconds: a.rebootWarningSeconds },
@@ -314,7 +352,7 @@ export function buildManifest(p: Profile) {
     },
     drivers: { implemented: false, preferences: { mode: 'notConfigured' }, note: 'Reserved for a later phase (vendor packages matched by hardware ID).' },
     customScripts: { managedBy: 'answer file', ...Object.fromEntries(PHASES.map((ph) => [ph.phase, p.scripts[ph.phase].filter(isEffective).length])) },
-    paths: { package: PACKAGE_ROOT, state: DEPLOYMENT_STATE, status: DEPLOYMENT_STATUS, marker: DEPLOYMENT_MARKER, report: DEPLOYMENT_REPORT, monitorTask: `${MONITOR_TASK.path}${MONITOR_TASK.name}` },
+    paths: { package: PACKAGE_ROOT, state: DEPLOYMENT_STATE, status: DEPLOYMENT_STATUS, marker: DEPLOYMENT_MARKER, report: DEPLOYMENT_REPORT, monitorTask: `${MONITOR_TASK.path}${MONITOR_TASK.name}`, recoveryTool: recoveryToolIncluded(p) ? RECOVERY_TOOL : null },
     files: entries,
   };
   const runtime = { ...manifest, scope: 'answerFile' as const, files: entries.filter((e) => e.embedded) };
@@ -405,6 +443,28 @@ function stageLines(p: Profile): string {
   ].join('\n');
 }
 
+/** Phase 5: automatic retry vs manual recovery, in the package's own words. */
+function recoveryText(p: Profile): string {
+  const a = p.applications;
+  const auto = a.recovery.automaticRetry
+    ? `Automatic retry: temporary failures (download, network, timeout, installer busy) are retried up to
+${a.maxAttemptsPerPackage} times per application, waiting ${RETRY_TIMING.baseDelaySeconds} s, then twice as long each time (at most ${RETRY_TIMING.maxDelaySeconds / 60} min).
+A lost connection does not count: the application waits for the network. Hash mismatches, policy
+blocks, missing packages and cancelled installers are never retried automatically.`
+    : 'Automatic retry is off: each application is attempted once; failures wait for the recovery tool.';
+  const tool = recoveryToolIncluded(p)
+    ? `Manual recovery (technician, after fixing the cause; Windows is not reinstalled): "Deployment
+recovery" on the desktop, or as administrator
+  powershell.exe -ExecutionPolicy Bypass -File "${RECOVERY_TOOL}" -Action <action>
+  Status | PendingActions | RetryFailed | Retry -Operation <id> | Resume | ExportDiagnostics
+Successful applications are never installed again; history is kept.`
+    : 'The recovery tool is not included in this package (Reliability & recovery setting).';
+  return `
+${auto}
+${tool}
+`;
+}
+
 function readme(p: Profile): string {
   return `Windows Deployment Builder - deployment package ${DEPLOYMENT_VERSION}
 ==================================================
@@ -432,7 +492,7 @@ formats or selects a disk; you choose where Windows is installed.
 
 Progress on the installed computer: "Deployment progress" on the desktop, or
   C:\\ProgramData\\WindowsDeploymentBuilder\\Deployment\\status.json
-
+${recoveryText(p)}
 Status: generated and tested with simulations only. Validate in a virtual machine or on a spare
 computer before relying on it.
 `;
@@ -484,7 +544,7 @@ Recovery: see the report, or run (elevated)
   powershell.exe -ExecutionPolicy Bypass -File "C:\\ProgramData\\WindowsDeploymentBuilder\\Package\\scripts\\orchestrator\\Resume-Deployment.ps1"
   ... -Status                 shows progress
   ... -RestartStage <stage>   starts windowsUpdate or applications again
-
+${recoveryText(p)}
 Remove the USB drive, or at least ${p.output.answerFileName}, after installing: another computer
 booted from it would be installed with the same settings, and the file may contain passwords.
 `;

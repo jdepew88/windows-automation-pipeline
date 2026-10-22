@@ -41,7 +41,9 @@ function Invoke-WddResume {
     $mutex = Enter-WddMutex 60
     if (-not $mutex) { return 'Busy' }
     try {
-        $state = Read-WddJson $Paths.State
+        $read = Read-WddDeploymentState $Paths
+        if ($read.Source -eq 'corrupt') { Write-WddLog "Resume: the deployment state is damaged ($($read.Problem)). Use DeploymentRecovery.ps1 -Action Resume, which rebuilds it." 'ERROR'; return 'StateCorrupt' }
+        $state = $read.State
         if (-not $state) { Write-WddLog 'Resume: no deployment state. Start a deployment with setup.ps1 or Initialize-Deployment.ps1.' 'ERROR'; return 'NoState' }
         $manifestPath = Join-Path $Paths.Package 'deployment-manifest.json'
         $manifest = Read-WddManifest $manifestPath
@@ -77,7 +79,7 @@ if ($script:ResumeMain) {
     $package = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
     $manifest = Read-WddManifest (Join-Path $package 'deployment-manifest.json')
     $paths = Get-WddPaths $manifest.dataRoot
-    if ($script:ResumeArgs.Status) { (Format-WddStatus $manifest $paths (Read-WddJson $paths.State)).Text; exit 0 }
+    if ($script:ResumeArgs.Status) { (Format-WddStatus $manifest $paths (Read-WddDeploymentState $paths).State).Text; exit 0 }
     $outcome = Invoke-WddResume $paths $script:ResumeArgs.RestartStage
     Write-Output "Resume: $outcome. Log: $($paths.Log)"
     if ($outcome -eq 'Resumed') { exit 0 }

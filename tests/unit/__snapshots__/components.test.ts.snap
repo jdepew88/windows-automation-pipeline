@@ -1661,22 +1661,40 @@ exit 1
     Final states (result.json): Succeeded, CompletedWithFollowUp, CompletedWithFailures, Failed,
     Offline. The marker &lt;dataRoot&gt;\\state\\applications.done is written for the first three.
 
+    Resilience (engine 1.2.0, Phase 5): every failure is classified (Transient, Network, Timeout,
+    Resource, Unknown are retried; Permanent, Integrity, Policy, User are not), retries wait with
+    bounded exponential backoff and jitter, a network-class failure is checked against the network
+    and the package source before it counts (lost connectivity defers the package instead of
+    failing it), every attempt is recorded (state history and logs\\attempts.jsonl), and the state
+    file is replaced atomically with a backup of the last good copy. The status values above are
+    unchanged; the lifecycle (Pending, Running, Succeeded, AlreadySatisfied, FailedRetryable,
+    FailedPermanent, WaitingForNetwork, WaitingForReboot, ManualActionRequired, SkippedByUser,
+    BlockedByDependency) is derived from them (Get-WdaLifecycle).
+
     Modes:
       Run   (default) Full engine.
       Plan  Read-only dry run: WinGet check, installed/available state and the exact command for
             every package. Installs nothing, writes nothing, needs no elevation.
+      Retry Technician recovery (called by DeploymentRecovery.ps1): reopens failed or unfinished
+            operations of this deployment for another run. Installs nothing itself.
 #&gt;
 [CmdletBinding()]
 param(
-    [ValidateSet('Run', 'Plan')]
+    [ValidateSet('Run', 'Plan', 'Retry')]
     [string] $Mode = 'Run',
-    [string] $ConfigPath = ''
+    [string] $ConfigPath = '',
+    # Retry mode only: operation ids ("app:winget:git.git", "additional:&lt;id&gt;") or -AllFailed / -PendingOnly.
+    [string[]] $Operation = @(),
+    [switch] $AllFailed,
+    [switch] $PendingOnly,
+    [switch] $IncludePermanent
 )
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-$script:EngineVersion = '1.1.0'
+$script:EngineVersion = '1.2.0'
+$script:StateVersion = 2
 $script:EventSource = 'WindowsDeploymentBuilder'
 $script:LogFile = $null
 $script:StatusFile = $null
@@ -1691,40 +1709,43 @@ $script:PortableExe = '^[A-Za-z0-9][A-Za-z0-9._+*-]{0,79}\\.exe$'
 $script:ShortcutName = '^[A-Za-z0-9][A-Za-z0-9 ._()+-]{0,59}$'
 $script:CatalogKey = '^catalog:[a-z0-9][a-z0-9-]{0,47}$'
 
-# WinGet HRESULTs (AppInstallerErrors.h) -&gt; Status, Retry, Restart (none|later|now|initiated), Text
+# WinGet HRESULTs (AppInstallerErrors.h) -&gt; Status, Retry, Restart (none|later|now|initiated), Text, Class.
+# Class (Phase 5): Success, Restart, Network, Transient, Resource (retried automatically while the
+# budget lasts, Resource only where Retry is true), Permanent, Integrity, Policy, User (never retried
+# automatically; Integrity and Policy failures are never weakened by a retry).
 $script:ExitCodes = @{
-    '0x00000000' = @('Succeeded', $false, 'none', 'Installed.')
-    '0x8A150061' = @('AlreadyInstalled', $false, 'none', 'Already installed (PACKAGE_ALREADY_INSTALLED).')
-    '0x8A15010D' = @('AlreadyInstalled', $false, 'none', 'Already installed (INSTALL_ALREADY_INSTALLED).')
-    '0x8A15002B' = @('AlreadyInstalled', $false, 'none', 'Installed; no applicable upgrade (UPDATE_NOT_APPLICABLE).')
-    '0x8A15010E' = @('AlreadyInstalled', $false, 'none', 'A newer version is already installed (INSTALL_DOWNGRADE).')
-    '0x8A150109' = @('RequiresRestart', $false, 'later', 'Installed; a restart is required to finish (INSTALL_REBOOT_REQUIRED_TO_FINISH).')
-    '0x8A15010A' = @('RequiresRestart', $true, 'now', 'A restart is required before it can install (INSTALL_REBOOT_REQUIRED_FOR_INSTALL).')
-    '0x8A15010B' = @('RequiresRestart', $false, 'initiated', 'The installer started a restart (INSTALL_REBOOT_INITIATED).')
-    '0x00000BC2' = @('RequiresRestart', $false, 'later', 'Installed; a restart is required to finish (3010).')
-    '0x00000669' = @('RequiresRestart', $false, 'initiated', 'The installer started a restart (1641).')
-    '0x8A150014' = @('Unavailable', $false, 'none', 'No package with this identifier in the source (NO_APPLICATIONS_FOUND).')
-    '0x8A150113' = @('Unavailable', $false, 'none', 'The package does not support this system (INSTALL_SYSTEM_NOT_SUPPORTED).')
-    '0x8A150016' = @('Failed', $false, 'none', 'More than one package matched (MULTIPLE_APPLICATIONS_FOUND).')
-    '0x8A15010C' = @('RequiresInteraction', $false, 'none', 'The installer was cancelled or needs a person (INSTALL_CANCELLED_BY_USER).')
-    '0x8A150011' = @('Failed', $false, 'none', 'Installer hash mismatch; not installed for safety (INSTALLER_HASH_MISMATCH).')
-    '0x8A15003A' = @('Failed', $false, 'none', 'Blocked by policy (BLOCKED_BY_POLICY).')
-    '0x8A15010F' = @('Failed', $false, 'none', 'Blocked by policy (INSTALL_BLOCKED_BY_POLICY).')
-    '0x8A15001B' = @('Failed', $false, 'none', 'Microsoft Store blocked by policy (MSSTORE_BLOCKED_BY_POLICY).')
-    '0x8A15001C' = @('Failed', $false, 'none', 'App blocked by Store policy (MSSTORE_APP_BLOCKED_BY_POLICY).')
-    '0x8A150041' = @('Failed', $false, 'none', 'Package agreements not accepted (PACKAGE_AGREEMENTS_NOT_ACCEPTED).')
-    '0x8A150046' = @('Failed', $false, 'none', 'Source agreements not accepted (SOURCE_AGREEMENTS_NOT_ACCEPTED).')
-    '0x8A150105' = @('Failed', $false, 'none', 'Not enough disk space (INSTALL_DISK_FULL).')
-    '0x8A150107' = @('Failed', $true, 'none', 'No network (INSTALL_NO_NETWORK).')
-    '0x8A150008' = @('Failed', $true, 'none', 'Download failed (DOWNLOAD_FAILED).')
-    '0x8A150045' = @('Failed', $true, 'none', 'The source could not be opened (SOURCE_OPEN_FAILED).')
-    '0x8A150101' = @('Failed', $true, 'none', 'The application is in use (INSTALL_PACKAGE_IN_USE).')
-    '0x8A150102' = @('Failed', $true, 'none', 'Another installation is in progress (INSTALL_INSTALL_IN_PROGRESS).')
-    '0x8A150103' = @('Failed', $true, 'none', 'A file is in use (INSTALL_FILE_IN_USE).')
-    '0x8A150111' = @('Failed', $true, 'none', 'The application is in use (INSTALL_PACKAGE_IN_USE_BY_APPLICATION).')
-    '0x8A150104' = @('Failed', $true, 'none', 'A dependency is missing (INSTALL_MISSING_DEPENDENCY).')
-    '0x8A150110' = @('Failed', $true, 'none', 'Dependencies could not be installed (INSTALL_DEPENDENCIES).')
-    '0x8A150106' = @('Failed', $true, 'none', 'Not enough memory (INSTALL_INSUFFICIENT_MEMORY).')
+    '0x00000000' = @('Succeeded', $false, 'none', 'Installed.', 'Success')
+    '0x8A150061' = @('AlreadyInstalled', $false, 'none', 'Already installed (PACKAGE_ALREADY_INSTALLED).', 'Success')
+    '0x8A15010D' = @('AlreadyInstalled', $false, 'none', 'Already installed (INSTALL_ALREADY_INSTALLED).', 'Success')
+    '0x8A15002B' = @('AlreadyInstalled', $false, 'none', 'Installed; no applicable upgrade (UPDATE_NOT_APPLICABLE).', 'Success')
+    '0x8A15010E' = @('AlreadyInstalled', $false, 'none', 'A newer version is already installed (INSTALL_DOWNGRADE).', 'Success')
+    '0x8A150109' = @('RequiresRestart', $false, 'later', 'Installed; a restart is required to finish (INSTALL_REBOOT_REQUIRED_TO_FINISH).', 'Restart')
+    '0x8A15010A' = @('RequiresRestart', $true, 'now', 'A restart is required before it can install (INSTALL_REBOOT_REQUIRED_FOR_INSTALL).', 'Restart')
+    '0x8A15010B' = @('RequiresRestart', $false, 'initiated', 'The installer started a restart (INSTALL_REBOOT_INITIATED).', 'Restart')
+    '0x00000BC2' = @('RequiresRestart', $false, 'later', 'Installed; a restart is required to finish (3010).', 'Restart')
+    '0x00000669' = @('RequiresRestart', $false, 'initiated', 'The installer started a restart (1641).', 'Restart')
+    '0x8A150014' = @('Unavailable', $false, 'none', 'No package with this identifier in the source (NO_APPLICATIONS_FOUND).', 'Permanent')
+    '0x8A150113' = @('Unavailable', $false, 'none', 'The package does not support this system (INSTALL_SYSTEM_NOT_SUPPORTED).', 'Permanent')
+    '0x8A150016' = @('Failed', $false, 'none', 'More than one package matched (MULTIPLE_APPLICATIONS_FOUND).', 'Permanent')
+    '0x8A15010C' = @('RequiresInteraction', $false, 'none', 'The installer was cancelled or needs a person (INSTALL_CANCELLED_BY_USER).', 'User')
+    '0x8A150011' = @('Failed', $false, 'none', 'Installer hash mismatch; not installed for safety (INSTALLER_HASH_MISMATCH).', 'Integrity')
+    '0x8A15003A' = @('Failed', $false, 'none', 'Blocked by policy (BLOCKED_BY_POLICY).', 'Policy')
+    '0x8A15010F' = @('Failed', $false, 'none', 'Blocked by policy (INSTALL_BLOCKED_BY_POLICY).', 'Policy')
+    '0x8A15001B' = @('Failed', $false, 'none', 'Microsoft Store blocked by policy (MSSTORE_BLOCKED_BY_POLICY).', 'Policy')
+    '0x8A15001C' = @('Failed', $false, 'none', 'App blocked by Store policy (MSSTORE_APP_BLOCKED_BY_POLICY).', 'Policy')
+    '0x8A150041' = @('Failed', $false, 'none', 'Package agreements not accepted (PACKAGE_AGREEMENTS_NOT_ACCEPTED).', 'Permanent')
+    '0x8A150046' = @('Failed', $false, 'none', 'Source agreements not accepted (SOURCE_AGREEMENTS_NOT_ACCEPTED).', 'Permanent')
+    '0x8A150105' = @('Failed', $false, 'none', 'Not enough disk space (INSTALL_DISK_FULL).', 'Resource')
+    '0x8A150107' = @('Failed', $true, 'none', 'No network (INSTALL_NO_NETWORK).', 'Network')
+    '0x8A150008' = @('Failed', $true, 'none', 'Download failed (DOWNLOAD_FAILED).', 'Network')
+    '0x8A150045' = @('Failed', $true, 'none', 'The source could not be opened (SOURCE_OPEN_FAILED).', 'Network')
+    '0x8A150101' = @('Failed', $true, 'none', 'The application is in use (INSTALL_PACKAGE_IN_USE).', 'Transient')
+    '0x8A150102' = @('Failed', $true, 'none', 'Another installation is in progress (INSTALL_INSTALL_IN_PROGRESS).', 'Transient')
+    '0x8A150103' = @('Failed', $true, 'none', 'A file is in use (INSTALL_FILE_IN_USE).', 'Transient')
+    '0x8A150111' = @('Failed', $true, 'none', 'The application is in use (INSTALL_PACKAGE_IN_USE_BY_APPLICATION).', 'Transient')
+    '0x8A150104' = @('Failed', $true, 'none', 'A dependency is missing (INSTALL_MISSING_DEPENDENCY).', 'Transient')
+    '0x8A150110' = @('Failed', $true, 'none', 'Dependencies could not be installed (INSTALL_DEPENDENCIES).', 'Transient')
+    '0x8A150106' = @('Failed', $true, 'none', 'Not enough memory (INSTALL_INSUFFICIENT_MEMORY).', 'Resource')
 }
 
 $script:Terminal = @('Succeeded', 'AlreadyInstalled', 'Skipped', 'SkippedByUser', 'RequiresInteraction', 'Failed', 'Unavailable')
@@ -1768,18 +1789,35 @@ function ConvertTo-WdaHashtable {
     return $InputObject
 }
 
+&lt;#
+    Atomic write: the JSON goes to &lt;Path&gt;.tmp (written through to disk), then replaces &lt;Path&gt; in one
+    file-system operation. -Backup keeps the replaced file as &lt;Path&gt;.bak (the last good copy), so a
+    power loss can leave the old file, the new file or both, never a half-written one.
+#&gt;
 function Write-WdaJson {
-    param([string] $Path, $Value)
-    $json = $Value | ConvertTo-Json -Depth 10
+    param([string] $Path, $Value, [switch] $Backup)
+    $json = $Value | ConvertTo-Json -Depth 12
     $tmp = "$Path.tmp"
-    [System.IO.File]::WriteAllText($tmp, $json, (New-Object System.Text.UTF8Encoding($false)))
+    $bytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes($json)
+    $fs = New-Object System.IO.FileStream($tmp, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None, 4096, [System.IO.FileOptions]::WriteThrough)
+    try { $fs.Write($bytes, 0, $bytes.Length); $fs.Flush($true) } finally { $fs.Dispose() }
+    if (Test-Path -LiteralPath $Path) {
+        try {
+            [System.IO.File]::Replace($tmp, $Path, $(if ($Backup) { "$Path.bak" } else { $null }))
+            return
+        } catch {
+            # Replace is unavailable on some file systems; fall back to copy-aside and move.
+            if ($Backup) { Copy-Item -LiteralPath $Path -Destination "$Path.bak" -Force }
+        }
+    }
     Move-Item -LiteralPath $tmp -Destination $Path -Force
 }
 
 function Read-WdaJson {
     param([string] $Path)
     if (-not (Test-Path -LiteralPath $Path)) { return $null }
-    ConvertTo-WdaHashtable (Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json)
+    # UTF-8 explicitly: Get-Content would read a BOM-less file in the ANSI code page in PowerShell 5.1.
+    ConvertTo-WdaHashtable ([System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::UTF8) | ConvertFrom-Json)
 }
 
 # ------------------------------------------------------------------------------------------------
@@ -1899,7 +1937,7 @@ function Write-WdaEvent {
 
 function New-WdaState {
     @{
-        version          = 1
+        version          = $script:StateVersion
         firstStartUtc    = $null
         installStartUtc  = $null
         starts           = 0
@@ -1913,26 +1951,90 @@ function New-WdaState {
         packages         = @{}
         additional       = @{}
         final            = $null
+        # Phase 5: technician recoveries (Retry mode) and where this state came from.
+        recoveries       = @()
+        recoveredFrom    = ''
+        originalStartUtc = $null
+        halted           = ''
     }
 }
 
+$script:PackageStatuses = @('Pending', 'Installing', 'Succeeded', 'AlreadyInstalled', 'Skipped', 'SkippedByUser', 'RequiresInteraction', 'RequiresRestart', 'Failed', 'Unavailable')
+
+&lt;# Fields every entry has since state version 2; older entries get them without changing status. #&gt;
+function Add-WdaEntryFields {
+    param([hashtable] $Entry, [string] $Kind = 'app')
+    $id = $(if ($Kind -eq 'additional') { "additional:$($Entry['id'])" } else { "app:$($Entry['key'])" })
+    $defaults = @{ operationId = $id; failureClass = ''; retryable = $false; nextAttemptUtc = $null; waitingFor = ''; detection = ''
+                   history = @(); networkDeferrals = 0; manualRetries = 0; totalAttempts = [int] $Entry['attempts']; interrupted = $false; restart = ''; restartBoot = '' }
+    foreach ($k in @($defaults.Keys)) { if (-not $Entry.ContainsKey($k)) { $Entry[$k] = $defaults[$k] } }
+    if ($null -eq $Entry.history) { $Entry.history = @() }
+    $Entry.history = @($Entry.history | Where-Object { $_ -is [hashtable] })
+}
+
+&lt;#
+    Accepts a state only if its shape is sane: a version this engine understands, entry maps whose
+    keys match their entries, known statuses and numeric attempt counts. Anything else is treated as
+    corrupt (and never as "nothing installed yet", see Read-WdaState). Returns a reason or $null.
+#&gt;
+function Test-WdaStateShape {
+    param($S)
+    if ($S -isnot [hashtable]) { return 'not an object' }
+    if (-not $S.ContainsKey('version') -or "$($S.version)" -notmatch '^\\d{1,3}$' -or [int] $S.version -lt 1 -or [int] $S.version -gt $script:StateVersion) { return "unsupported state version '$(if ($S.ContainsKey('version')) { $S.version })'" }
+    foreach ($map in 'packages', 'additional') {
+        if (-not $S.ContainsKey($map) -or $null -eq $S[$map]) { continue }
+        if ($S[$map] -isnot [hashtable]) { return "$map is not a map" }
+        foreach ($k in @($S[$map].Keys)) {
+            $e = $S[$map][$k]
+            if ($e -isnot [hashtable]) { return "entry $k is not an object" }
+            $own = $(if ($map -eq 'packages') { [string] $e['key'] } else { [string] $e['id'] })
+            if ($own -ne $k) { return "entry $k does not match its key" }
+            if ([string] $e['status'] -notin $script:PackageStatuses) { return "entry $k has an unknown status '$($e['status'])'" }
+            if ("$($e['attempts'])" -notmatch '^\\d{1,4}$') { return "entry $k has an invalid attempt count" }
+        }
+    }
+    if ($S.ContainsKey('final') -and $S.final -and [string] $S.final -notin 'Succeeded', 'CompletedWithFollowUp', 'CompletedWithFailures', 'Failed', 'Offline') { return "unknown final status '$($S.final)'" }
+    return $null
+}
+
+&lt;#
+    Reads the state. A missing file is a first start. An unreadable or malformed file is kept aside
+    (state.json.corrupt) and the last good copy (state.json.bak, written by every save) is used
+    instead; only when that is unusable too does the engine start over, and then every package is
+    checked with "winget list" before anything is installed, so nothing completed is repeated.
+    Version 1 states are upgraded in place without changing any status (completed work stays done).
+#&gt;
 function Read-WdaState {
     param([hashtable] $Paths)
-    $s = $null
-    try { $s = Read-WdaJson $Paths.State }
-    catch {
-        Write-WdaLog "State file unreadable ($($_.Exception.Message)); keeping a copy and starting over." 'WARN'
-        Copy-Item -LiteralPath $Paths.State -Destination "$($Paths.State).corrupt" -Force -ErrorAction SilentlyContinue
-    }
     $fresh = New-WdaState
-    if (-not $s) { return $fresh }
+    $s = $null
+    $from = ''
+    foreach ($candidate in @($Paths.State, "$($Paths.State).bak")) {
+        if (-not (Test-Path -LiteralPath $candidate)) { continue }
+        $reason = $null
+        try { $s = Read-WdaJson $candidate; $reason = Test-WdaStateShape $s } catch { $reason = $_.Exception.Message }
+        if (-not $reason) { if ($candidate -ne $Paths.State) { $from = 'backup' }; break }
+        Write-WdaLog "State file $(Split-Path -Leaf $candidate) is unusable ($reason); keeping a copy." 'WARN'
+        Copy-Item -LiteralPath $candidate -Destination "$candidate.corrupt" -Force -ErrorAction SilentlyContinue
+        $s = $null
+        $from = 'rebuilt'
+    }
+    if (-not $s) {
+        if ($from) { $fresh.recoveredFrom = $from; Write-WdaLog 'Starting with a new state; every package is checked with winget list before any installation.' 'WARN' }
+        return $fresh
+    }
+    if ($from) { $s.recoveredFrom = $from; Write-WdaLog 'Recovered the state from its last good copy (state.json.bak).' 'WARN' }
     foreach ($k in @($fresh.Keys)) { if (-not $s.ContainsKey($k)) { $s[$k] = $fresh[$k] } }
     if ($null -eq $s.packages) { $s.packages = @{} }
     if ($null -eq $s.additional) { $s.additional = @{} }
+    if ($null -eq $s.recoveries) { $s.recoveries = @() }
+    foreach ($e in @($s.packages.Values)) { Add-WdaEntryFields $e 'app' }
+    foreach ($e in @($s.additional.Values)) { Add-WdaEntryFields $e 'additional' }
+    $s.version = $script:StateVersion
     return $s
 }
 
-function Save-WdaState { param([hashtable] $State, [hashtable] $Paths) Write-WdaJson $Paths.State $State }
+function Save-WdaState { param([hashtable] $State, [hashtable] $Paths) Write-WdaJson $Paths.State $State -Backup }
 
 # ------------------------------------------------------------------------------------------------
 # Package queue. The native WinGet package list is the package specification; applications-config
@@ -2032,8 +2134,9 @@ function ConvertFrom-WdaExitCode {
     param($Code)
     $hex = Format-WdaHResult $Code
     $m = $script:ExitCodes[$hex]
-    if ($m) { return @{ Status = $m[0]; Retry = $m[1]; Restart = $m[2]; Message = $m[3]; Code = $hex } }
-    @{ Status = 'Failed'; Retry = $true; Restart = 'none'; Message = "WinGet exit code $hex."; Code = $hex }
+    if ($m) { return @{ Status = $m[0]; Retry = $m[1]; Restart = $m[2]; Message = $m[3]; Code = $hex; Class = $m[4] } }
+    # Unknown codes: retried within the normal budget (never more), and recorded as Unknown.
+    @{ Status = 'Failed'; Retry = $true; Restart = 'none'; Message = "WinGet exit code $hex (not a documented WinGet result)."; Code = $hex; Class = 'Unknown' }
 }
 
 # ------------------------------------------------------------------------------------------------
@@ -2176,6 +2279,37 @@ function Test-WdaNetwork {
         $iar = $tcp.BeginConnect('cdn.winget.microsoft.com', 443, $null, $null)
         return ($iar.AsyncWaitHandle.WaitOne(5000) -and $tcp.Connected)
     } catch { return $false } finally { $tcp.Close() }
+}
+
+&lt;#
+    Phase 5: where connectivity breaks, checked after a network-class failure. Levels, in order:
+    NoInterface (no adapter is up), NoLocalNetwork (no default route), DnsUnavailable (the package
+    source's host name does not resolve), SourceUnavailable (the Internet is reachable but the
+    package source is not), InternetUnavailable, Online. A check that cannot run (missing cmdlet)
+    is skipped rather than reported as a failure. Nothing is changed: no adapter, DNS, proxy or
+    firewall setting is ever touched.
+#&gt;
+function Get-WdaNetworkDiagnosis {
+    param([string] $Source = 'winget')
+    $hosts = @{ winget = 'cdn.winget.microsoft.com'; msstore = 'storeedgefd.dsx.mp.microsoft.com' }
+    $target = $(if ($hosts.ContainsKey($Source)) { $hosts[$Source] } else { $hosts.winget })
+    try {
+        if (Get-Command Get-NetAdapter -ErrorAction SilentlyContinue) {
+            if (@(Get-NetAdapter -ErrorAction Stop | Where-Object { $_.Status -eq 'Up' }).Count -eq 0) { return @{ Level = 'NoInterface'; Detail = 'no network adapter is connected' } }
+        }
+        if (Get-Command Get-NetRoute -ErrorAction SilentlyContinue) {
+            if (@(Get-NetRoute -DestinationPrefix '0.0.0.0/0', '::/0' -ErrorAction SilentlyContinue).Count -eq 0) { return @{ Level = 'NoLocalNetwork'; Detail = 'no default gateway' } }
+        }
+    } catch { }
+    try { [void] [System.Net.Dns]::GetHostAddresses($target) } catch { return @{ Level = 'DnsUnavailable'; Detail = "$target does not resolve" } }
+    $tcp = New-Object System.Net.Sockets.TcpClient
+    $reachable = $false
+    try { $iar = $tcp.BeginConnect($target, 443, $null, $null); $reachable = ($iar.AsyncWaitHandle.WaitOne(5000) -and $tcp.Connected) } catch { } finally { $tcp.Close() }
+    if ($reachable) { return @{ Level = 'Online'; Detail = "$target reachable" } }
+    $internet = $false
+    try { $internet = ((Invoke-WebRequest -Uri 'http://www.msftconnecttest.com/connecttest.txt' -UseBasicParsing -TimeoutSec 10).Content -eq 'Microsoft Connect Test') } catch { }
+    if ($internet) { return @{ Level = 'SourceUnavailable'; Detail = "$target (source $Source) is not reachable on port 443" } }
+    return @{ Level = 'InternetUnavailable'; Detail = 'the Internet is not reachable' }
 }
 
 function Test-WdaRebootPending {
@@ -2366,6 +2500,85 @@ function Set-WdaPackage {
     $Entry.updatedUtc = (Get-WdaNow).ToString('o')
 }
 
+# ------------------------------------------------------------------------------------------------
+# Retry policy, failure classes and the operation lifecycle (Phase 5)
+# ------------------------------------------------------------------------------------------------
+
+# Never retried automatically; a technician may retry them after fixing the cause (-IncludePermanent).
+$script:PermanentClasses = @('Permanent', 'Integrity', 'Policy', 'User', 'Manual')
+
+&lt;#
+    Retry settings from applications-config.json "retry" (engine 1.2.0). Configurations written for
+    earlier engines have no "retry" block and get these defaults. Every value is clamped, so no
+    configuration can make retries unbounded.
+#&gt;
+function Get-WdaRetryPolicy {
+    param([hashtable] $Config)
+    $r = @{ automatic = $true; baseDelaySeconds = 60; maxDelaySeconds = 900; jitterRatio = 0.2; continueAfterFailure = $true; maxNetworkDeferrals = 6 }
+    if ($Config.ContainsKey('retry') -and $Config['retry'] -is [hashtable]) {
+        foreach ($k in @($r.Keys)) { if ($Config['retry'].ContainsKey($k) -and $null -ne $Config['retry'][$k]) { $r[$k] = $Config['retry'][$k] } }
+    }
+    $r.automatic = [bool] $r.automatic
+    $r.continueAfterFailure = [bool] $r.continueAfterFailure
+    $r.baseDelaySeconds = [int] [Math]::Min(3600, [Math]::Max(0, [int] $r.baseDelaySeconds))
+    $r.maxDelaySeconds = [int] [Math]::Min(3600, [Math]::Max([int] $r.baseDelaySeconds, [int] $r.maxDelaySeconds))
+    $r.jitterRatio = [double] [Math]::Min(0.5, [Math]::Max(0.0, [double] $r.jitterRatio))
+    $r.maxNetworkDeferrals = [int] [Math]::Min(24, [Math]::Max(0, [int] $r.maxNetworkDeferrals))
+    # Automatic retry off: one attempt per run; failures stay retryable by the recovery tool.
+    $r.maxAttempts = $(if ($r.automatic) { [int] [Math]::Min(10, [Math]::Max(1, [int] $Config.maxAttemptsPerPackage)) } else { 1 })
+    return $r
+}
+
+function Get-WdaRandom { Get-Random -Minimum 0.0 -Maximum 1.0 }
+
+&lt;# Delay before attempt n+1: base * 2^(n-1), +/- jitter, never more than maxDelaySeconds. #&gt;
+function Get-WdaBackoffSeconds {
+    param([hashtable] $Policy, [int] $Attempt)
+    $exp = [Math]::Min(20, [Math]::Max(0, $Attempt - 1))
+    $d = [Math]::Min([double] $Policy.maxDelaySeconds, [double] $Policy.baseDelaySeconds * [Math]::Pow(2, $exp))
+    $j = 1 + [double] $Policy.jitterRatio * (2 * [double] (Get-WdaRandom) - 1)
+    return [int] [Math]::Round([Math]::Min([double] $Policy.maxDelaySeconds, [Math]::Max(0, $d * $j)))
+}
+
+&lt;# The lifecycle state of an operation, derived from its status (one model, no second copy). #&gt;
+function Get-WdaLifecycle {
+    param([hashtable] $Entry)
+    switch ([string] $Entry['status']) {
+        'Pending' {
+            if ($Entry['waitingFor']) { return 'WaitingForNetwork' }
+            if ([int] $Entry['attempts'] -gt 0 -or $Entry['nextAttemptUtc']) { return 'FailedRetryable' }
+            return 'Pending'
+        }
+        'Installing' { return 'Running' }
+        'Succeeded' { return 'Succeeded' }
+        'AlreadyInstalled' { return 'AlreadySatisfied' }
+        'SkippedByUser' { return 'SkippedByUser' }
+        'Skipped' { return 'BlockedByDependency' }
+        'RequiresRestart' { return 'WaitingForReboot' }
+        'RequiresInteraction' { return 'ManualActionRequired' }
+        'Unavailable' { return 'FailedPermanent' }
+        'Failed' { if ([string] $Entry['failureClass'] -in $script:PermanentClasses) { return 'FailedPermanent' }; return 'FailedRetryable' }
+    }
+    return 'Pending'
+}
+
+&lt;#
+    Records one attempt: in the entry's history (last 20) and as one JSON line in
+    logs\\attempts.jsonl (machine-readable, for diagnostics and the later health dashboard). Never
+    contains secrets: only identifiers, codes, classes and the engine's own messages.
+#&gt;
+function Add-WdaAttempt {
+    param([hashtable] $Paths, [hashtable] $Entry, [hashtable] $Record)
+    $rec = [ordered]@{ operationId = $Entry.operationId; name = $Entry.name }
+    foreach ($k in 'trigger', 'attempt', 'startUtc', 'endUtc', 'result', 'exitCode', 'class', 'countsTowardLimit', 'nextAction', 'nextAttemptUtc', 'rebootRequired', 'message', 'packageIdentifier', 'source') {
+        if ($Record.ContainsKey($k)) { $rec[$k] = $Record[$k] }
+    }
+    $h = @{}
+    foreach ($k in $rec.Keys) { if ($k -notin 'operationId', 'name') { $h[$k] = $rec[$k] } }
+    $Entry.history = @(@(@($Entry.history) + @($h)) | Select-Object -Last 20)
+    try { [System.IO.File]::AppendAllText((Join-Path $Paths.Logs 'attempts.jsonl'), (($rec | ConvertTo-Json -Compress -Depth 4) + "\`r\`n")) } catch { Write-WdaLog "Could not append to attempts.jsonl: $($_.Exception.Message)" 'WARN' }
+}
+
 function Initialize-WdaEntries {
     param([hashtable] $Config, [hashtable] $State, [object[]] $Queue)
     foreach ($p in $Queue) {
@@ -2403,16 +2616,29 @@ function Initialize-WdaEntries {
         if ($State.additional.ContainsKey($a.id)) { continue }
         $State.additional[$a.id] = @{ id = $a.id; name = [string] $a.name; status = 'Pending'; attempts = 0; exitCode = ''; message = ''; updatedUtc = (Get-WdaNow).ToString('o') }
     }
+    foreach ($e in @($State.packages.Values)) {
+        $new = -not $e.ContainsKey('operationId')
+        Add-WdaEntryFields $e 'app'
+        if ($new -and $e.status -eq 'Unavailable') { $e.failureClass = 'Permanent' }
+        elseif ($new -and $e.status -eq 'RequiresInteraction') { $e.failureClass = 'Manual' }
+    }
+    foreach ($e in @($State.additional.Values)) { Add-WdaEntryFields $e 'additional' }
 }
 
-&lt;# After a restart, packages waiting for one are verified or retried; a crash mid-install is noted. #&gt;
+&lt;#
+    After a restart, packages waiting for one are verified or retried. An operation left Running
+    (Installing) by a crash, a power loss or an installer-initiated restart is never assumed to have
+    failed or succeeded: it goes back to Pending with "interrupted" set, and the queue checks with
+    "winget list" whether it is installed before anything else happens.
+#&gt;
 function Resume-WdaEntries {
-    param([hashtable] $State)
+    param([hashtable] $State, [hashtable] $Paths = $null)
     $boot = Get-WdbBootTime
     foreach ($e in @($State.packages.Values)) {
         if ($e.status -eq 'Installing') {
             $e.interrupted = $true
             Set-WdaPackage $e 'Pending' 'The previous attempt was interrupted; checking again.'
+            if ($Paths) { Add-WdaAttempt $Paths $e @{ trigger = 'automatic'; attempt = [int] $e.totalAttempts; endUtc = (Get-WdaNow).ToString('o'); result = 'Interrupted'; class = 'Interrupted'; countsTowardLimit = $true; nextAction = 'reconcile with winget list'; message = 'The engine stopped during this attempt (crash, power loss or restart).' } }
             Write-WdaLog "  $($e.name): previous attempt was interrupted."  'WARN'
         } elseif ($e.status -eq 'RequiresRestart' -and $e.restart -and $e.restartBoot -ne $boot) {
             $e.interrupted = $true
@@ -2455,21 +2681,41 @@ function Complete-Wda {
     $order = @{}
     $i = 0
     foreach ($q in $Queue) { $order[$q.key] = $i++ }
+    # Phase 5 (result schema 2): the lifecycle, failure class and attempt history of every operation.
+    $resilience = {
+        param($E)
+        [ordered]@{ operationId = [string] $E['operationId']; lifecycle = (Get-WdaLifecycle $E); failureClass = [string] $E['failureClass']; retryable = [bool] $E['retryable']
+                    detection = [string] $E['detection']; nextAttemptUtc = $E['nextAttemptUtc']; waitingFor = [string] $E['waitingFor']; totalAttempts = [int] $E['totalAttempts']
+                    manualRetries = [int] $E['manualRetries']; history = @($E['history']) }
+    }
     $packages = @($State.packages.Values | Sort-Object @{ Expression = { if ($order.ContainsKey($_.key)) { $order[$_.key] } else { 100000 } } }, key | ForEach-Object {
-        [ordered]@{ key = $_.key; name = $_.name; packageIdentifier = $_.packageIdentifier; source = $_.source; status = $_.status
-                    attempts = [int] $_.attempts; exitCode = $_.exitCode; message = $_.message; timestampUtc = $_.updatedUtc }
+        $o = [ordered]@{ key = $_.key; name = $_.name; packageIdentifier = $_.packageIdentifier; source = $_.source; status = $_.status
+                         attempts = [int] $_.attempts; exitCode = $_.exitCode; message = $_.message; timestampUtc = $_.updatedUtc }
+        $x = &amp; $resilience $_
+        foreach ($k in $x.Keys) { $o[$k] = $x[$k] }
+        $o
     })
     $additional = @($State.additional.Values | Sort-Object name | ForEach-Object {
-        [ordered]@{ id = $_.id; name = $_.name; status = $_.status; attempts = [int] $_.attempts; exitCode = $_.exitCode; message = $_.message; timestampUtc = $_.updatedUtc }
+        $o = [ordered]@{ id = $_.id; name = $_.name; status = $_.status; attempts = [int] $_.attempts; exitCode = $_.exitCode; message = $_.message; timestampUtc = $_.updatedUtc }
+        $x = &amp; $resilience $_
+        foreach ($k in $x.Keys) { $o[$k] = $x[$k] }
+        $o
     })
     $followUp = @()
+    $outstanding = @()
     foreach ($e in $packages + $additional) {
-        if ($e.status -in 'RequiresInteraction', 'RequiresRestart', 'Failed', 'Unavailable', 'Pending') { $followUp += ('{0} [{1}]: {2}' -f $e.name, $e.status, $e.message) }
+        if ($e.status -in 'RequiresInteraction', 'RequiresRestart', 'Failed', 'Unavailable', 'Pending', 'Skipped') { $followUp += ('{0} [{1}]: {2}' -f $e.name, $e.status, $e.message) }
         elseif ($e.Contains('key') -and $State.packages.ContainsKey($e.key) -and $State.packages[$e.key].ContainsKey('shortcutFailed') -and $State.packages[$e.key].shortcutFailed) { $followUp += ('{0} [shortcut]: {1}' -f $e.name, $e.message) }
+        elseif ($e.status -eq 'Succeeded' -and $e.detection -eq 'Unconfirmed') { $followUp += ('{0} [unconfirmed]: {1}' -f $e.name, $e.message) }
+        # Outstanding work survives the end of the run: the recovery tool reads it from here.
+        if ($e.lifecycle -notin 'Succeeded', 'AlreadySatisfied', 'SkippedByUser') {
+            $outstanding += [ordered]@{ operationId = $e.operationId; name = $e.name; status = $e.status; lifecycle = $e.lifecycle; failureClass = $e.failureClass; retryable = $e.retryable; message = $e.message }
+        }
     }
+    $policy = Get-WdaRetryPolicy $Config
     $b = $State.bootstrap
     $result = [ordered]@{
-        schemaVersion      = 1
+        schemaVersion      = 2
         stage              = 'applications'
         status             = $Status
         reason             = $Reason
@@ -2485,6 +2731,10 @@ function Complete-Wda {
         packages           = $packages
         additionalSoftware = $additional
         followUp           = $followUp
+        outstanding        = $outstanding
+        retryPolicy        = [ordered]@{ automatic = $policy.automatic; maxAttempts = $policy.maxAttempts; baseDelaySeconds = $policy.baseDelaySeconds; maxDelaySeconds = $policy.maxDelaySeconds; jitterRatio = $policy.jitterRatio; continueAfterFailure = $policy.continueAfterFailure; maxNetworkDeferrals = $policy.maxNetworkDeferrals }
+        recoveries         = @($State.recoveries)
+        stateRecoveredFrom = [string] $State.recoveredFrom
     }
     Write-WdaJson $Paths.Result $result
     $State.final = $Status
@@ -2542,6 +2792,8 @@ function Get-WdaFinalStatus {
     $c = Get-WdaCounts $State
     if ($c.failed -gt 0 -or $c.unavailable -gt 0) { return 'CompletedWithFailures' }
     if ($c.requiresInteraction -gt 0 -or $c.requiresRestart -gt 0) { return 'CompletedWithFollowUp' }
+    # Phase 5: a success WinGet reported but winget list cannot confirm is not a silent success.
+    if (@($State.packages.Values | Where-Object { $_.status -eq 'Succeeded' -and $_['detection'] -eq 'Unconfirmed' }).Count) { return 'CompletedWithFollowUp' }
     return 'Succeeded'
 }
 
@@ -2581,20 +2833,24 @@ function Invoke-WdaAdditional {
         if ($a.execution -ne 'automatic') {
             $where = $(if ($a.downloadUrl) { "official download $($a.downloadUrl)" } else { 'the publisher' })
             $hash = $(if ($a.sha256) { "; verify SHA-256 $($a.sha256)" } else { '' })
+            $e.failureClass = 'Manual'
             Set-WdaPackage $e 'RequiresInteraction' "Manual follow-up: install from $where$hash."
             continue
         }
         $file = Join-Path $Paths.Installers ([string] $a.fileName)
         if (-not $a.fileName -or -not (Test-Path -LiteralPath $file)) {
+            $e.failureClass = 'Manual'
             Set-WdaPackage $e 'RequiresInteraction' "Installer not supplied: place $($a.fileName) in $($Paths.Installers) and run the installer again."
             continue
         }
         $actual = Get-WdaFileHash $file
         if ($actual -ne ([string] $a.sha256).ToUpperInvariant()) {
+            $e.failureClass = 'Integrity'
             Set-WdaPackage $e 'Failed' "SHA-256 mismatch (expected $($a.sha256), found $actual); not executed."
             continue
         }
         if ($a.installerType -in 'exe', 'msi' -and -not (Test-WdaSignature $file)) {
+            $e.failureClass = 'Integrity'
             Set-WdaPackage $e 'Failed' 'No valid Authenticode signature; not executed.'
             continue
         }
@@ -2602,13 +2858,19 @@ function Invoke-WdaAdditional {
         if (-not $lock) { return 'WaitingForLock' }
         try {
             $e.attempts = [int] $e.attempts + 1
+            $e.totalAttempts = [int] $e.totalAttempts + 1
             Set-WdaPackage $e 'Installing'
             Save-WdaState $State $Paths
+            $started = (Get-WdaNow).ToString('o')
             $code = Start-WdaInstaller $file ([string] $a.installerType) @($a.silentArgs) ([int] $Config.packageTimeoutMinutes)
-            if ($null -eq $code) { Set-WdaPackage $e 'Failed' 'Timed out.' }
+            $e.failureClass = ''
+            if ($null -eq $code) { $e.failureClass = 'Timeout'; Set-WdaPackage $e 'Failed' 'Timed out.' }
             elseif ($code -eq 0) { Set-WdaPackage $e 'Succeeded' 'Installed.' $code }
             elseif ($code -in 3010, 1641) { Set-WdaPackage $e 'Succeeded' 'Installed; a restart is required to finish.' $code }
-            else { Set-WdaPackage $e 'Failed' "Installer exit code $code." $code }
+            else { $e.failureClass = 'Unknown'; Set-WdaPackage $e 'Failed' "Installer exit code $code." $code }
+            $e.retryable = ($e.status -eq 'Failed')
+            Add-WdaAttempt $Paths $e @{ trigger = 'automatic'; attempt = [int] $e.totalAttempts; startUtc = $started; endUtc = (Get-WdaNow).ToString('o'); result = $e.status; exitCode = [string] $e.exitCode
+                class = [string] $e.failureClass; countsTowardLimit = $true; nextAction = $(if ($e.status -eq 'Failed') { 'manual retry (recovery tool)' } else { 'none' }); rebootRequired = [bool] ($code -in 3010, 1641); message = $e.message }
         } finally {
             Exit-WdbInstallLock $lock
         }
@@ -2619,21 +2881,41 @@ function Invoke-WdaAdditional {
 
 &lt;#
     Installs pending packages in queue order. Returns $null when the queue is done for this run, or
-    an outcome string (Rebooting, WaitingForLock, WaitingForRestart, Finished:*) to stop.
+    an outcome string (Rebooting, WaitingForLock, WaitingForRestart, WaitingForNetwork, Finished:*)
+    to stop.
+
+    Phase 5: a failed attempt is classified (ConvertFrom-WdaExitCode). Retryable classes wait with
+    bounded exponential backoff before the next attempt (nextAttemptUtc, kept across restarts); the
+    loop waits for the earliest due retry within the run. A network-class failure is checked first
+    (Get-WdaNetworkDiagnosis): if connectivity or the package source is really gone, the attempt is
+    not held against the package; it is deferred (bounded by maxNetworkDeferrals) and the run stops
+    with WaitingForNetwork, or, when only one source is unreachable, packages from other sources
+    continue. Every iteration acts on a package or waits for one, and the loop has a hard bound.
 #&gt;
 function Invoke-WdaQueue {
     param([hashtable] $Config, [hashtable] $Paths, [hashtable] $State, [object[]] $Queue)
-    $maxPasses = [int] $Config.maxAttemptsPerPackage + 1
-    for ($pass = 1; $pass -le $maxPasses; $pass++) {
+    $policy = Get-WdaRetryPolicy $Config
+    $blockedSources = @{}
+    $guardMax = 2 * ([int] $policy.maxAttempts + [int] $policy.maxNetworkDeferrals + 2) * [Math]::Max(1, @($Queue).Count) + 10
+    for ($guard = 0; $guard -lt $guardMax; $guard++) {
         $pending = @($Queue | Where-Object { $State.packages[$_.key].status -eq 'Pending' })
         if ($pending.Count -eq 0) { return $null }
-        if ($pass -gt 1) { Write-WdaLog "Retry pass $pass for $($pending.Count) package(s)."; Wait-Wda ([int] $Config.retryDelaySeconds) }
+        if (((Get-WdaNow) - (ConvertTo-WdaDate $State.installStartUtc)).TotalHours -ge [double] $Config.maxRuntimeHours) {
+            # Budget exhausted: what is done stays done; the rest is reported and can be retried later.
+            foreach ($p in $pending) {
+                $e = $State.packages[$p.key]
+                $e.failureClass = 'Budget'; $e.retryable = $true; $e.nextAttemptUtc = $null
+                Set-WdaPackage $e 'Failed' ("Not installed: the application runtime limit ($($Config.maxRuntimeHours) h) was reached. $(if ([int] $e.attempts) { "Last: $($e.message)" })".Trim())
+            }
+            Write-WdaLog "Runtime limit ($($Config.maxRuntimeHours) h) reached; $($pending.Count) package(s) not installed." 'WARN'
+            Save-WdaState $State $Paths
+            return $null
+        }
+        $acted = $false
+        $soonest = $null
         foreach ($p in $pending) {
             $e = $State.packages[$p.key]
-            if ($e.status -ne 'Pending') { continue }
-            if (((Get-WdaNow) - (ConvertTo-WdaDate $State.installStartUtc)).TotalHours -ge [double] $Config.maxRuntimeHours) {
-                return Complete-Wda $Config $Paths $State 'Failed' "Runtime limit ($($Config.maxRuntimeHours) h) reached." $Queue
-            }
+            if ($e.status -ne 'Pending' -or $State.halted) { continue }
             # Dependencies first; a dependency that did not install makes this one Skipped.
             $blocked = $null; $waiting = $false
             foreach ($k in @($p.after)) {
@@ -2642,11 +2924,18 @@ function Invoke-WdaQueue {
                 if ($d.status -in 'Failed', 'Unavailable', 'RequiresInteraction', 'Skipped') { $blocked = $d.name }
                 elseif ($d.status -notin 'Succeeded', 'AlreadyInstalled') { $waiting = $true }
             }
-            if ($blocked) { Set-WdaPackage $e 'Skipped' "Not attempted: it needs $blocked, which was not installed."; continue }
+            if ($blocked) { $e.failureClass = 'Dependency'; $e.retryable = $true; Set-WdaPackage $e 'Skipped' "Not attempted: it needs $blocked, which was not installed."; $acted = $true; continue }
             if ($waiting) { continue }
             if ($p.interaction -eq 'required') {
+                $e.failureClass = 'Manual'
                 Set-WdaPackage $e 'RequiresInteraction' 'Marked as needing interaction; install it manually (winget install --id ... --interactive).'
+                $acted = $true
                 continue
+            }
+            if ($blockedSources.ContainsKey($p.source)) { continue }
+            if ($e.nextAttemptUtc) {
+                $due = ConvertTo-WdaDate $e.nextAttemptUtc
+                if ($due -gt (Get-WdaNow)) { if (-not $soonest -or $due -lt $soonest) { $soonest = $due }; continue }
             }
             if (Test-WdbRestartPending $Config.dataRoot) {
                 Save-WdaState $State $Paths
@@ -2661,47 +2950,107 @@ function Invoke-WdaQueue {
                 return 'WaitingForLock'
             }
             $restartNow = $null
+            $offline = $null
+            $acted = $true
             try {
                 $log = Join-Path $Paths.PackageLogs (($p.key -replace '[^A-Za-z0-9._+-]', '_') + '.log')
+                # Idempotency: an application that is already there is never installed again.
                 $installed = Test-WdaInstalled $p $log
                 if ($installed -eq $true) {
                     if ($e.interrupted -or $e.attempts -gt 0) { Set-WdaPackage $e 'Succeeded' 'Installed (confirmed by winget list).' }
                     else { Set-WdaPackage $e 'AlreadyInstalled' 'Already installed before this run; left unchanged.' }
+                    $e.detection = 'Installed'; $e.waitingFor = ''; $e.nextAttemptUtc = $null; $e.failureClass = ''; $e.retryable = $false
                     Complete-WdaPortable $p $e
                     Write-WdaLog "  $($e.status.ToLowerInvariant()) $($p.name)"
                     Save-WdaState $State $Paths
                     continue
                 }
-                if ([int] $e.attempts -ge [int] $Config.maxAttemptsPerPackage) {
+                if ([int] $e.attempts -ge [int] $policy.maxAttempts) {
+                    $e.retryable = ([string] $e.failureClass) -notin $script:PermanentClasses
                     Set-WdaPackage $e 'Failed' "Gave up after $($e.attempts) attempt(s). Last: $($e.message)"
                     Save-WdaState $State $Paths
                     continue
                 }
                 # Count the attempt before acting, so a crash or hang mid-install still counts.
                 $e.attempts = [int] $e.attempts + 1
-                $e.interrupted = $false
+                $e.totalAttempts = [int] $e.totalAttempts + 1
+                $e.interrupted = $false; $e.waitingFor = ''; $e.nextAttemptUtc = $null
                 Set-WdaPackage $e 'Installing' "Attempt $($e.attempts)."
                 Save-WdaState $State $Paths
                 Set-WdaStatus 'Installing' $p.name $State
-                Write-WdaLog ("  installing {0} ({1}:{2}) attempt {3}/{4}" -f $p.name, $p.source, $p.packageIdentifier, $e.attempts, $Config.maxAttemptsPerPackage)
+                $started = Get-WdaNow
+                Write-WdaLog ("  installing {0} ({1}:{2}) attempt {3}/{4}" -f $p.name, $p.source, $p.packageIdentifier, $e.attempts, $policy.maxAttempts)
                 $r = Install-WdaPackage $p ([int] $Config.packageTimeoutMinutes) $log
                 if ($r.TimedOut) {
-                    $m = @{ Status = 'Failed'; Retry = $true; Restart = 'none'; Message = "Timed out after $($Config.packageTimeoutMinutes) min."; Code = 'timeout' }
+                    $m = @{ Status = 'Failed'; Retry = $true; Restart = 'none'; Message = "Timed out after $($Config.packageTimeoutMinutes) min."; Code = 'timeout'; Class = 'Timeout' }
                 } else { $m = ConvertFrom-WdaExitCode $r.ExitCode }
                 $status = $m.Status
-                if ($status -eq 'Failed' -and $m.Retry -and [int] $e.attempts -lt [int] $Config.maxAttemptsPerPackage) { $status = 'Pending' }
-                if ($status -eq 'Succeeded' -and (Test-WdaInstalled $p $log) -eq $false) { $m.Message = 'Installed (WinGet reported success; the package is not listed by winget list).' }
+                $counts = $true
+                $next = ''
+                if ($status -eq 'Failed' -and $m.Class -eq 'Network') {
+                    $diag = Get-WdaNetworkDiagnosis $p.source
+                    if ($diag.Level -ne 'Online') {
+                        $e.networkDeferrals = [int] $e.networkDeferrals + 1
+                        if ([int] $e.networkDeferrals -le [int] $policy.maxNetworkDeferrals) {
+                            # Not the package's fault: the attempt is not held against it.
+                            $e.attempts = [int] $e.attempts - 1
+                            $counts = $false
+                            $status = 'Pending'
+                            $e.waitingFor = $(if ($diag.Level -eq 'SourceUnavailable') { "source:$($p.source)" } else { 'network' })
+                            $m.Message = "$($m.Message) Network check: $($diag.Level) ($($diag.Detail)); deferred until it is reachable ($($e.networkDeferrals)/$($policy.maxNetworkDeferrals))."
+                            if ($diag.Level -eq 'SourceUnavailable') { $blockedSources[$p.source] = $diag; $next = "wait for source $($p.source)" } else { $offline = $diag; $next = 'wait for network' }
+                        } else {
+                            $m.Message = "$($m.Message) Network check: $($diag.Level); already deferred $($policy.maxNetworkDeferrals) time(s)."
+                        }
+                    }
+                }
+                if ($status -eq 'Failed' -and $m.Retry -and [int] $e.attempts -lt [int] $policy.maxAttempts) {
+                    $delay = Get-WdaBackoffSeconds $policy ([int] $e.attempts)
+                    $e.nextAttemptUtc = (Get-WdaNow).AddSeconds($delay).ToString('o')
+                    $status = 'Pending'
+                    $next = "retry after $delay s"
+                }
+                if ($status -eq 'Succeeded') {
+                    # Do not rely on the exit code alone.
+                    $check = Test-WdaInstalled $p $log
+                    $e.detection = $(if ($check -eq $true) { 'Installed' } elseif ($check -eq $false) { 'Unconfirmed' } else { 'Unknown' })
+                    if ($check -eq $false) { $m.Message = 'WinGet reported success, but winget list does not show the package; verify it manually.' }
+                }
+                if ($status -eq 'AlreadyInstalled') { $e.detection = 'Installed' }
                 if ($status -eq 'RequiresRestart') {
                     $e.restart = $(if ($m.Restart -eq 'later') { 'verify' } else { 'retry' })
+                    $e.detection = $(if ($m.Restart -eq 'later') { 'InstalledRequiresRestart' } else { 'NotInstalled' })
                     if ($m.Restart -in 'now', 'initiated') { $restartNow = $m.Restart }
                 }
+                $e.failureClass = $(if ($status -in 'Succeeded', 'AlreadyInstalled', 'RequiresRestart') { '' } else { [string] $m.Class })
+                $e.retryable = ($status -in 'Failed', 'Pending') -and ([string] $m.Class) -notin $script:PermanentClasses
                 Set-WdaPackage $e $status $m.Message $m.Code
                 if ($status -in 'Succeeded', 'AlreadyInstalled') { Complete-WdaPortable $p $e }
+                if (-not $next) {
+                    $next = switch ($status) {
+                        'Succeeded' { 'none' } 'AlreadyInstalled' { 'none' } 'RequiresRestart' { 'restart' }
+                        'RequiresInteraction' { 'manual action' }
+                        default { $(if ($e.retryable) { 'manual retry (recovery tool)' } else { 'none (permanent)' }) }
+                    }
+                }
+                Add-WdaAttempt $Paths $e @{ trigger = 'automatic'; attempt = [int] $e.totalAttempts; startUtc = $started.ToString('o'); endUtc = (Get-WdaNow).ToString('o')
+                    result = [string] $m.Status; exitCode = [string] $m.Code; class = [string] $m.Class; countsTowardLimit = $counts; nextAction = $next
+                    nextAttemptUtc = $e.nextAttemptUtc; rebootRequired = [bool] ($status -eq 'RequiresRestart'); message = $m.Message; packageIdentifier = $p.packageIdentifier; source = $p.source }
                 $lvl = $(if ($status -in 'Succeeded', 'AlreadyInstalled') { 'INFO' } else { 'WARN' })
-                Write-WdaLog ("  -&gt; {0} {1} [{2}] {3}" -f $status, $p.name, $m.Code, $m.Message) $lvl
+                Write-WdaLog ("  -&gt; {0} {1} [{2}] {3} (class {4}; attempt {5}/{6}; next: {7})" -f $status, $p.name, $m.Code, $m.Message, $m.Class, $e.attempts, $policy.maxAttempts, $next) $lvl
                 Save-WdaState $State $Paths
             } finally {
                 Exit-WdbInstallLock $lock
+            }
+            if ($offline) {
+                Write-WdaLog "Connectivity lost ($($offline.Level): $($offline.Detail)); progress is kept and the run continues when the network is back." 'WARN'
+                Set-WdaStatus 'WaitingForNetwork' "Connectivity lost: $($offline.Level)" $State
+                return 'WaitingForNetwork'
+            }
+            if ($e.status -eq 'Failed' -and -not $policy.continueAfterFailure) {
+                $State.halted = $p.name
+                Write-WdaLog "Stopping the queue after $($p.name) failed ('continue after a failure' is off)." 'WARN'
+                Save-WdaState $State $Paths
             }
             if ($restartNow -eq 'initiated') {
                 $State.reboots = [int] $State.reboots + 1
@@ -2716,13 +3065,169 @@ function Invoke-WdaQueue {
                 $e.restart = ''
             }
         }
+        if ($acted) { continue }
+        if ($soonest) {
+            $wait = [int] [Math]::Min([double] $policy.maxDelaySeconds, [Math]::Max(1, [Math]::Ceiling(($soonest - (Get-WdaNow)).TotalSeconds)))
+            Write-WdaLog "Next retry in $wait s."
+            Set-WdaStatus 'WaitingForRetry' "Next retry at $($soonest.ToString('o'))" $State
+            Wait-Wda $wait
+            continue
+        }
+        break
     }
-    # Anything still pending after the last pass has run out of attempts.
-    foreach ($p in $Queue) {
+    $left = @($Queue | Where-Object { $State.packages[$_.key].status -eq 'Pending' })
+    if ($left.Count -and ($blockedSources.Count -or @($left | Where-Object { $State.packages[$_.key].waitingFor }).Count)) {
+        $names = ($blockedSources.Keys | Sort-Object) -join ', '
+        Write-WdaLog "Package source(s) unreachable ($names); $($left.Count) package(s) wait for the next run." 'WARN'
+        Set-WdaStatus 'WaitingForNetwork' "Package source unreachable: $names" $State
+        Save-WdaState $State $Paths
+        return 'WaitingForNetwork'
+    }
+    foreach ($p in $left) {
         $e = $State.packages[$p.key]
-        if ($e.status -eq 'Pending') { Set-WdaPackage $e 'Failed' "Gave up after $($e.attempts) attempt(s). Last: $($e.message)" }
+        if ($State.halted) { Set-WdaPackage $e 'Pending' "Not attempted: application setup stopped after $($State.halted) failed ('continue after a failure' is off). Retry it with the recovery tool." }
+        else { $e.retryable = $true; Set-WdaPackage $e 'Failed' "Gave up after $($e.attempts) attempt(s). Last: $($e.message)" }
     }
     return $null
+}
+
+# ------------------------------------------------------------------------------------------------
+# Technician recovery (Retry mode)
+# ------------------------------------------------------------------------------------------------
+
+&lt;#
+    Reopens operations for another run, under the engine's own mutex so it never races a running
+    engine. Only operations of this deployment's configuration are eligible (the permitted set):
+    queued WinGet/Store/portable packages and reviewed Additional Software. Never eligible:
+    deselected apps, manual catalog entries, unresolved or invalid identifiers, anything already
+    installed. Permanent failures (integrity, policy, cancelled, not found ...) need
+    -IncludePermanent, i.e. a technician who has corrected the cause; their checks still apply on the
+    next attempt because the engine installs exactly as before. Dependencies that did not install are
+    reopened together with what needs them. Each reopened operation gets a fresh attempt budget; its
+    history, total attempts and the previous result are kept.
+#&gt;
+function Invoke-WdaRetry {
+    param([hashtable] $Config, [string[]] $Operations = @(), [switch] $AllFailed, [switch] $PendingOnly, [switch] $IncludePermanent, [string] $RequestedBy = '')
+    $paths = Get-WdaPaths $Config
+    foreach ($d in $paths.Root, $paths.Logs, $paths.PackageLogs) { if (-not (Test-Path -LiteralPath $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null } }
+    $script:LogFile = $paths.Log
+    $script:StatusFile = $paths.Status
+    $mutex = Enter-WdaMutex $Config.mutexName
+    if (-not $mutex) { return @{ Outcome = 'Busy'; Accepted = @(); Refused = @(); Message = 'The application engine is running; try again when it has stopped.' } }
+    try {
+        if (-not (Test-Path -LiteralPath $paths.State) -and -not (Test-Path -LiteralPath "$($paths.State).bak")) {
+            return @{ Outcome = 'NoState'; Accepted = @(); Refused = @(); Message = 'The application stage has not run on this computer yet.' }
+        }
+        $State = Read-WdaState $paths
+        $queue = Get-WdaQueue $Config
+        Initialize-WdaEntries $Config $State $queue
+        $byKey = @{}
+        foreach ($p in $queue) { $byKey[$p.key] = $p }
+        $automatic = @{}
+        foreach ($a in @($Config.additionalSoftware)) { if ($a.execution -eq 'automatic') { $automatic[[string] $a.id] = $true } }
+
+        # Eligibility of one operation id: $null (eligible) or a refusal reason.
+        $why = {
+            param([string] $Id)
+            if ($Id -cmatch '^app:(winget|msstore):[a-z0-9][a-z0-9._+-]{0,127}$') {
+                $k = $Id.Substring(4)
+                $e = $State.packages[$k]
+                if (-not $e) { return 'not part of this deployment' }
+                if (-not $byKey.ContainsKey($k)) {
+                    if ($e.status -eq 'SkippedByUser') { return 'explicitly deselected for this deployment' }
+                    return "not installable by the engine ($($e.status): $($e.message))"
+                }
+                $bad = Test-WdaPackageSpec $byKey[$k]
+                if ($bad) { return "invalid package definition: $bad" }
+                if ($byKey[$k].interaction -eq 'required') { return 'needs interaction; install it manually' }
+                $life = Get-WdaLifecycle $e
+                if ($life -in 'Succeeded', 'AlreadySatisfied') { return 'already installed' }
+                if ($life -eq 'Running') { return 'an installation is in progress' }
+                if ($life -eq 'WaitingForReboot') { return 'waiting for a restart; restart the computer first' }
+                if ($life -eq 'FailedPermanent' -and -not $IncludePermanent) { return "permanent failure ($($e.failureClass)): correct the cause, then retry with -IncludePermanent" }
+                return $null
+            }
+            if ($Id -cmatch '^additional:[A-Za-z0-9][A-Za-z0-9._-]{0,63}$') {
+                $k = $Id.Substring(11)
+                $e = $State.additional[$k]
+                if (-not $e) { return 'not part of this deployment' }
+                if (-not $automatic.ContainsKey($k)) { return 'manual follow-up; install it by hand' }
+                if ($e.status -eq 'Succeeded') { return 'already installed' }
+                if ($e.status -eq 'Failed' -and ([string] $e.failureClass) -in $script:PermanentClasses -and -not $IncludePermanent) { return 'permanent failure (hash or signature): supply the correct installer, then retry with -IncludePermanent' }
+                return $null
+            }
+            return 'not a valid operation id'
+        }
+
+        $targets = New-Object System.Collections.Generic.List[string]
+        if ($AllFailed -or $PendingOnly) {
+            foreach ($e in @($State.packages.Values)) {
+                $life = Get-WdaLifecycle $e
+                $want = $(if ($PendingOnly) { $e.status -eq 'Pending' } else { ($life -in @('FailedRetryable', 'BlockedByDependency', 'WaitingForNetwork', 'Pending')) -or ($IncludePermanent -and $life -eq 'FailedPermanent') })
+                if ($want -and $byKey.ContainsKey($e.key)) { $targets.Add($e.operationId) }
+            }
+            if (-not $PendingOnly) { foreach ($e in @($State.additional.Values)) { if ($e.status -in 'Failed', 'Pending' -and $automatic.ContainsKey([string] $e.id)) { $targets.Add($e.operationId) } } }
+        }
+        foreach ($o in @($Operations | Where-Object { $_ })) {
+            $id = ([string] $o).Trim()
+            if ($id -notmatch '^(app|additional):') { $id = "app:$id" }
+            if ($id.StartsWith('app:')) { $id = $id.ToLowerInvariant() }
+            if (-not $targets.Contains($id)) { $targets.Add($id) }
+        }
+        $accepted = New-Object System.Collections.Generic.List[string]
+        $refused = @()
+        # Unmet dependencies are reopened with the operations that need them (dependency first).
+        for ($i = 0; $i -lt $targets.Count; $i++) {
+            $id = $targets[$i]
+            $reason = &amp; $why $id
+            if ($reason) { $refused += @{ operationId = $id; reason = $reason }; continue }
+            if ($id.StartsWith('app:')) {
+                foreach ($dep in @($byKey[$id.Substring(4)].after)) {
+                    $d = $State.packages[$dep]
+                    if (-not $d -or $d.status -in 'Succeeded', 'AlreadyInstalled') { continue }
+                    $dr = &amp; $why "app:$dep"
+                    if ($dr) { $reason = "its dependency $($d.name) cannot be retried ($dr)"; break }
+                    if (-not $targets.Contains("app:$dep")) { $targets.Add("app:$dep") }
+                }
+                if ($reason) { $refused += @{ operationId = $id; reason = $reason }; continue }
+            }
+            if (-not $accepted.Contains($id)) { $accepted.Add($id) }
+        }
+        if ($accepted.Count -eq 0) {
+            return @{ Outcome = $(if ($targets.Count) { 'Refused' } else { 'NothingToRetry' }); Accepted = @(); Refused = $refused; Message = 'No operation was reopened.' }
+        }
+        $now = (Get-WdaNow).ToString('o')
+        foreach ($id in $accepted) {
+            $e = $(if ($id.StartsWith('app:')) { $State.packages[$id.Substring(4)] } else { $State.additional[$id.Substring(11)] })
+            $previous = "$($e.status): $($e.message)"
+            Add-WdaAttempt $paths $e @{ trigger = 'manual'; attempt = [int] $e.totalAttempts; startUtc = $now; endUtc = $now; result = 'Reopened'; exitCode = [string] $e.exitCode
+                class = [string] $e.failureClass; countsTowardLimit = $false; nextAction = 'retry'; nextAttemptUtc = $null; rebootRequired = $false
+                message = "Retry requested$(if ($RequestedBy) { " by $RequestedBy" }). Previous: $previous" }
+            $e.manualRetries = [int] $e.manualRetries + 1
+            $e.attempts = 0; $e.networkDeferrals = 0; $e.nextAttemptUtc = $null; $e.waitingFor = ''; $e.interrupted = $false; $e.failureClass = ''; $e.retryable = $false
+            Set-WdaPackage $e 'Pending' "Retry requested$(if ($RequestedBy) { " by $RequestedBy" }) (previous: $previous)"
+        }
+        # The stage runs again with a fresh time budget; its previous result is kept in history\\.
+        if (Test-Path -LiteralPath $paths.Result) {
+            $hist = Join-Path $paths.Root 'history'
+            if (-not (Test-Path -LiteralPath $hist)) { New-Item -ItemType Directory -Path $hist -Force | Out-Null }
+            Move-Item -LiteralPath $paths.Result -Destination (Join-Path $hist ("result-{0}.json" -f (Get-WdaNow).ToString('yyyyMMddHHmmss'))) -Force
+        }
+        if (Test-Path -LiteralPath $paths.Marker) { Remove-Item -LiteralPath $paths.Marker -Force }
+        if (-not $State.originalStartUtc) { $State.originalStartUtc = $State.firstStartUtc }
+        $State.final = $null
+        $State.halted = ''
+        $State.errors = 0
+        $State.firstStartUtc = $now
+        $State.installStartUtc = $null
+        $State.recoveries = @(@($State.recoveries) + @(@{ atUtc = $now; by = $RequestedBy; mode = $(if ($PendingOnly) { 'resume' } elseif ($AllFailed) { 'retryFailed' } else { 'retry' }); accepted = @($accepted); refused = @($refused | ForEach-Object { $_.operationId }); includePermanent = [bool] $IncludePermanent }))
+        Save-WdaState $State $paths
+        Write-WdaLog ("Recovery: reopened {0} operation(s){1}: {2}. Refused: {3}." -f $accepted.Count, $(if ($RequestedBy) { " for $RequestedBy" }), ($accepted -join ', '), $(if ($refused.Count) { ($refused | ForEach-Object { "$($_.operationId) ($($_.reason))" }) -join '; ' } else { 'none' })) 'WARN'
+        Set-WdaStatus 'Pending' "Recovery reopened $($accepted.Count) operation(s)" $State
+        return @{ Outcome = 'Accepted'; Accepted = @($accepted); Refused = $refused; Message = "Reopened $($accepted.Count) operation(s)." }
+    } finally {
+        Exit-WdaMutex $mutex
+    }
 }
 
 # ------------------------------------------------------------------------------------------------
@@ -2743,7 +3248,7 @@ function Invoke-WdaRun {
     if ($first) { $State.firstStartUtc = (Get-WdaNow).ToString('o') }
     $State.starts = [int] $State.starts + 1
     Initialize-WdaEntries $Config $State $queue
-    Resume-WdaEntries $State
+    Resume-WdaEntries $State $Paths
     Save-WdaState $State $Paths
     Write-WdaLog "==== Application engine $($script:EngineVersion) start $($State.starts) as $($ctx.User) (restarts so far: $($State.reboots)) ===="
     Set-WdaStatus 'Starting' "Start $($State.starts)" $State
@@ -2846,9 +3351,12 @@ function Invoke-WdaRun {
     $final = Get-WdaFinalStatus $State
     $reason = switch ($final) {
         'Succeeded' { 'Every selected application is installed.' }
-        'CompletedWithFollowUp' { 'Some applications need manual follow-up (interaction or a restart).' }
+        'CompletedWithFollowUp' { 'Some applications need manual follow-up (interaction, a restart or a manual check).' }
         default { 'Some applications could not be installed.' }
     }
+    if (@($State.packages.Values | Where-Object { $_['failureClass'] -eq 'Budget' }).Count) { $reason += " The runtime limit ($($Config.maxRuntimeHours) h) was reached." }
+    if ($State.halted) { $reason += " Stopped after $($State.halted) failed (continue after a failure is off)." }
+    if ($final -ne 'Succeeded') { $reason += ' Failed and unfinished applications can be retried with the deployment recovery tool.' }
     return Complete-Wda $Config $Paths $State $final $reason $queue
 }
 
@@ -2917,6 +3425,13 @@ if ($MyInvocation.InvocationName -ne '.') {
     $engineMode = $Mode
     $cfg = Get-WdaConfig $ConfigPath
     . (Join-Path $PSScriptRoot 'WinGetBootstrap.ps1')
+    if ($engineMode -eq 'Retry') {
+        $who = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+        $r = Invoke-WdaRetry $cfg -Operations $Operation -AllFailed:$AllFailed -PendingOnly:$PendingOnly -IncludePermanent:$IncludePermanent -RequestedBy $who
+        [pscustomobject]$r | ConvertTo-Json -Depth 5
+        if ($r.Outcome -eq 'Accepted') { exit 0 }
+        exit 1
+    }
     if ($engineMode -eq 'Plan') {
         $plan = Invoke-WdaPlan $cfg
         "WinGet: $($plan.WinGet.Status) $($plan.WinGet.Version) $($plan.WinGet.Message)"
@@ -3213,10 +3728,17 @@ if ($MyInvocation.InvocationName -ne '.') {
 
 .PARAMETER Uninstall
     Removes the scheduled task. Logs and results are kept.
+
+.PARAMETER Resume
+    Phase 5 (used by the deployment recovery tool): continues the existing run instead of starting a
+    new one. The engine files are copied again from this folder (repairing missing or modified
+    copies), the task is registered again and started, but state, results and history are kept, so
+    nothing that already succeeded is repeated.
 #&gt;
 [CmdletBinding()]
 param(
     [switch] $Uninstall,
+    [switch] $Resume,
     [switch] $NoStart,
     [int] $CheckInSeconds = 90
 )
@@ -3254,18 +3776,25 @@ if ($LASTEXITCODE -ne 0) { throw "icacls failed with exit code $LASTEXITCODE; re
 Write-Step "Secured $dataRoot (SYSTEM/Administrators full control, Users read)."
 
 # 3. Files. A new installation starts a new run; earlier state and results are archived.
+#    -Resume keeps them: the recovery tool has already reopened what should run again.
 $stamp = Get-Date -Format 'yyyyMMddHHmmss'
-foreach ($name in 'state.json', 'result.json', 'status.json', 'follow-up.txt') {
-    $p = Join-Path $installDir $name
-    if (Test-Path -LiteralPath $p) { Move-Item -LiteralPath $p -Destination (Join-Path $installDir "$name.$stamp.bak") -Force }
+if (-not $Resume) {
+    foreach ($name in 'state.json', 'state.json.bak', 'result.json', 'status.json', 'follow-up.txt') {
+        $p = Join-Path $installDir $name
+        if (Test-Path -LiteralPath $p) { Move-Item -LiteralPath $p -Destination (Join-Path $installDir "$name.$stamp.bak") -Force }
+    }
+    $marker = Join-Path (Join-Path $dataRoot 'state') 'applications.done'
+    if (Test-Path -LiteralPath $marker) { Remove-Item -LiteralPath $marker -Force }
 }
-$marker = Join-Path (Join-Path $dataRoot 'state') 'applications.done'
-if (Test-Path -LiteralPath $marker) { Remove-Item -LiteralPath $marker -Force }
 $source = (Resolve-Path -LiteralPath $PSScriptRoot).Path.TrimEnd('\\')
 $target = (Resolve-Path -LiteralPath $installDir).Path.TrimEnd('\\')
 if ($source -ne $target) {
     foreach ($name in 'ApplicationEngine.ps1', 'WinGetBootstrap.ps1', 'applications-config.json', 'winget-packages.json') {
         Copy-Item -LiteralPath (Join-Path $source $name) -Destination (Join-Path $target $name) -Force
+        # The task runs the copy, so the copy must be exactly what was verified.
+        if ((Get-FileHash -LiteralPath (Join-Path $source $name) -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath (Join-Path $target $name) -Algorithm SHA256).Hash) {
+            throw "The copy of $name in $target does not match its source; refusing to register the task."
+        }
     }
     foreach ($dir in 'offline', 'installers') {
         $from = Join-Path $source $dir
@@ -3317,7 +3846,7 @@ exit 1
 		<File path="C:\\Windows\\Setup\\Scripts\\Applications\\applications-config.json">
 {
   "schemaVersion": 1,
-  "engineVersion": "1.1.0",
+  "engineVersion": "1.2.0",
   "dataRoot": "C:\\\\ProgramData\\\\WindowsDeploymentBuilder",
   "taskPath": "\\\\WindowsDeploymentBuilder\\\\",
   "taskName": "Applications",
@@ -3337,13 +3866,21 @@ exit 1
   "onlineRepair": false,
   "minimumWinGetVersion": "1.6.0",
   "maxReboots": 3,
-  "maxAttemptsPerPackage": 2,
+  "maxAttemptsPerPackage": 3,
   "packageTimeoutMinutes": 30,
   "networkWaitMinutes": 15,
   "maxRuntimeHours": 4,
   "waitForUpdatesHours": 8,
   "lockWaitMinutes": 60,
   "rebootWarningSeconds": 60,
+  "retry": {
+    "automatic": true,
+    "continueAfterFailure": true,
+    "baseDelaySeconds": 60,
+    "maxDelaySeconds": 900,
+    "jitterRatio": 0.2,
+    "maxNetworkDeferrals": 6
+  },
   "packages": [
     {
       "key": "winget:google.chrome",
@@ -3492,11 +4029,17 @@ exit 1
     installed by the existing engines (WindowsUpdateEngine.ps1 as SYSTEM, ApplicationEngine.ps1 as
     the signed-in user), each from its own scheduled task. The orchestrator launches each engine's
     installer once, follows their real result files and writes one deployment status and report.
+
+    Phase 5 (orchestrator 1.1.0): state files are replaced atomically with a backup of the last good
+    copy (Read-WddDeploymentState falls back to it and never mistakes a damaged state for "no
+    deployment"), and every snapshot carries a machine-readable outcome with a stable exit code
+    (Get-WddDeploymentOutcome) for DeploymentRecovery.ps1 and later health reporting.
 #&gt;
 
 Set-StrictMode -Version 2.0
 
-$script:DeployVersion = '1.0.0'
+$script:DeployVersion = '1.1.0'
+$script:DeployStateVersion = 2
 $script:EventSource = 'WindowsDeploymentBuilder'
 $script:ManifestFormat = 'windows-deployment-builder/deployment-manifest'
 $script:MutexName = 'Global\\WindowsDeploymentBuilder-Deployment'
@@ -3585,13 +4128,27 @@ function ConvertTo-WddHashtable {
     return $InputObject
 }
 
+&lt;#
+    Atomic write: &lt;Path&gt;.tmp is written through to disk, then replaces &lt;Path&gt; in one file-system
+    operation; -Backup keeps the replaced file as &lt;Path&gt;.bak (the last good copy).
+#&gt;
 function Write-WddJson {
-    param([string] $Path, $Value)
+    param([string] $Path, $Value, [switch] $Backup)
     $dir = Split-Path -Parent $Path
     if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
     $json = $Value | ConvertTo-Json -Depth 12
     $tmp = "$Path.tmp"
-    [System.IO.File]::WriteAllText($tmp, $json, (New-Object System.Text.UTF8Encoding($false)))
+    $bytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes($json)
+    $fs = New-Object System.IO.FileStream($tmp, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None, 4096, [System.IO.FileOptions]::WriteThrough)
+    try { $fs.Write($bytes, 0, $bytes.Length); $fs.Flush($true) } finally { $fs.Dispose() }
+    if (Test-Path -LiteralPath $Path) {
+        try {
+            [System.IO.File]::Replace($tmp, $Path, $(if ($Backup) { "$Path.bak" } else { $null }))
+            return
+        } catch {
+            if ($Backup) { Copy-Item -LiteralPath $Path -Destination "$Path.bak" -Force }
+        }
+    }
     Move-Item -LiteralPath $tmp -Destination $Path -Force
 }
 
@@ -3771,7 +4328,14 @@ function Test-WddRestartPending {
     param([hashtable] $Paths)
     $m = Read-WddJson $Paths.RestartMarker
     if (-not $m) { return $false }
-    $written = ConvertTo-WddDate $m.writtenUtc
+    # The engines' shared Set-WdbRestartPending writes requestedUtc and the boot it was written in
+    # (bootTimeUtc); writtenUtc is the Phase 4 name. A marker from an earlier boot is not pending.
+    if ($m['bootTimeUtc']) {
+        $markerBoot = ConvertTo-WddDate $m['bootTimeUtc']
+        try { $boot = Get-WddBootTime } catch { return $true }
+        if (-not $markerBoot -or [Math]::Abs(($markerBoot - $boot).TotalSeconds) -gt 2) { return $false }
+    }
+    $written = ConvertTo-WddDate $(if ($m['writtenUtc']) { $m['writtenUtc'] } else { $m['requestedUtc'] })
     if (-not $written -or ((Get-WddNow) - $written).TotalMinutes -gt 30) { return $false }
     try { $boot = Get-WddBootTime } catch { return $true }
     return $written -ge $boot
@@ -3791,11 +4355,12 @@ function Get-WddStageSnapshot {
     param([hashtable] $Stage, [hashtable] $Paths, [hashtable] $State)
     $root = $Paths.Root
     $launch = if ($State -and $State.stages -and $State.stages.ContainsKey($Stage.id)) { $State.stages[$Stage.id] } else { $null }
-    $o = [ordered]@{ id = $Stage.id; name = $Stage.name; enabled = [bool] $Stage.enabled; context = $Stage.context; state = 'NotStarted'; status = ''; outcome = ''; detail = ''; reboots = 0; updatedUtc = $null; current = ''; done = $null; total = $null; result = $null }
+    $o = [ordered]@{ id = $Stage.id; name = $Stage.name; enabled = [bool] $Stage.enabled; context = $Stage.context; state = 'NotStarted'; status = ''; outcome = ''; detail = ''; reboots = 0; updatedUtc = $null; current = ''; done = $null; total = $null; result = $null; idle = ''; outstanding = 0 }
     $result = Read-WddJson (Join-Path $root $Stage.result)
     if ($result -and $result.status -in $script:FinalStageStatuses) {
         $o.state = 'Final'; $o.status = $result.status; $o.outcome = Get-WddOutcome $result.status; $o.detail = [string] $result.reason
         $o.reboots = [int] $result.reboots; $o.updatedUtc = $result.finishedUtc; $o.result = $result
+        if ($result.ContainsKey('outstanding')) { $o.outstanding = @($result.outstanding).Count }
         return $o
     }
     $status = Read-WddJson (Join-Path $root $Stage.status)
@@ -3810,7 +4375,18 @@ function Get-WddStageSnapshot {
     if ($launch.launchResult -eq 'LaunchFailed') { $o.state = 'LaunchFailed'; $o.detail = [string] $launch.message; return $o }
     $since = ConvertTo-WddDate $launch.launchedUtc
     $age = if ($since) { ((Get-WddNow) - $since).TotalMinutes } else { 0 }
-    if ($taskExists) { $o.state = $(if ($status) { 'Running' } else { 'Pending' }); return $o }
+    if ($taskExists) {
+        $o.state = $(if ($status) { 'Running' } else { 'Pending' })
+        # Phase 5: the user-context stage runs only while its user is signed in; say so when it has
+        # not checked in for a long time instead of looking busy.
+        $seen = ConvertTo-WddDate $o.updatedUtc
+        $limit = [int] $State.stalledAfterMinutes
+        if ($Stage.context -eq 'user' -and $limit -gt 0 -and $age -ge $limit -and (-not $seen -or ((Get-WddNow) - $seen).TotalMinutes -ge $limit)) {
+            $who = $(if ($launch.ContainsKey('user') -and $launch.user) { [string] $launch.user } else { 'the user who started the deployment' })
+            $o.idle = "has not run for more than $limit minutes; it runs only while $who is signed in."
+        }
+        return $o
+    }
     # No task and no result: the engine removed its task without a result, or the task was deleted.
     if ($age -ge [int] $State.stalledAfterMinutes) { $o.state = 'Stalled'; if (-not $o.detail) { $o.detail = 'The scheduled task is missing and there is no result. Run Resume-Deployment.ps1.' } }
     else { $o.state = $(if ($status) { 'Running' } else { 'Pending' }) }
@@ -3826,7 +4402,7 @@ function Get-WddSnapshot {
     $allFinal = ($engine.Count -eq 0) -or (@($engine | Where-Object { $_.state -ne 'Final' }).Count -eq 0)
     $blocked = @($engine | Where-Object { $_.state -in 'Stalled', 'LaunchFailed' })
     $current = @($engine | Where-Object { $_.state -in 'Running', 'Pending' } | Select-Object -First 1)
-    [ordered]@{
+    $snap = [ordered]@{
         packageId       = $Manifest.packageId
         updatedUtc      = (Get-WddNow).ToString('o')
         deploymentState = $(if ($State) { [string] $State.status } else { 'NotInitialized' })
@@ -3838,6 +4414,17 @@ function Get-WddSnapshot {
         needsAttention  = @($blocked | ForEach-Object { "$($_.name): $($_.state). $($_.detail)" })
         overall         = $(if ($allFinal) { Get-WddOverall $engine } else { 'InProgress' })
     }
+    Set-WddSnapshotOutcome $snap $State
+    return $snap
+}
+
+&lt;# Adds outcome, outcomeCode and outcomeDetail (Phase 5) to a snapshot. #&gt;
+function Set-WddSnapshotOutcome {
+    param($Snapshot, $State, [string] $Problem = '')
+    $out = Get-WddDeploymentOutcome $State $Snapshot $Problem
+    $Snapshot.outcome = $out.outcome
+    $Snapshot.outcomeCode = $out.exitCode
+    $Snapshot.outcomeDetail = $out.detail
 }
 
 &lt;#
@@ -3861,7 +4448,93 @@ function Get-WddOverall {
     switch ($worst) { 'ok' { 'Succeeded' } 'followUp' { 'CompletedWithFollowUp' } 'failures' { 'CompletedWithFailures' } 'failed' { 'Failed' } default { 'Incomplete' } }
 }
 
-function Save-WddState { param([hashtable] $Paths, [hashtable] $State) Write-WddJson $Paths.State $State }
+function Save-WddState { param([hashtable] $Paths, [hashtable] $State) Write-WddJson $Paths.State $State -Backup }
+
+$script:DeployStates = @('Staging', 'StagingFailed', 'Launching', 'InProgress', 'Completed', 'IntegrityFailed')
+
+&lt;# Shape check of deployment.json: a reason, or $null when the state is usable. #&gt;
+function Test-WddStateShape {
+    param($S)
+    if ($S -isnot [hashtable]) { return 'not an object' }
+    if ("$($S['schemaVersion'])" -notmatch '^\\d{1,3}$' -or [int] $S['schemaVersion'] -lt 1 -or [int] $S['schemaVersion'] -gt $script:DeployStateVersion) { return "unsupported schema version '$($S['schemaVersion'])'" }
+    if ([string] $S['packageId'] -notmatch '^[0-9A-F]{16}$') { return 'no valid packageId' }
+    if ([string] $S['status'] -notin $script:DeployStates) { return "unknown status '$($S['status'])'" }
+    if ($S.ContainsKey('stages') -and $null -ne $S['stages'] -and $S['stages'] -isnot [hashtable]) { return 'stages is not a map' }
+    return $null
+}
+
+&lt;#
+    Reads deployment.json, falling back to the last good copy (deployment.json.bak). Returns
+      @{ State; Source = main | backup | missing | corrupt; Problem }
+    "corrupt" (a state file exists but neither copy is usable) is never treated as "no deployment":
+    callers stop and leave the decision to a technician (DeploymentRecovery.ps1 -Action Resume
+    rebuilds the state from the manifest and the engines' own files).
+#&gt;
+function Read-WddDeploymentState {
+    param([hashtable] $Paths)
+    $problems = @()
+    $exists = $false
+    foreach ($candidate in @($Paths.State, "$($Paths.State).bak")) {
+        if (-not (Test-Path -LiteralPath $candidate)) { continue }
+        $exists = $true
+        $s = Read-WddJson $candidate
+        $why = $(if ($null -eq $s) { 'not valid JSON' } else { Test-WddStateShape $s })
+        if (-not $why) {
+            if (-not $s.ContainsKey('recoveries') -or $null -eq $s['recoveries']) { $s['recoveries'] = @() }
+            if (-not $s.ContainsKey('stages') -or $null -eq $s['stages']) { $s['stages'] = @{} }
+            $s.schemaVersion = $script:DeployStateVersion
+            if ($candidate -ne $Paths.State) {
+                Write-WddLog "Deployment state recovered from its last good copy ($(Split-Path -Leaf $candidate)); the damaged file was kept as deployment.json.corrupt." 'WARN'
+                if (Test-Path -LiteralPath $Paths.State) { Copy-Item -LiteralPath $Paths.State -Destination "$($Paths.State).corrupt" -Force -ErrorAction SilentlyContinue }
+                return @{ State = $s; Source = 'backup'; Problem = ($problems -join '; ') }
+            }
+            return @{ State = $s; Source = 'main'; Problem = '' }
+        }
+        $problems += "$(Split-Path -Leaf $candidate): $why"
+    }
+    if (-not $exists) { return @{ State = $null; Source = 'missing'; Problem = '' } }
+    return @{ State = $null; Source = 'corrupt'; Problem = ($problems -join '; ') }
+}
+
+# ------------------------------------------------------------------------------------------------
+# Outcome (Phase 5): one machine-readable result with a stable exit code
+# ------------------------------------------------------------------------------------------------
+
+$script:OutcomeCodes = [ordered]@{
+    Succeeded = 0; CompletedWithWarnings = 10; CompletedWithFailures = 20; Incomplete = 25
+    PausedAwaitingNetwork = 30; PausedAwaitingReboot = 31; PausedAwaitingUser = 32; InProgress = 40
+    FailedToInitialize = 50; Failed = 60
+}
+
+&lt;#
+    Where the deployment stands, for people and programs:
+      ended    Succeeded, CompletedWithWarnings (manual actions or follow-ups), CompletedWithFailures,
+               Incomplete (ended before every stage finished), Failed
+      running  PausedAwaitingNetwork, PausedAwaitingReboot, PausedAwaitingUser, InProgress
+      never    FailedToInitialize (no usable state, staging or integrity failure)
+#&gt;
+function Get-WddDeploymentOutcome {
+    param($State, $Snapshot, [string] $Problem = '')
+    $o = { param([string] $Name, [string] $Detail) [ordered]@{ outcome = $Name; exitCode = $script:OutcomeCodes[$Name]; detail = $Detail } }
+    if (-not $State) { return &amp; $o 'FailedToInitialize' $(if ($Problem) { "The deployment state is unusable: $Problem" } else { 'No deployment has been started on this computer.' }) }
+    switch ([string] $State.status) {
+        'StagingFailed' { return &amp; $o 'FailedToInitialize' ([string] $State.message) }
+        'IntegrityFailed' { return &amp; $o 'FailedToInitialize' ([string] $State.message) }
+        'Completed' {
+            $map = @{ Succeeded = 'Succeeded'; CompletedWithFollowUp = 'CompletedWithWarnings'; CompletedWithFailures = 'CompletedWithFailures'; Incomplete = 'Incomplete'; Failed = 'Failed' }
+            $name = $(if ($map.ContainsKey([string] $State.overall)) { $map[[string] $State.overall] } else { 'Failed' })
+            return &amp; $o $name ([string] $State.message)
+        }
+    }
+    $stages = @(if ($Snapshot) { @($Snapshot.stages) } else { @() })
+    $live = @($stages | Where-Object { $_ -and $_.state -ne 'Final' })
+    if (($Snapshot -and $Snapshot.restartPending) -or @($live | Where-Object { $_.status -in 'Rebooting', 'RebootDeferred' }).Count) { return &amp; $o 'PausedAwaitingReboot' 'A restart is scheduled or in progress; the deployment continues after it.' }
+    $net = @($live | Where-Object { $_.status -eq 'WaitingForNetwork' })
+    if ($net.Count) { return &amp; $o 'PausedAwaitingNetwork' ("$(($net | ForEach-Object { $_.name }) -join ', '): waiting for the network. $(($net | ForEach-Object { $_.detail } | Where-Object { $_ }) -join '; ')".Trim()) }
+    $user = @($live | Where-Object { $_.state -in 'Stalled', 'LaunchFailed' -or $_.idle })
+    if ($user.Count) { return &amp; $o 'PausedAwaitingUser' (($user | ForEach-Object { "$($_.name): $(if ($_.idle) { $_.idle } else { "$($_.state). $($_.detail)" })" }) -join ' ') }
+    return &amp; $o 'InProgress' $(if ($Snapshot -and $Snapshot.currentStage) { "Current stage: $($Snapshot.currentStage)." } else { 'Stages are starting.' })
+}
 		</File>
 		<File path="C:\\Windows\\Setup\\Scripts\\Deployment\\scripts\\bootstrap\\Stage-Deployment.ps1">
 #Requires -Version 5.1
@@ -4072,6 +4745,14 @@ function Start-WddConsole {
     Start-Process -FilePath $ps -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "\`"$show\`"", '-Watch')
 }
 
+function Get-WddRecoveryShortcut {
+    param([hashtable] $Paths)
+    $tool = Join-Path $Paths.Package 'scripts\\recovery\\DeploymentRecovery.ps1'
+    if (-not (Test-Path -LiteralPath $tool)) { return $null }
+    $ps = Join-Path $env:SystemRoot 'System32\\WindowsPowerShell\\v1.0\\powershell.exe'
+    @{ Target = $ps; Arguments = "-NoProfile -ExecutionPolicy Bypass -File \`"$tool\`" -Elevate" }
+}
+
 function Get-WddProgressShortcut {
     param([hashtable] $Paths)
     $ps = Join-Path $env:SystemRoot 'System32\\WindowsPowerShell\\v1.0\\powershell.exe'
@@ -4086,7 +4767,7 @@ function New-WddState {
     param([hashtable] $Manifest, [string] $SourceMode, [hashtable] $Identity)
     $now = Get-WddNow
     @{
-        schemaVersion        = 1
+        schemaVersion        = 2
         packageId            = $Manifest.packageId
         packageVersion       = $Manifest.packageVersion
         orchestratorVersion  = $script:DeployVersion
@@ -4101,6 +4782,7 @@ function New-WddState {
         monitorRuns          = 0
         overall              = ''
         message              = ''
+        recoveries           = @()
     }
 }
 
@@ -4111,6 +4793,8 @@ function Invoke-WddLaunchStage {
     param([hashtable] $Stage, [hashtable] $Paths, [hashtable] $State, [hashtable] $Identity, [int] $MaxAttempts)
     $rec = if ($State.stages.ContainsKey($Stage.id)) { $State.stages[$Stage.id] } else { @{ launchResult = ''; attempts = 0; launchedUtc = $null; exitCode = $null; message = '' } }
     $State.stages[$Stage.id] = $rec
+    # Phase 5: who the stage runs as (a user-context stage only runs while that user is signed in).
+    if (-not $rec.ContainsKey('user') -or -not $rec.user) { $rec.user = $(if ($Stage.context -eq 'user') { [string] $Identity.Name } else { 'SYSTEM' }) }
     if ($rec.launchResult -eq 'Launched') { Write-WddLog "Stage $($Stage.id) was already launched; not launching it again."; return $rec }
     # Interrupted earlier launch: if its task exists the installer finished registering it.
     if ($rec.launchResult -eq 'Launching' -and (Get-WddTask $Stage.task.path $Stage.task.name)) {
@@ -4164,7 +4848,13 @@ function Invoke-WddInitialize {
     $mutex = Enter-WddMutex 120
     if (-not $mutex) { Write-WddLog 'Another deployment process is running; nothing to do.' 'WARN'; return 'Busy' }
     try {
-        $state = Read-WddJson $Paths.State
+        $read = Read-WddDeploymentState $Paths
+        if ($read.Source -eq 'corrupt') {
+            # Never start over on top of a damaged state: that would launch stages a second time.
+            Write-WddLog "The deployment state is damaged ($($read.Problem)); refusing to start over. Run DeploymentRecovery.ps1 -Action Resume." 'ERROR'
+            return 'StateCorrupt'
+        }
+        $state = $read.State
         if ($state) {
             if ($state.packageId -ne $Manifest.packageId -and $state.status -notin 'Completed', 'StagingFailed') {
                 Write-WddLog "A different deployment ($($state.packageId)) is still in progress; refusing to start $($Manifest.packageId). Finish or reset it first (see recovery instructions)." 'ERROR'
@@ -4189,7 +4879,9 @@ function Invoke-WddInitialize {
             if (-not $staged.Ok) {
                 $state.status = 'StagingFailed'; $state.overall = 'Failed'; $state.message = $staged.Message
                 Save-WddState $Paths $state
-                Write-WddJson $Paths.Status ([ordered]@{ packageId = $Manifest.packageId; updatedUtc = (Get-WddNow).ToString('o'); deploymentState = 'StagingFailed'; overall = 'Failed'; message = $staged.Message; missing = $staged.Missing; modified = $staged.Mismatched })
+                $snap = [ordered]@{ packageId = $Manifest.packageId; updatedUtc = (Get-WddNow).ToString('o'); deploymentState = 'StagingFailed'; overall = 'Failed'; message = $staged.Message; missing = $staged.Missing; modified = $staged.Mismatched }
+                Set-WddSnapshotOutcome $snap $state
+                Write-WddJson $Paths.Status $snap
                 Write-WddEvent 3002 "Deployment not started: $($staged.Message) See $($Paths.Log)." 'Error'
                 return 'StagingFailed'
             }
@@ -4215,6 +4907,12 @@ function Invoke-WddInitialize {
             $sc = Get-WddProgressShortcut $Paths
             New-WddShortcut 'Deployment progress' $sc.Target $sc.Arguments 'Windows Deployment Builder: deployment progress'
         } catch { Write-WddLog "Could not create the progress shortcut: $($_.Exception.Message)" 'WARN' }
+        # Phase 5: the technician recovery entry point, when the package carries it.
+        $rt = Get-WddRecoveryShortcut $Paths
+        if ($rt) {
+            try { New-WddShortcut 'Deployment recovery' $rt.Target $rt.Arguments 'Windows Deployment Builder: status, retry failed applications, resume, diagnostics (asks for administrator rights)' }
+            catch { Write-WddLog "Could not create the recovery shortcut: $($_.Exception.Message)" 'WARN' }
+        }
         Write-WddEvent 3000 "Deployment $($Manifest.packageId) started. Status: $($Paths.Status)."
         try { Start-WddTask $script:MonitorTask.path $script:MonitorTask.name } catch { Write-WddLog "Could not start the monitor now; it runs within 15 minutes: $($_.Exception.Message)" 'WARN' }
         if (-not $NoConsole) { try { Start-WddConsole $Paths } catch { Write-WddLog "Could not open the progress window: $($_.Exception.Message)" 'WARN' } }
@@ -4266,6 +4964,10 @@ if ($script:InitMain) {
 
     It never launches or re-launches an engine. A stage whose task disappeared without a result is
     reported as Stalled and needs Resume-Deployment.ps1, so no stage can loop.
+
+    Phase 5: a damaged deployment.json is replaced by its last good copy; if neither is usable the
+    monitor stops (StateCorrupt) instead of acting on a guess, and the recovery tool rebuilds it.
+    status.json carries the machine-readable outcome (outcome, outcomeCode, outcomeDetail).
 #&gt;
 [CmdletBinding()]
 param()
@@ -4280,7 +4982,17 @@ function Invoke-WddMonitor {
     $mutex = Enter-WddMutex 30
     if (-not $mutex) { Write-WddLog 'Monitor: another deployment process is running; skipping this run.'; return 'Busy' }
     try {
-        $state = Read-WddJson $Paths.State
+        $read = Read-WddDeploymentState $Paths
+        $state = $read.State
+        if ($read.Source -eq 'corrupt') {
+            $msg = "The deployment state is damaged and its backup is unusable ($($read.Problem)). The monitor stopped; nothing is run. Run DeploymentRecovery.ps1 -Action Resume to rebuild it."
+            Write-WddLog $msg 'ERROR'
+            $snap = [ordered]@{ updatedUtc = (Get-WddNow).ToString('o'); deploymentState = 'StateCorrupt'; overall = 'Failed'; message = $msg }
+            Set-WddSnapshotOutcome $snap $null $read.Problem
+            Write-WddJson $Paths.Status $snap
+            Write-WddEvent 3004 $msg 'Error'
+            return 'StateCorrupt'
+        }
         if (-not $state) { Write-WddLog 'Monitor: no deployment state; nothing to follow.' 'WARN'; return 'NoState' }
         if ($state.status -eq 'Completed') { Unregister-WddTask '\\WindowsDeploymentBuilder\\' 'Deployment'; return 'AlreadyCompleted' }
         if ($state.status -eq 'IntegrityFailed') { return 'IntegrityFailed' }
@@ -4294,7 +5006,9 @@ function Invoke-WddMonitor {
             Save-WddState $Paths $state
             Write-WddLog $state.message 'ERROR'
             foreach ($m in @($check.Missing) + @($check.Mismatched)) { Write-WddLog "  $m" 'ERROR' }
-            Write-WddJson $Paths.Status ([ordered]@{ packageId = $state.packageId; updatedUtc = (Get-WddNow).ToString('o'); deploymentState = 'IntegrityFailed'; overall = 'Failed'; message = $state.message })
+            $snap = [ordered]@{ packageId = $state.packageId; updatedUtc = (Get-WddNow).ToString('o'); deploymentState = 'IntegrityFailed'; overall = 'Failed'; message = $state.message }
+            Set-WddSnapshotOutcome $snap $state
+            Write-WddJson $Paths.Status $snap
             Write-WddEvent 3003 $state.message 'Error'
             return 'IntegrityFailed'
         }
@@ -4334,7 +5048,7 @@ if ($script:MonitorMain) {
     $manifest = Read-WddManifest (Join-Path $package 'deployment-manifest.json')
     $outcome = Invoke-WddMonitor (Get-WddPaths $manifest.dataRoot)
     Write-Output $outcome
-    if ($outcome -eq 'IntegrityFailed') { exit 1 }
+    if ($outcome -in 'IntegrityFailed', 'StateCorrupt') { exit 1 }
     exit 0
 }
 		</File>
@@ -4371,6 +5085,7 @@ function Format-WddStatus {
     $l.Add('================================================')
     $overall = if ($State -and $State.status -eq 'Completed') { "Finished: $($State.overall)" } elseif ($State) { $State.status } else { 'Not started' }
     $l.Add("Deployment     : $overall")
+    $l.Add("Outcome        : $($s.outcome) (code $($s.outcomeCode)) $($s.outcomeDetail)")
     if ($State -and $State.message) { $l.Add("                 $($State.message)") }
     if ($State) { $l.Add("Started (UTC)  : $($State.initializedUtc)   deadline: $($State.deadlineUtc)") }
     $l.Add("Current stage  : $(if ($s.currentStage) { $s.currentStage } else { '-' })")
@@ -4384,6 +5099,8 @@ function Format-WddStatus {
             if ($null -ne $st.total -and [int] $st.total -gt 0) { $l.Add("  applications: $($st.done) of $($st.total) done, $([int] $st.total - [int] $st.done) remaining") }
         }
         if ($st.reboots) { $l.Add("  restarts so far: $($st.reboots)") }
+        if ($st.idle) { $l.Add("  note: $($st.idle)") }
+        if ($st.outstanding) { $l.Add("  outstanding operations: $($st.outstanding) (retry them with the deployment recovery tool)") }
     }
     $l.Add(('{0,-22} {1,-12} {2,-22} {3}' -f 'Manufacturer drivers', 'NotImplemented', '', 'Not part of this version'))
     $l.Add('')
@@ -4404,7 +5121,7 @@ if ($script:ShowMain) {
     $manifest = Read-WddManifest (Join-Path $package 'deployment-manifest.json')
     $paths = Get-WddPaths $manifest.dataRoot
     do {
-        $state = Read-WddJson $paths.State
+        $state = (Read-WddDeploymentState $paths).State
         $out = Format-WddStatus $manifest $paths $state
         if ($script:ShowArgs.Watch) { Clear-Host }
         Write-Output $out.Text
@@ -4461,7 +5178,9 @@ function Invoke-WddResume {
     $mutex = Enter-WddMutex 60
     if (-not $mutex) { return 'Busy' }
     try {
-        $state = Read-WddJson $Paths.State
+        $read = Read-WddDeploymentState $Paths
+        if ($read.Source -eq 'corrupt') { Write-WddLog "Resume: the deployment state is damaged ($($read.Problem)). Use DeploymentRecovery.ps1 -Action Resume, which rebuilds it." 'ERROR'; return 'StateCorrupt' }
+        $state = $read.State
         if (-not $state) { Write-WddLog 'Resume: no deployment state. Start a deployment with setup.ps1 or Initialize-Deployment.ps1.' 'ERROR'; return 'NoState' }
         $manifestPath = Join-Path $Paths.Package 'deployment-manifest.json'
         $manifest = Read-WddManifest $manifestPath
@@ -4497,7 +5216,7 @@ if ($script:ResumeMain) {
     $package = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
     $manifest = Read-WddManifest (Join-Path $package 'deployment-manifest.json')
     $paths = Get-WddPaths $manifest.dataRoot
-    if ($script:ResumeArgs.Status) { (Format-WddStatus $manifest $paths (Read-WddJson $paths.State)).Text; exit 0 }
+    if ($script:ResumeArgs.Status) { (Format-WddStatus $manifest $paths (Read-WddDeploymentState $paths).State).Text; exit 0 }
     $outcome = Invoke-WddResume $paths $script:ResumeArgs.RestartStage
     Write-Output "Resume: $outcome. Log: $($paths.Log)"
     if ($outcome -eq 'Resumed') { exit 0 }
@@ -4569,7 +5288,12 @@ function New-WddReport {
     $appsReport = $null
     if ($apps) {
         $r = $apps.result
-        $pk = @(if ($r) { @($r.packages) | Where-Object { $_ } | ForEach-Object { [ordered]@{ name = $_.name; packageIdentifier = $_.packageIdentifier; source = $_.source; status = $_.status; attempts = $_.attempts; exitCode = $_.exitCode; message = $_.message } } })
+        # Phase 5: lifecycle, failure class and attempt totals come from result schema 2 (absent in schema 1).
+        $pk = @(if ($r) { @($r.packages) | Where-Object { $_ } | ForEach-Object {
+            $x = [ordered]@{ name = $_.name; packageIdentifier = $_.packageIdentifier; source = $_.source; status = $_.status; attempts = $_.attempts; exitCode = $_.exitCode; message = $_.message }
+            foreach ($k in 'operationId', 'lifecycle', 'failureClass', 'retryable', 'detection', 'totalAttempts', 'manualRetries') { if ($_.ContainsKey($k)) { $x[$k] = $_[$k] } }
+            $x
+        } })
         $add = @(if ($r) { @($r.additionalSoftware) | Where-Object { $_ } })
         $appsReport = [ordered]@{ state = $apps.state; status = $apps.status; reason = $apps.detail; reboots = $apps.reboots
                                   counts = $(if ($r) { $r.counts } else { $null }); packages = $pk; additionalSoftware = $add
@@ -4591,10 +5315,39 @@ function New-WddReport {
         elseif ($policy.status -notin 'Applied', 'AlreadyApplied') { $remaining += "Ongoing Windows Update policy: $($policy.status). $($policy.message)" }
     }
     $remaining += 'Manufacturer drivers: not part of this deployment (driver stage not implemented). Install chipset, graphics and OEM drivers manually if Windows Update did not provide them.'
+    # Phase 5: what is still open and how to recover it, kept after the deployment ends.
+    $tool = Join-Path $Paths.Package 'scripts\\recovery\\DeploymentRecovery.ps1'
+    $hasTool = Test-Path -LiteralPath $tool
+    $outstanding = @()
+    if ($apps -and $apps.result -and $apps.result.ContainsKey('outstanding')) {
+        foreach ($x in @($apps.result.outstanding) | Where-Object { $_ }) {
+            $how = switch ([string] $x.lifecycle) {
+                'FailedRetryable' { 'retry (automatic retries used up)' } 'BlockedByDependency' { 'retry (with its dependency)' }
+                'WaitingForNetwork' { 'resume when the network is back' } 'Pending' { 'resume' } 'FailedPermanent' { 'correct the cause, then retry with -IncludePermanent' }
+                'ManualActionRequired' { 'install or finish it by hand' } 'WaitingForReboot' { 'restart the computer' } default { 'check' }
+            }
+            $outstanding += [ordered]@{ operationId = $x.operationId; name = $x.name; lifecycle = $x.lifecycle; failureClass = $x.failureClass; retryable = $x.retryable; action = $how; message = $x.message }
+        }
+    } elseif ($apps -and $apps.state -ne 'Final') {
+        $outstanding += [ordered]@{ operationId = 'stage:applications'; name = 'Applications'; lifecycle = 'Pending'; failureClass = ''; retryable = $true; action = 'resume'; message = "The application stage is $($apps.state)." }
+    }
+    if ($wu -and $wu.state -eq 'Final' -and $wu.status -in 'CompletedWithFailures', 'Failed', 'Offline') {
+        $outstanding += [ordered]@{ operationId = 'stage:windowsUpdate'; name = 'Windows Update'; lifecycle = 'FailedRetryable'; failureClass = $(if ($wu.status -eq 'Offline') { 'Network' } else { 'Transient' }); retryable = $true; action = 'retry the update stage (installed updates are never offered again)'; message = [string] $wu.detail }
+    }
+    $recoveryCommands = [ordered]@{
+        status      = "powershell.exe -ExecutionPolicy Bypass -File \`"$tool\`" -Action Status"
+        retryFailed = "powershell.exe -ExecutionPolicy Bypass -File \`"$tool\`" -Action RetryFailed"
+        retryOne    = "powershell.exe -ExecutionPolicy Bypass -File \`"$tool\`" -Action Retry -Operation &lt;operationId&gt;"
+        resume      = "powershell.exe -ExecutionPolicy Bypass -File \`"$tool\`" -Action Resume"
+        diagnostics = "powershell.exe -ExecutionPolicy Bypass -File \`"$tool\`" -Action ExportDiagnostics"
+    }
+    $outcome = Get-WddDeploymentOutcome @{ status = 'Completed'; overall = $Overall; message = $Reason } $null
     [ordered]@{
         format             = 'windows-deployment-builder/deployment-report'
-        reportVersion      = 1
+        reportVersion      = 2
         overall            = $Overall
+        outcome            = $outcome.outcome
+        outcomeCode        = $outcome.exitCode
         reason             = $Reason
         generatedUtc       = (Get-WddNow).ToString('o')
         packageId          = $Manifest.packageId
@@ -4612,8 +5365,11 @@ function New-WddReport {
         incompleteStages   = $incomplete
         errors             = $errors
         remainingTasks     = $remaining
-        logs               = [ordered]@{ deployment = $Paths.Log; windowsUpdate = (Join-Path $Paths.Root 'Updates\\logs\\engine.log'); applications = (Join-Path $Paths.Root 'Applications\\logs\\engine.log') }
-        recovery           = "Resume: powershell.exe -ExecutionPolicy Bypass -File \`"$(Join-Path $Paths.Package 'scripts\\orchestrator\\Resume-Deployment.ps1')\`""
+        outstanding        = $outstanding
+        recoveries         = @(if ($State.ContainsKey('recoveries')) { @($State.recoveries) })
+        logs               = [ordered]@{ deployment = $Paths.Log; windowsUpdate = (Join-Path $Paths.Root 'Updates\\logs\\engine.log'); applications = (Join-Path $Paths.Root 'Applications\\logs\\engine.log'); attempts = (Join-Path $Paths.Root 'Applications\\logs\\attempts.jsonl') }
+        recovery           = "$(if ($hasTool) { "Recovery tool (as administrator; status, retry, resume, diagnostics): $($recoveryCommands.status). " })Resume only: powershell.exe -ExecutionPolicy Bypass -File \`"$(Join-Path $Paths.Package 'scripts\\orchestrator\\Resume-Deployment.ps1')\`""
+        recoveryCommands   = $(if ($hasTool) { $recoveryCommands } else { $null })
     }
 }
 
@@ -4623,6 +5379,7 @@ function Format-WddReport {
     $l.Add('Windows Deployment Builder - deployment report')
     $l.Add('==============================================')
     $l.Add("Overall result : $($Report.overall)")
+    if ($Report.Contains('outcome')) { $l.Add("Outcome        : $($Report.outcome) (exit code $($Report.outcomeCode))") }
     if ($Report.reason) { $l.Add("               : $($Report.reason)") }
     $l.Add("Generated (UTC): $($Report.generatedUtc)")
     $l.Add("Package        : $($Report.packageId) (package $($Report.packageVersion), orchestrator $($Report.orchestratorVersion))")
@@ -4643,7 +5400,10 @@ function Format-WddReport {
         $a = $Report.applications
         $l.Add("  Result: $($a.status) ($($a.state)). $($a.reason)")
         $l.Add("  Restarts: $($a.reboots)")
-        foreach ($p in @($a.packages)) { $l.Add(('  {0,-20} {1} ({2}:{3}) {4}' -f $p.status, $p.name, $p.source, $p.packageIdentifier, $p.message)) }
+        foreach ($p in @($a.packages)) {
+            $tries = $(if ($p.Contains('totalAttempts') -and [int] $p.totalAttempts -gt 1) { " [$($p.totalAttempts) attempts$(if ([int] $p.manualRetries) { ", $($p.manualRetries) manual retr$(if ([int] $p.manualRetries -eq 1) { 'y' } else { 'ies' })" })]" } else { '' })
+            $l.Add(('  {0,-20} {1} ({2}:{3}){4} {5}' -f $p.status, $p.name, $p.source, $p.packageIdentifier, $tries, $p.message))
+        }
         foreach ($s in @($a.additionalSoftware)) { $l.Add(('  {0,-20} {1} (Additional Software) {2}' -f $s.status, $s.name, $s.message)) }
     } else { $l.Add('  Not part of this deployment.') }
     $l.Add('')
@@ -4669,10 +5429,20 @@ function Format-WddReport {
     $l.Add('Remaining tasks')
     foreach ($x in $Report.remainingTasks) { $l.Add("  - $x") }
     $l.Add('')
+    if ($Report.Contains('outstanding')) {
+        $l.Add('Outstanding work (kept for recovery)')
+        if (@($Report.outstanding).Count) {
+            foreach ($x in $Report.outstanding) { $l.Add(('  {0,-22} {1} [{2}]: {3}' -f $x.lifecycle, $x.name, $x.operationId, $x.action)) }
+        } else { $l.Add('  None.') }
+        $l.Add('')
+    }
     $l.Add('Logs')
     foreach ($k in $Report.logs.Keys) { $l.Add(('  {0,-14} {1}' -f $k, $Report.logs[$k])) }
     $l.Add('')
     $l.Add("Recovery: $($Report.recovery)")
+    if ($Report.Contains('recoveryCommands') -and $Report.recoveryCommands) {
+        foreach ($k in $Report.recoveryCommands.Keys) { $l.Add(('  {0,-12} {1}' -f $k, $Report.recoveryCommands[$k])) }
+    }
     return ($l -join "\`r\`n") + "\`r\`n"
 }
 
@@ -4700,6 +5470,7 @@ function Complete-WddDeployment {
     Save-WddState $Paths $State
     $Snapshot.deploymentState = 'Completed'
     $Snapshot.overall = $overall
+    Set-WddSnapshotOutcome $Snapshot $State
     Write-WddJson $Paths.Status $Snapshot
     Write-WddLog "FINISHED: $overall. $reason Report: $($Paths.ReportText)" $(if ($overall -eq 'Succeeded') { 'INFO' } else { 'WARN' })
     $eventId = switch ($overall) { 'Succeeded' { 3100 } 'CompletedWithFollowUp' { 3101 } 'CompletedWithFailures' { 3102 } 'Failed' { 3103 } default { 3104 } }
@@ -4717,7 +5488,7 @@ if ($script:CompleteMain) {
     $manifest = Read-WddManifest (Join-Path $package 'deployment-manifest.json')
     $paths = Get-WddPaths $manifest.dataRoot
     Initialize-WddLogging $paths
-    $state = Read-WddJson $paths.State
+    $state = (Read-WddDeploymentState $paths).State
     if (-not $state) { Write-Output 'No deployment state found.'; exit 1 }
     $snapshot = Get-WddSnapshot $manifest $paths $state
     if ($script:CompleteArgs.Finish) {
@@ -4858,6 +5629,495 @@ function Step-WddUpdatePolicy {
     return $r
 }
 		</File>
+		<File path="C:\\Windows\\Setup\\Scripts\\Deployment\\scripts\\recovery\\DeploymentRecovery.ps1">
+#Requires -Version 5.1
+&lt;#
+.SYNOPSIS
+    Windows Deployment Recovery: status, retry of failed operations, resume and diagnostics for a
+    deployment on this computer (Phase 5).
+
+.DESCRIPTION
+    A small console tool for the technician. It never installs anything itself: it re-verifies the
+    staged package, reopens operations in the engines' own state (ApplicationEngine.ps1 -Mode Retry
+    logic, under the engine's mutex), registers the engines' tasks again and lets the deployment
+    monitor follow them, exactly as during the original deployment. Every security check of the
+    first run applies again on the retried attempt.
+
+      -Action Menu               (default) numbered menu; asks for administrator rights with -Elevate
+      -Action Status [-Json]     the deployment outcome, stages and every operation (read-only)
+      -Action PendingActions     what a person still has to do (manual installs, restarts, checks)
+      -Action RetryFailed        reopens every retryable failed or unfinished application (and a
+                                 failed Windows Update stage), keeping successful ones
+      -Action Retry -Operation app:winget:git.git[,...]
+                                 reopens the named operations (ids from Status); a dependency that
+                                 did not install is reopened with what needs it
+           [-IncludePermanent]   also permanent failures (hash, signature, policy, not found,
+                                 cancelled): only after the cause has been corrected
+      -Action Resume             continues interrupted provisioning: unfinished operations, a
+                                 missing task or monitor, a damaged deployment state (rebuilt from
+                                 the manifest and the engines' own files)
+      -Action ExportDiagnostics [-OutputPath &lt;zip&gt;]
+                                 logs, states, results and the report as one ZIP, with passwords
+                                 and Wi-Fi keys removed; answer files and Wi-Fi profiles are never
+                                 included
+
+    Only operations of this deployment's verified configuration can be retried. Deselected apps,
+    manual catalog entries, unresolved identifiers and anything already installed are refused. No
+    input is ever executed: operation ids must match a strict pattern and the permitted set.
+
+    Exit codes: Status returns the outcome code (0 Succeeded, 10 CompletedWithWarnings,
+    20 CompletedWithFailures, 25 Incomplete, 30/31/32 paused for network/reboot/user, 40 InProgress,
+    50 FailedToInitialize, 60 Failed). Actions return 0 (done), 1 (refused or nothing to do),
+    2 (busy), 3 (package integrity), 4 (administrator rights needed).
+#&gt;
+[CmdletBinding()]
+param(
+    [ValidateSet('Menu', 'Status', 'PendingActions', 'RetryFailed', 'Retry', 'Resume', 'ExportDiagnostics')]
+    [string] $Action = 'Menu',
+    [string[]] $Operation = @(),
+    [switch] $IncludePermanent,
+    [switch] $Json,
+    [string] $OutputPath = '',
+    [switch] $Elevate
+)
+
+$script:RecoveryMain = $MyInvocation.InvocationName -ne '.'
+# Captured first: the scripts dot-sourced below bind their own parameters in this scope.
+$script:RecoveryArgs = @{ Action = $Action; Operation = @($Operation); IncludePermanent = [bool] $IncludePermanent; Json = [bool] $Json; OutputPath = $OutputPath; Elevate = [bool] $Elevate }
+. (Join-Path $PSScriptRoot '..\\common\\DeploymentCommon.ps1')
+. (Join-Path $PSScriptRoot '..\\bootstrap\\Initialize-Deployment.ps1')
+. (Join-Path $PSScriptRoot '..\\orchestrator\\Show-DeploymentStatus.ps1')
+# The application engine's own functions (Retry mode, lifecycle); present when the stage is part of the package.
+$script:AppEngineScript = Join-Path $PSScriptRoot '..\\applications\\ApplicationEngine.ps1'
+if (Test-Path -LiteralPath $script:AppEngineScript) { . $script:AppEngineScript }
+Set-StrictMode -Version 2.0
+
+$script:RecoveryExit = @{ Done = 0; Refused = 1; NothingToDo = 1; Busy = 2; IntegrityFailed = 3; NotElevated = 4; NoState = 1; UnknownStage = 1 }
+
+# ------------------------------------------------------------------------------------------------
+# Adapters (replaced by the scenario tests)
+# ------------------------------------------------------------------------------------------------
+
+&lt;# The application engine configuration of the staged package (the verified copy). #&gt;
+function Get-WdrAppConfig {
+    param([hashtable] $Paths)
+    $p = Join-Path $Paths.Package 'scripts\\applications\\applications-config.json'
+    if (-not (Test-Path -LiteralPath $p) -or -not (Get-Command Get-WdaConfig -ErrorAction SilentlyContinue)) { return $null }
+    Get-WdaConfig $p
+}
+
+&lt;# Registers and starts the application task again without archiving its state (Install-ApplicationEngine.ps1 -Resume). #&gt;
+function Invoke-WdrAppInstaller {
+    param([hashtable] $Paths)
+    $installer = Join-Path $Paths.Package 'scripts\\applications\\Install-ApplicationEngine.ps1'
+    $ps = Join-Path $env:SystemRoot 'System32\\WindowsPowerShell\\v1.0\\powershell.exe'
+    $out = &amp; $ps -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $installer -Resume 2&gt;&amp;1
+    foreach ($line in @($out)) { Write-WddLog "    | $line" }
+    return $LASTEXITCODE
+}
+
+function Get-WdrDesktop { [Environment]::GetFolderPath('Desktop') }
+
+# ------------------------------------------------------------------------------------------------
+# Status
+# ------------------------------------------------------------------------------------------------
+
+&lt;# Every application operation from the engine's live state (or its last result). #&gt;
+function Get-WdrOperations {
+    param([hashtable] $Paths)
+    $app = Join-Path $Paths.Root 'Applications'
+    $s = $null
+    foreach ($f in 'state.json', 'state.json.bak') { $s = Read-WddJson (Join-Path $app $f); if ($s -and $s.ContainsKey('packages')) { break } }
+    $ops = @()
+    if (-not $s) { return @() }
+    foreach ($map in 'packages', 'additional') {
+        if (-not $s.ContainsKey($map) -or $s[$map] -isnot [hashtable]) { continue }
+        foreach ($e in @($s[$map].Values)) {
+            if ($e -isnot [hashtable]) { continue }
+            $id = $(if ($e.ContainsKey('operationId') -and $e.operationId) { [string] $e.operationId } elseif ($map -eq 'packages') { "app:$($e['key'])" } else { "additional:$($e['id'])" })
+            $life = $(if (Get-Command Get-WdaLifecycle -ErrorAction SilentlyContinue) { Get-WdaLifecycle $e } else { [string] $e.status })
+            $ops += [ordered]@{ operationId = $id; name = [string] $e['name']; status = [string] $e['status']; lifecycle = $life; failureClass = [string] $e['failureClass']
+                                retryable = [bool] $e['retryable']; attempts = [int] $e['attempts']; totalAttempts = [int] $e['totalAttempts']; detection = [string] $e['detection']; message = [string] $e['message'] }
+        }
+    }
+    return @($ops | Sort-Object { $_.operationId })
+}
+
+function Get-WdrStatus {
+    param([hashtable] $Manifest, [hashtable] $Paths)
+    $read = Read-WddDeploymentState $Paths
+    $snap = $(if ($read.State) { Get-WddSnapshot $Manifest $Paths $read.State } else { $null })
+    $out = $(if ($snap) { [ordered]@{ outcome = $snap.outcome; exitCode = $snap.outcomeCode; detail = $snap.outcomeDetail } } else { Get-WddDeploymentOutcome $null $null $read.Problem })
+    [ordered]@{
+        format          = 'windows-deployment-builder/recovery-status'
+        version         = 1
+        generatedUtc    = (Get-WddNow).ToString('o')
+        packageId       = $Manifest.packageId
+        outcome         = $out.outcome
+        exitCode        = $out.exitCode
+        detail          = $out.detail
+        deploymentState = $(if ($read.State) { [string] $read.State.status } elseif ($read.Source -eq 'corrupt') { 'StateCorrupt' } else { 'NotInitialized' })
+        stateSource     = $read.Source
+        stages          = @(if ($snap) { @($snap.stages) | ForEach-Object { [ordered]@{ id = $_.id; name = $_.name; state = $_.state; status = $_.status; detail = $_.detail; idle = $_.idle; outstanding = $_.outstanding } } })
+        operations      = @(Get-WdrOperations $Paths)
+        report          = $(if (Test-Path -LiteralPath $Paths.ReportText) { $Paths.ReportText } else { '' })
+    }
+}
+
+function Format-WdrStatus {
+    param($Status)
+    $l = New-Object System.Collections.Generic.List[string]
+    $l.Add('Windows Deployment Recovery - status')
+    $l.Add('====================================')
+    $l.Add("Outcome   : $($Status.outcome) (code $($Status.exitCode))")
+    if ($Status.detail) { $l.Add("            $($Status.detail)") }
+    $l.Add("State     : $($Status.deploymentState)$(if ($Status.stateSource -eq 'backup') { ' (recovered from its backup)' })")
+    foreach ($s in @($Status.stages)) { $l.Add(('  {0,-24} {1,-10} {2} {3}' -f $s.name, $s.state, $s.status, $(if ($s.idle) { $s.idle } else { $s.detail }))) }
+    $ops = @($Status.operations)
+    if ($ops.Count) {
+        $l.Add('')
+        $l.Add(('{0,-22} {1,-36} {2,-10} {3}' -f 'Lifecycle', 'Operation', 'Attempts', 'Message'))
+        foreach ($o in $ops) { $l.Add(('{0,-22} {1,-36} {2,-10} {3}' -f $o.lifecycle, $o.operationId, "$($o.totalAttempts)", $o.message)) }
+        $retry = @($ops | Where-Object { $_.lifecycle -in 'FailedRetryable', 'BlockedByDependency', 'WaitingForNetwork' })
+        $perm = @($ops | Where-Object { $_.lifecycle -eq 'FailedPermanent' })
+        $l.Add('')
+        $l.Add("Retryable: $($retry.Count) (RetryFailed)   Permanent: $($perm.Count) (fix the cause, then Retry -Operation &lt;id&gt; -IncludePermanent)")
+    }
+    if ($Status.report) { $l.Add("Report    : $($Status.report)") }
+    return ($l -join "\`r\`n")
+}
+
+&lt;# What a person still has to do; never includes secrets. #&gt;
+function Get-WdrPendingActions {
+    param([hashtable] $Manifest, [hashtable] $Paths)
+    $items = @()
+    foreach ($o in @(Get-WdrOperations $Paths)) {
+        switch ($o.lifecycle) {
+            'ManualActionRequired' { $items += "$($o.name): $($o.message)" }
+            'WaitingForReboot' { $items += "$($o.name): restart the computer to finish. $($o.message)" }
+            'FailedPermanent' { $items += "$($o.name) [$($o.operationId)]: $($o.failureClass) failure; correct the cause, then retry with -IncludePermanent. $($o.message)" }
+            'FailedRetryable' { $items += "$($o.name) [$($o.operationId)]: failed after automatic retries; run RetryFailed. $($o.message)" }
+            'BlockedByDependency' { $items += "$($o.name) [$($o.operationId)]: blocked by a dependency; run RetryFailed. $($o.message)" }
+            'WaitingForNetwork' { $items += "$($o.name): waiting for the network or its package source." }
+        }
+        if ($o.status -eq 'Succeeded' -and $o.detection -eq 'Unconfirmed') { $items += "$($o.name): WinGet reported success but could not confirm it; check that it is installed." }
+    }
+    $report = Read-WddJson $Paths.ReportJson
+    if ($report -and $report.ContainsKey('remainingTasks')) {
+        foreach ($t in @($report.remainingTasks)) { if ($t -and $t -notmatch '^Application ' -and $t -notmatch '^Additional Software ') { $items += [string] $t } }
+    }
+    return @($items | Select-Object -Unique)
+}
+
+# ------------------------------------------------------------------------------------------------
+# Recovery actions
+# ------------------------------------------------------------------------------------------------
+
+&lt;#
+    Rebuilds a deployment state that is damaged beyond its backup: from the verified manifest and
+    what the engines wrote themselves. A stage with a result, a status file or a task counts as
+    launched (it is never launched twice); the damaged file is kept for diagnosis.
+#&gt;
+function Repair-WddDeploymentState {
+    param([hashtable] $Manifest, [hashtable] $Paths, [hashtable] $Identity)
+    $stamp = (Get-WddNow).ToString('yyyyMMddHHmmss')
+    foreach ($f in $Paths.State, "$($Paths.State).bak") { if (Test-Path -LiteralPath $f) { Move-Item -LiteralPath $f -Destination "$f.corrupt-$stamp" -Force } }
+    $state = New-WddState $Manifest 'Embedded' $Identity
+    $state.status = 'InProgress'
+    $state.message = 'Rebuilt by the recovery tool after the deployment state was damaged.'
+    $state.stagedFiles = @(@($Manifest.files) | Where-Object { $_.embedded -and (Test-Path -LiteralPath (Join-Path $Paths.Package ($_.path -replace '/', '\\'))) } | ForEach-Object { $_.path })
+    foreach ($s in Get-WddEngineStages $Manifest) {
+        $seen = (Test-Path -LiteralPath (Join-Path $Paths.Root $s.result)) -or (Test-Path -LiteralPath (Join-Path $Paths.Root $s.status)) -or (Get-WddTask $s.task.path $s.task.name)
+        $state.stages[$s.id] = @{ launchResult = $(if ($seen) { 'Launched' } else { '' }); attempts = 0; launchedUtc = $(if ($seen) { (Get-WddNow).ToString('o') } else { $null }); exitCode = $null
+                                  message = $(if ($seen) { 'Found running or finished while rebuilding the state.' } else { 'Not launched before the state was lost.' }); user = $(if ($s.context -eq 'user') { [string] $Identity.Name } else { 'SYSTEM' }) }
+    }
+    Save-WddState $Paths $state
+    Write-WddLog "Deployment state rebuilt from the manifest (stages: $(($state.stages.Keys | ForEach-Object { "$_=$($state.stages[$_].launchResult)" }) -join ', '))." 'WARN'
+    return $state
+}
+
+&lt;#
+    RetryFailed, Retry and Resume. Steps: administrator check, deployment mutex, state (rebuilt
+    only for Resume), package integrity, the application stage (engine Retry logic, then its task
+    again without archiving), the Windows Update stage (relaunched only when it ended with
+    failures, or for Resume when its task is gone), then the deployment is reopened for the monitor.
+#&gt;
+function Invoke-WdrRecovery {
+    param([hashtable] $Manifest, [hashtable] $Paths, [ValidateSet('RetryFailed', 'Retry', 'Resume')] [string] $Mode, [string[]] $Operations = @(), [switch] $IncludePermanent)
+    Initialize-WddLogging $Paths
+    $identity = Get-WddIdentity
+    if (-not $identity.IsAdmin) { return @{ Outcome = 'NotElevated'; Message = 'Run the recovery tool as administrator.'; Accepted = @(); Refused = @() } }
+    $mutex = Enter-WddMutex 60
+    if (-not $mutex) { return @{ Outcome = 'Busy'; Message = 'Another deployment process (monitor or setup) is running; try again in a minute.'; Accepted = @(); Refused = @() } }
+    try {
+        Write-WddLog "==== Recovery ($Mode) requested by $($identity.Name)$(if (@($Operations).Count) { ': ' + (@($Operations) -join ', ') }) ===="
+        $read = Read-WddDeploymentState $Paths
+        $state = $read.State
+        if ($read.Source -eq 'corrupt') {
+            if ($Mode -ne 'Resume') { return @{ Outcome = 'Refused'; Message = "The deployment state is damaged ($($read.Problem)). Run -Action Resume first; it rebuilds the state."; Accepted = @(); Refused = @() } }
+            $state = Repair-WddDeploymentState $Manifest $Paths $identity
+        }
+        if (-not $state) { return @{ Outcome = 'NoState'; Message = 'No deployment has been started on this computer (run setup.cmd from the package).'; Accepted = @(); Refused = @() } }
+        if ($state.packageId -ne $Manifest.packageId) { return @{ Outcome = 'Refused'; Message = "The deployment on this computer ($($state.packageId)) is not this package ($($Manifest.packageId))."; Accepted = @(); Refused = @() } }
+        $check = Test-WddFiles $Paths.Package $Manifest 'Text' @($state.stagedFiles)
+        if (-not $check.Ok) {
+            Write-WddLog "Recovery refused: the staged package is modified or incomplete ($($check.Missing.Count) missing, $($check.Mismatched.Count) modified)." 'ERROR'
+            return @{ Outcome = 'IntegrityFailed'; Message = 'The staged package was modified or is incomplete; run setup.cmd from the original package to stage it again. Nothing was retried.'; Accepted = @(); Refused = @(@($check.Missing) + @($check.Mismatched) | ForEach-Object { @{ operationId = "file:$_"; reason = 'missing or modified' } }) }
+        }
+
+        $accepted = @(); $refused = @(); $notes = @()
+        $ops = @($Operations | Where-Object { $_ } | ForEach-Object { ([string] $_).Trim() })
+        $wuRequested = $ops -contains 'stage:windowsUpdate'
+        $appOps = @($ops | Where-Object { $_ -ne 'stage:windowsUpdate' })
+
+        # Applications: the engine's own Retry logic decides what may run again.
+        $appStage = Get-WddStage $Manifest 'applications'
+        if ($appStage -and $appStage.enabled) {
+            $cfg = Get-WdrAppConfig $Paths
+            if (-not $cfg) { $notes += 'The application engine is not part of the staged package.' }
+            elseif ($Mode -ne 'Retry' -or $appOps.Count) {
+                if ($identity.IsSystem) {
+                    $refused += @{ operationId = 'stage:applications'; reason = 'the application stage runs as the signed-in user (WinGet is not supported as SYSTEM); run the recovery tool as that user' }
+                } else {
+                    $r = switch ($Mode) {
+                        'RetryFailed' { Invoke-WdaRetry $cfg -AllFailed -IncludePermanent:$IncludePermanent -RequestedBy $identity.Name }
+                        'Retry' { Invoke-WdaRetry $cfg -Operations $appOps -IncludePermanent:$IncludePermanent -RequestedBy $identity.Name }
+                        'Resume' { Invoke-WdaRetry $cfg -PendingOnly -RequestedBy $identity.Name }
+                    }
+                    $accepted += @($r.Accepted); $refused += @($r.Refused)
+                    if ($r.Outcome -eq 'Busy') { return @{ Outcome = 'Busy'; Message = $r.Message; Accepted = @(); Refused = @() } }
+                    $snapApp = Get-WddStageSnapshot $appStage $Paths $state
+                    $needsTask = ($r.Outcome -eq 'Accepted') -or ($Mode -eq 'Resume' -and $snapApp.state -ne 'Final' -and -not (Get-WddTask $appStage.task.path $appStage.task.name))
+                    if ($needsTask) {
+                        $code = $null
+                        try { $code = Invoke-WdrAppInstaller $Paths } catch { $notes += "Application task: $($_.Exception.Message)" }
+                        $rec = $(if ($state.stages.ContainsKey('applications')) { $state.stages['applications'] } else { @{ attempts = 0 } })
+                        $rec.launchResult = $(if (Get-WddTask $appStage.task.path $appStage.task.name) { 'Launched' } else { 'LaunchFailed' })
+                        $rec.launchedUtc = (Get-WddNow).ToString('o'); $rec.exitCode = $code; $rec.user = $identity.Name
+                        $rec.message = $(if ($rec.launchResult -eq 'Launched') { "Restarted by the recovery tool ($Mode)." } else { "The recovery tool could not register the application task (exit code $code)." })
+                        $state.stages['applications'] = $rec
+                        $notes += "Application stage: $($rec.message)"
+                        if ($r.Outcome -ne 'Accepted') { $accepted += 'stage:applications' }
+                    }
+                }
+            }
+        }
+
+        # Windows Update: its engine never offers an installed update again, so a relaunch is safe.
+        $wuStage = Get-WddStage $Manifest 'windowsUpdate'
+        if ($wuStage -and $wuStage.enabled -and ($Mode -ne 'Retry' -or $wuRequested)) {
+            $wu = Get-WddStageSnapshot $wuStage $Paths $state
+            $failed = $wu.state -eq 'Final' -and $wu.status -in 'CompletedWithFailures', 'Failed', 'Offline'
+            $lost = $Mode -eq 'Resume' -and $wu.state -in 'Stalled', 'LaunchFailed', 'NotStarted'
+            if (($Mode -ne 'Resume' -and $failed) -or $lost) {
+                $state.stages['windowsUpdate'] = @{ launchResult = ''; attempts = 0; launchedUtc = $null; exitCode = $null; message = "Restarted by the recovery tool ($Mode)."; user = 'SYSTEM' }
+                $rec = Invoke-WddLaunchStage $wuStage $Paths $state $identity ([int] $Manifest.failureHandling.orchestrator.launchAttempts)
+                if ($rec.launchResult -eq 'Launched') { $accepted += 'stage:windowsUpdate' } else { $refused += @{ operationId = 'stage:windowsUpdate'; reason = [string] $rec.message } }
+            } elseif ($wuRequested) {
+                $refused += @{ operationId = 'stage:windowsUpdate'; reason = "the Windows Update stage is $($wu.state)$(if ($wu.status) { "/$($wu.status)" }); only a stage that ended with failures is retried" }
+            }
+        }
+
+        $reopen = ($accepted.Count -gt 0) -or ($Mode -eq 'Resume')
+        if ($reopen) {
+            $stamp = (Get-WddNow).ToString('yyyyMMddHHmmss')
+            if ($state.status -in 'Completed', 'IntegrityFailed' -and (Test-Path -LiteralPath $Paths.Marker)) {
+                Move-Item -LiteralPath $Paths.Marker -Destination "$($Paths.Marker).$stamp.bak" -Force
+            }
+            # The previous report is kept (reports\\history\\); the monitor writes a new one at the end.
+            foreach ($r in $Paths.ReportJson, $Paths.ReportText) {
+                if (Test-Path -LiteralPath $r) {
+                    $hist = Join-Path $Paths.Reports 'history'
+                    if (-not (Test-Path -LiteralPath $hist)) { New-Item -ItemType Directory -Path $hist -Force | Out-Null }
+                    Move-Item -LiteralPath $r -Destination (Join-Path $hist ("{0}-{1}{2}" -f [IO.Path]::GetFileNameWithoutExtension($r), $stamp, [IO.Path]::GetExtension($r))) -Force
+                }
+            }
+            $state.status = 'InProgress'
+            $state.message = "Recovery ($Mode) by $($identity.Name)."
+            $state.deadlineUtc = (Get-WddNow).AddHours([double] $Manifest.failureHandling.orchestrator.deadlineHours).ToString('o')
+        }
+        $state.recoveries = @(@($state.recoveries) + @(@{ atUtc = (Get-WddNow).ToString('o'); by = $identity.Name; action = $Mode; accepted = @($accepted); refused = @($refused | ForEach-Object { $_.operationId }) }))
+        Save-WddState $Paths $state
+        if ($reopen) {
+            Register-WddMonitorTask $Paths $Manifest
+            try { Start-WddTask $script:MonitorTask.path $script:MonitorTask.name } catch { }
+        }
+        $outcome = $(if ($accepted.Count) { 'Done' } elseif ($Mode -eq 'Resume') { 'Done' } elseif ($refused.Count) { 'Refused' } else { 'NothingToDo' })
+        $msg = "Reopened: $(if ($accepted.Count) { $accepted -join ', ' } else { 'none' }). Refused: $(if ($refused.Count) { ($refused | ForEach-Object { "$($_.operationId) ($($_.reason))" }) -join '; ' } else { 'none' }).$(if ($notes.Count) { ' ' + ($notes -join ' ') })"
+        Write-WddLog "Recovery ($Mode): $msg" $(if ($outcome -eq 'Done') { 'INFO' } else { 'WARN' })
+        Write-WddEvent 3005 "Deployment recovery ($Mode) by $($identity.Name): $msg" $(if ($outcome -eq 'Done') { 'Information' } else { 'Warning' })
+        return @{ Outcome = $outcome; Message = $msg; Accepted = @($accepted); Refused = @($refused) }
+    } finally {
+        Exit-WddMutex $mutex
+    }
+}
+
+# ------------------------------------------------------------------------------------------------
+# Diagnostics
+# ------------------------------------------------------------------------------------------------
+
+&lt;#
+    Removes passwords and Wi-Fi keys from text (defence in depth: these files should contain none).
+    The Wi-Fi element name is written as key[M]aterial so this script itself never contains the
+    literal token the answer-file secret checks look for.
+#&gt;
+function Protect-WdrText {
+    param([string] $Text)
+    $t = [regex]::Replace($Text, '(?i)("(?:password|passphrase|key[M]aterial|networkKey|secret|token|apiKey|adminPassword)"\\s*:\\s*)"(?:[^"\\\\]|\\\\.)*"', '$1"[redacted]"')
+    $t = [regex]::Replace($t, '(?is)(&lt;(key[M]aterial|Password)&gt;).*?(&lt;/\\2&gt;)', '$1[redacted]$3')
+    $t = [regex]::Replace($t, '(?i)\\b(password|passwd|pwd|key[M]aterial|networkKey)(\\s*[=:]\\s*)[^\\s,;"]+', '$1$2[redacted]')
+    return $t
+}
+
+&lt;#
+    Only these files below the data root are collected; anything else (answer files, Wi-Fi
+    profiles, Panther logs, user files) is never read.
+#&gt;
+$script:DiagnosticFiles = @(
+    'Deployment\\status.json', 'Deployment\\logs\\*.log', 'Deployment\\logs\\*.log.1',
+    'state\\*.json', 'state\\*.done', 'state\\*.bak', 'state\\*.corrupt*',
+    'reports\\deployment-report.json', 'reports\\deployment-report.txt', 'reports\\history\\*.json',
+    'Applications\\state.json', 'Applications\\state.json.bak', 'Applications\\state.json.corrupt', 'Applications\\status.json', 'Applications\\result.json', 'Applications\\follow-up.txt',
+    'Applications\\logs\\*.log', 'Applications\\logs\\*.log.1', 'Applications\\logs\\attempts.jsonl', 'Applications\\logs\\packages\\*.log', 'Applications\\history\\*.json',
+    'Updates\\state.json', 'Updates\\status.json', 'Updates\\result.json', 'Updates\\policy-result.json', 'Updates\\logs\\*.log',
+    'Network\\wifi-result.json', 'Network\\*.log',
+    'Package\\deployment-manifest.json', 'Package\\config\\orchestration.json', 'Package\\scripts\\applications\\applications-config.json', 'Package\\scripts\\windows-update\\config.json'
+)
+
+function Export-WdrDiagnostics {
+    param([hashtable] $Manifest, [hashtable] $Paths, [string] $OutputPath = '')
+    $identity = Get-WddIdentity
+    $stamp = (Get-WddNow).ToString('yyyyMMdd-HHmmss')
+    if (-not $OutputPath) {
+        $dir = $(if ($identity.IsAdmin) { $Paths.Reports } else { Get-WdrDesktop })
+        $OutputPath = Join-Path $dir ("deployment-diagnostics-{0}-{1}.zip" -f $env:COMPUTERNAME, $stamp)
+    }
+    if ($OutputPath -notmatch '\\.zip$') { throw 'The diagnostics file must end in .zip.' }
+    $staging = Join-Path ([IO.Path]::GetTempPath()) ("wdr-diag-" + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $staging -Force | Out-Null
+    $index = @()
+    $redacted = 0
+    try {
+        $root = [IO.Path]::GetFullPath($Paths.Root).TrimEnd('\\') + '\\'
+        foreach ($pattern in $script:DiagnosticFiles) {
+            $dir = Join-Path $Paths.Root (Split-Path -Parent $pattern)
+            if (-not (Test-Path -LiteralPath $dir)) { continue }
+            foreach ($f in @(Get-ChildItem -LiteralPath $dir -Filter (Split-Path -Leaf $pattern) -File -ErrorAction SilentlyContinue)) {
+                $full = [IO.Path]::GetFullPath($f.FullName)
+                if (-not $full.StartsWith($root, [StringComparison]::OrdinalIgnoreCase) -or ($f.Attributes -band [IO.FileAttributes]::ReparsePoint)) { continue }
+                if ($f.Extension -in '.xml', '.wim', '.exe', '.msi') { continue }
+                $rel = $full.Substring($root.Length)
+                $bytes = [IO.File]::ReadAllBytes($full)
+                $max = 20MB
+                if ($bytes.Length -gt $max) { $bytes = $bytes[($bytes.Length - $max)..($bytes.Length - 1)] }
+                $text = [Text.Encoding]::UTF8.GetString($bytes)
+                $safeText = Protect-WdrText $text
+                if ($safeText -ne $text) { $redacted++ }
+                $target = Join-Path $staging $rel
+                New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force | Out-Null
+                [IO.File]::WriteAllText($target, $safeText, (New-Object Text.UTF8Encoding($false)))
+                $index += [ordered]@{ path = $rel; size = $f.Length; truncated = ($f.Length -gt $max); redacted = ($safeText -ne $text) }
+            }
+        }
+        $status = Get-WdrStatus $Manifest $Paths
+        $info = [ordered]@{
+            format = 'windows-deployment-builder/diagnostics'; version = 1; generatedUtc = (Get-WddNow).ToString('o'); computer = $env:COMPUTERNAME
+            windows = [string] [Environment]::OSVersion.VersionString; powershell = $PSVersionTable.PSVersion.ToString(); packageId = $Manifest.packageId
+            outcome = $status.outcome; outcomeCode = $status.exitCode; files = $index; redactedFiles = $redacted
+            excluded = 'Answer files (autounattend.xml, unattend.xml), Wi-Fi profiles (*.xml), Panther logs and anything outside the data root are never collected; password and key values are replaced by [redacted].'
+        }
+        [IO.File]::WriteAllText((Join-Path $staging 'diagnostics.json'), ($info | ConvertTo-Json -Depth 6), (New-Object Text.UTF8Encoding($false)))
+        [IO.File]::WriteAllText((Join-Path $staging 'recovery-status.txt'), (Format-WdrStatus $status), (New-Object Text.UTF8Encoding($true)))
+        $outDir = Split-Path -Parent $OutputPath
+        if ($outDir -and -not (Test-Path -LiteralPath $outDir)) { New-Item -ItemType Directory -Path $outDir -Force | Out-Null }
+        if (Test-Path -LiteralPath $OutputPath) { Remove-Item -LiteralPath $OutputPath -Force }
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        [IO.Compression.ZipFile]::CreateFromDirectory($staging, $OutputPath)
+        return @{ Outcome = 'Done'; Path = $OutputPath; Files = $index.Count; Redacted = $redacted }
+    } finally {
+        Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# ------------------------------------------------------------------------------------------------
+# Console
+# ------------------------------------------------------------------------------------------------
+
+function Invoke-WdrAction {
+    param([hashtable] $Manifest, [hashtable] $Paths, [string] $Action, [string[]] $Operation = @(), [switch] $IncludePermanent, [switch] $Json, [string] $OutputPath = '')
+    switch ($Action) {
+        'Status' {
+            $st = Get-WdrStatus $Manifest $Paths
+            return @{ Text = $(if ($Json) { $st | ConvertTo-Json -Depth 8 } else { Format-WdrStatus $st }); Exit = [int] $st.exitCode }
+        }
+        'PendingActions' {
+            $items = @(Get-WdrPendingActions $Manifest $Paths)
+            $text = $(if ($Json) { ConvertTo-Json @($items) } elseif ($items.Count) { "Pending actions\`r\`n===============\`r\`n" + (($items | ForEach-Object { "- $_" }) -join "\`r\`n") } else { 'Nothing is waiting for a person.' })
+            return @{ Text = $text; Exit = 0 }
+        }
+        'ExportDiagnostics' {
+            $r = Export-WdrDiagnostics $Manifest $Paths $OutputPath
+            return @{ Text = "Diagnostics: $($r.Path) ($($r.Files) file(s), $($r.Redacted) with values redacted)."; Exit = 0 }
+        }
+        default {
+            $r = Invoke-WdrRecovery $Manifest $Paths $Action -Operations $Operation -IncludePermanent:$IncludePermanent
+            $text = $(if ($Json) { [pscustomobject]$r | ConvertTo-Json -Depth 6 } else { "$($Action): $($r.Outcome). $($r.Message)" })
+            return @{ Text = $text; Exit = [int] $script:RecoveryExit[$r.Outcome] }
+        }
+    }
+}
+
+function Show-WdrMenu {
+    param([hashtable] $Manifest, [hashtable] $Paths)
+    while ($true) {
+        Write-Output ''
+        Write-Output (Format-WdrStatus (Get-WdrStatus $Manifest $Paths))
+        Write-Output ''
+        Write-Output 'Windows Deployment Recovery'
+        Write-Output '  1  Refresh status            4  Retry one application'
+        Write-Output '  2  Retry failed operations   5  Resume interrupted provisioning'
+        Write-Output '  3  View pending actions      6  Export diagnostic report'
+        Write-Output '  0  Exit'
+        $c = Read-Host 'Choose'
+        $r = switch ($c) {
+            '1' { $null }
+            '2' { Invoke-WdrAction $Manifest $Paths 'RetryFailed' }
+            '3' { Invoke-WdrAction $Manifest $Paths 'PendingActions' }
+            '4' {
+                $id = Read-Host 'Operation id (from the list, for example app:winget:git.git)'
+                $perm = (Read-Host 'Is this a permanent failure whose cause you have corrected? (y/N)') -match '^(y|yes)$'
+                Invoke-WdrAction $Manifest $Paths 'Retry' -Operation @($id) -IncludePermanent:$perm
+            }
+            '5' { Invoke-WdrAction $Manifest $Paths 'Resume' }
+            '6' { Invoke-WdrAction $Manifest $Paths 'ExportDiagnostics' }
+            '0' { return }
+            default { @{ Text = 'Choose 0-6.'; Exit = 0 } }
+        }
+        if ($r) { Write-Output ''; Write-Output $r.Text }
+    }
+}
+
+if ($script:RecoveryMain) {
+    $a = $script:RecoveryArgs
+    $package = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+    try { $manifest = Read-WddManifest (Join-Path $package 'deployment-manifest.json') } catch { Write-Output "ERROR: $($_.Exception.Message)"; exit 50 }
+    $paths = Get-WddPaths $manifest.dataRoot
+    $id = Get-WddIdentity
+    if ($a.Elevate -and -not $id.IsAdmin) {
+        $ps = Join-Path $env:SystemRoot 'System32\\WindowsPowerShell\\v1.0\\powershell.exe'
+        Start-Process -FilePath $ps -Verb RunAs -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "\`"$PSCommandPath\`"", '-Action', $a.Action)
+        exit 0
+    }
+    if ($a.Action -eq 'Menu') {
+        if (-not $id.IsAdmin) { Write-Output 'Not running as administrator: status only. Retry, resume and diagnostics need administrator rights (use the "Deployment recovery" shortcut or -Elevate).' }
+        Show-WdrMenu $manifest $paths
+        exit 0
+    }
+    $r = Invoke-WdrAction $manifest $paths $a.Action -Operation $a.Operation -IncludePermanent:$a.IncludePermanent -Json:$a.Json -OutputPath $a.OutputPath
+    Write-Output $r.Text
+    exit $r.Exit
+}
+		</File>
 		<File path="C:\\Windows\\Setup\\Scripts\\Deployment\\config\\orchestration.json">
 {
   "schemaVersion": 1,
@@ -4943,14 +6203,14 @@ function Step-WddUpdatePolicy {
 {
   "format": "windows-deployment-builder/deployment-manifest",
   "manifestVersion": 1,
-  "packageVersion": "1.0.0",
-  "packageId": "58A777EECBF8A01F",
+  "packageVersion": "1.1.0",
+  "packageId": "98454FB57BF77282",
   "scope": "answerFile",
   "generator": {
     "name": "Windows Deployment Builder",
-    "orchestrator": "1.0.0",
+    "orchestrator": "1.1.0",
     "windowsUpdateEngine": "1.1.0",
-    "applicationEngine": "1.1.0"
+    "applicationEngine": "1.2.0"
   },
   "dataRoot": "C:\\\\ProgramData\\\\WindowsDeploymentBuilder",
   "packageFolder": "WindowsDeployment",
@@ -5201,6 +6461,52 @@ function Step-WddUpdatePolicy {
       "Failed"
     ]
   },
+  "recovery": {
+    "tool": "scripts/recovery/DeploymentRecovery.ps1",
+    "shortcut": "Deployment recovery (public desktop)",
+    "automaticRetry": true,
+    "maxAttemptsPerPackage": 3,
+    "continueAfterFailure": true,
+    "retryTiming": {
+      "baseDelaySeconds": 60,
+      "maxDelaySeconds": 900,
+      "jitterRatio": 0.2,
+      "maxNetworkDeferrals": 6
+    },
+    "neverRetriedAutomatically": [
+      "Permanent",
+      "Integrity",
+      "Policy",
+      "User",
+      "Manual"
+    ],
+    "stateSchemas": {
+      "deploymentState": 2,
+      "applicationState": 2,
+      "applicationResult": 2,
+      "deploymentReport": 2
+    },
+    "outcomeCodes": {
+      "Succeeded": 0,
+      "CompletedWithWarnings": 10,
+      "CompletedWithFailures": 20,
+      "Incomplete": 25,
+      "PausedAwaitingNetwork": 30,
+      "PausedAwaitingReboot": 31,
+      "PausedAwaitingUser": 32,
+      "InProgress": 40,
+      "FailedToInitialize": 50,
+      "Failed": 60
+    },
+    "actions": [
+      "Status",
+      "PendingActions",
+      "RetryFailed",
+      "Retry",
+      "Resume",
+      "ExportDiagnostics"
+    ]
+  },
   "restartPolicy": {
     "windowsUpdate": {
       "maxReboots": 10,
@@ -5220,7 +6526,7 @@ function Step-WddUpdatePolicy {
       "drivers": "exclude"
     },
     "applications": {
-      "maxAttemptsPerPackage": 2,
+      "maxAttemptsPerPackage": 3,
       "packageTimeoutMinutes": 30,
       "maxRuntimeHours": 4,
       "waitForUpdatesHours": 8,
@@ -5254,15 +6560,16 @@ function Step-WddUpdatePolicy {
     "status": "C:\\\\ProgramData\\\\WindowsDeploymentBuilder\\\\Deployment\\\\status.json",
     "marker": "C:\\\\ProgramData\\\\WindowsDeploymentBuilder\\\\state\\\\deployment.done",
     "report": "C:\\\\ProgramData\\\\WindowsDeploymentBuilder\\\\reports\\\\deployment-report.txt",
-    "monitorTask": "\\\\WindowsDeploymentBuilder\\\\Deployment"
+    "monitorTask": "\\\\WindowsDeploymentBuilder\\\\Deployment",
+    "recoveryTool": "C:\\\\ProgramData\\\\WindowsDeploymentBuilder\\\\Package\\\\scripts\\\\recovery\\\\DeploymentRecovery.ps1"
   },
   "files": [
     {
       "path": "scripts/common/DeploymentCommon.ps1",
       "role": "orchestrator",
-      "size": 21027,
-      "sha256": "F627E6A147A4C296A89079AF58C970BA3EDF338780829C5AB3C6C4DFAA9CD1E5",
-      "textSha256": "8463AF9084D3E4D8F631FF5EF50B04E165C1E2F738B5B4F10FC508DF25CF4D79",
+      "size": 29981,
+      "sha256": "3FEC2E4BAE62C20356DAE118F4B55ED8D20E532A1F674B60035779DA8FD3897E",
+      "textSha256": "F05731479140613752D7C1FC08ACAF0A26692CA68A6B34CF1EB27D943B8A03DD",
       "embedded": "Deployment\\\\scripts\\\\common\\\\DeploymentCommon.ps1"
     },
     {
@@ -5276,41 +6583,41 @@ function Step-WddUpdatePolicy {
     {
       "path": "scripts/bootstrap/Initialize-Deployment.ps1",
       "role": "orchestrator",
-      "size": 14786,
-      "sha256": "C596E8516C5773FB915B6719829820F99AB956C33967A96889B680FAA35A5B7A",
-      "textSha256": "27FFB14FD54CA415DA12C7AAAEA344E569289CA7C661DBD97BF3AB406CF56C7E",
+      "size": 16409,
+      "sha256": "62F35D6F0E01E24036D5395B1D351E92C664ED361454F08EDEF07A7A91890E6A",
+      "textSha256": "12C7B511C07B744B4A9DBA1A60F06695753D1E27654BA307CAAD95EBF50F18BA",
       "embedded": "Deployment\\\\scripts\\\\bootstrap\\\\Initialize-Deployment.ps1"
     },
     {
       "path": "scripts/orchestrator/DeploymentOrchestrator.ps1",
       "role": "orchestrator",
-      "size": 5320,
-      "sha256": "FB75099CE3A9E7BF1B56C49131D7C9516FA1421B58F8F87F262CC25E92167148",
-      "textSha256": "B0820109FA843002BE18D1FD4176116B3248AE6CAED728A29D890DE4B649E01C",
+      "size": 6361,
+      "sha256": "AC74A8B8D3DECC58EFA2724738DB87848CB562A92717C03760663083C26ADB58",
+      "textSha256": "A0DE2E00DA0592A99539FB647EAAE6DDAE65E31600264D05BE64722930D799B0",
       "embedded": "Deployment\\\\scripts\\\\orchestrator\\\\DeploymentOrchestrator.ps1"
     },
     {
       "path": "scripts/orchestrator/Show-DeploymentStatus.ps1",
       "role": "orchestrator",
-      "size": 4126,
-      "sha256": "7C08AAB007CB4AB275A833D6B9B3AF7C37E57D91C022F0F249336A4A13F36F88",
-      "textSha256": "CABF382F6EEA3E83FD74B9B95DD84273727578FB98C51D20395EB62735819D18",
+      "size": 4423,
+      "sha256": "27DB26AD0FAFD4F50E1FC971DC1E3FCA2869987B4A74F6EFC99C0A7658EF2865",
+      "textSha256": "355E0A833F5E0E2DCF152E0B394286903B071D26104B2395087A62F096491F32",
       "embedded": "Deployment\\\\scripts\\\\orchestrator\\\\Show-DeploymentStatus.ps1"
     },
     {
       "path": "scripts/orchestrator/Resume-Deployment.ps1",
       "role": "orchestrator",
-      "size": 4659,
-      "sha256": "1D6D0F3E5CEE874A9C8CC2C12D7D0D988FDB57F2BF6BC90A38658332693CE610",
-      "textSha256": "5C07C6F3A1328F3BB08EC36BD2C884A631D8CFE3866A7BCEB4E3271633F9574C",
+      "size": 4917,
+      "sha256": "E2CEB16E5A9EBCA185E3A4E77110977B14244E39F32D68D20C71F1EC82BDD901",
+      "textSha256": "3D42F308B0F0414DDB2401E5F59685235DD0FCC6EC547852425B6EEC6146C8DF",
       "embedded": "Deployment\\\\scripts\\\\orchestrator\\\\Resume-Deployment.ps1"
     },
     {
       "path": "scripts/finalization/Complete-Deployment.ps1",
       "role": "orchestrator",
-      "size": 14893,
-      "sha256": "C8C77899CFAE84BEEB58337ABEB6F4834A44B04B9A3769EF148790DAEB486DBA",
-      "textSha256": "9B2C5392126D7B3793BF4F2B1C8DF0D684C8E6E6A742CF792F61E88381E2CF55",
+      "size": 19342,
+      "sha256": "01EF6102DEB735677F0565E6650EFC66FFC47B5256108FBF5D85CB4C672C7A96",
+      "textSha256": "920B19FB3FF550EB85E862896704660F3D018F80D01067F28B81BE2F918FCEE9",
       "embedded": "Deployment\\\\scripts\\\\finalization\\\\Complete-Deployment.ps1"
     },
     {
@@ -5320,6 +6627,14 @@ function Step-WddUpdatePolicy {
       "sha256": "504CFC50AFE4290F23C9C9E6A446EE8D210C9F387C0B781515CEBFC59ED58B0C",
       "textSha256": "3B28A2C605D7C21F97BDA67D5F1B90772D0EF12E47AE1417657BAFC9A68178C7",
       "embedded": "Deployment\\\\scripts\\\\finalization\\\\Set-UpdatePolicy.ps1"
+    },
+    {
+      "path": "scripts/recovery/DeploymentRecovery.ps1",
+      "role": "orchestrator",
+      "size": 33504,
+      "sha256": "594883D16949C7EFF082FD3A5BEFD7B274A623C55712FB8931CC85E60EF541D1",
+      "textSha256": "D83F6616B21C97AD4FA76A3CD5A1C6F91DEFED61EDC712A5A3A48F2D00777FBD",
+      "embedded": "Deployment\\\\scripts\\\\recovery\\\\DeploymentRecovery.ps1"
     },
     {
       "path": "scripts/windows-update/WindowsUpdateEngine.ps1",
@@ -5348,9 +6663,9 @@ function Step-WddUpdatePolicy {
     {
       "path": "scripts/applications/ApplicationEngine.ps1",
       "role": "engine",
-      "size": 72192,
-      "sha256": "EF5AC4F9F2882228EE240ADD8DF552861AAED91385667BFA28461F231E07E1D4",
-      "textSha256": "81392B6D8C113E7B1D181B73EE644880EBCF47CF803BB3B8931FD8E533B168A7",
+      "size": 109348,
+      "sha256": "34E2CE680F0AA61F1BB7A6AAACFB92A7B0FC26C8766F9121B06C3E88C3949CDA",
+      "textSha256": "328295E8336E83C9C39D6AE89E43AF8B3A13DBA4F1BAC5F54DC0E857D4BDAD44",
       "embedded": "Applications\\\\ApplicationEngine.ps1"
     },
     {
@@ -5364,17 +6679,17 @@ function Step-WddUpdatePolicy {
     {
       "path": "scripts/applications/Install-ApplicationEngine.ps1",
       "role": "engine",
-      "size": 6981,
-      "sha256": "D3443C891E15F47F2402D8F43BE74CDF592B6F4C0DBBFB906C45CA7845E46464",
-      "textSha256": "D3B76BF13585EB4AA120BA85E411FEA29EDCF7799277756E0F76589B510A0312",
+      "size": 7901,
+      "sha256": "832D20E2ADDC67D93CA16DCCC18EA0EC66BC02A4683ED3750EB4B2D9BDC486EC",
+      "textSha256": "10F3B042D86E815271305C7F679291313285DE23F7B5D2EF2267D6096D5C9E15",
       "embedded": "Applications\\\\Install-ApplicationEngine.ps1"
     },
     {
       "path": "scripts/applications/applications-config.json",
       "role": "configuration",
-      "size": 3562,
-      "sha256": "6A7DCCA0629996087B8139C05E11E85930B32D6AFA20F89AD24FB1D14440D38A",
-      "textSha256": "C478547493A2BEF67ECE0CA41D712D2516E7152F08A8A86F02F2CC057A5F5555",
+      "size": 3754,
+      "sha256": "E6677E947A0C63BCBEA2F52A380AEBF2527B1AB283BECBA3C21A9AD92697B9F0",
+      "textSha256": "FCF80F5476F7D029F628595778FA505FB72C6AD6DCF2DBDE18A9FA5A614D53C5",
       "embedded": "Applications\\\\applications-config.json"
     },
     {

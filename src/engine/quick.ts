@@ -354,6 +354,8 @@ export function reviewSummary(p: Profile, sel: SelectionResult = resolveSelectio
       universal: UNIVERSAL_PROFILES.filter((u) => sel.activeProfiles.includes(u)).map(profileName),
       conflicts: sel.groupConflicts.map((g) => g.message),
       dependencies: sel.packages.filter((x) => x.origins.includes('required')).map((x) => x.displayName),
+      // Phase 5: how failures are handled (configured in Advanced > Applications > Reliability & recovery).
+      recovery: `${p.applications.recovery.automaticRetry ? `Temporary failures retried automatically (up to ${p.applications.maxAttemptsPerPackage} attempts, growing wait); a lost connection pauses instead of failing` : 'No automatic retry (one attempt each)'}. ${p.applications.recovery.includeRecoveryTool ? 'Failed apps can be retried later with the "Deployment recovery" tool, without reinstalling Windows.' : 'No recovery tool in the package.'}`,
     },
     package: {
       starts: deploymentActive(p),

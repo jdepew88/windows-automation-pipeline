@@ -45,6 +45,8 @@ function Reset-Sim {
         PortableRoot = (Join-Path ([IO.Path]::GetTempPath()) ("wda-test-portable-" + [Guid]::NewGuid().ToString('N')))
         ShortcutFolder = (Join-Path ([IO.Path]::GetTempPath()) ("wda-test-startmenu-" + [Guid]::NewGuid().ToString('N')))
         Shortcuts = @{}; Order = @()
+        # Phase 5 fault injection
+        Diagnoses = @(); SourceDown = @(); Random = 0.5; Waits = @(); OnlineAt = $null
     }
 }
 
@@ -64,9 +66,20 @@ function Get-SimPackage { param([hashtable] $P) $script:Sim.Packages | Where-Obj
 
 # Engine adapters
 function Get-WdaNow { $script:Sim.Now }
-function Wait-Wda { param([int] $Seconds) $script:Sim.Now = $script:Sim.Now.AddSeconds($Seconds) }
+function Wait-Wda { param([int] $Seconds) $script:Sim.Waits += $Seconds; $script:Sim.Now = $script:Sim.Now.AddSeconds($Seconds) }
 function Get-WdaContext { @{ User = 'TEST\Alex'; IsSystem = $script:Sim.IsSystem; IsElevated = $true } }
-function Test-WdaNetwork { $script:Sim.Online }
+function Update-SimNetwork { if ($script:Sim.OnlineAt -and $script:Sim.Now -ge $script:Sim.OnlineAt) { $script:Sim.Online = $true; $script:Sim.OnlineAt = $null } }
+function Test-WdaNetwork { Update-SimNetwork; $script:Sim.Online }
+# Phase 5: the network diagnosis and the jitter source are simulated too (no live network is used).
+function Get-WdaNetworkDiagnosis {
+    param([string] $Source = 'winget')
+    $script:Sim.Diagnoses += $Source
+    Update-SimNetwork
+    if (-not $script:Sim.Online) { return @{ Level = 'InternetUnavailable'; Detail = 'simulated: offline' } }
+    if ($script:Sim.SourceDown -contains $Source) { return @{ Level = 'SourceUnavailable'; Detail = "simulated: $Source down" } }
+    @{ Level = 'Online'; Detail = 'simulated' }
+}
+function Get-WdaRandom { $script:Sim.Random }
 function Test-WdaRebootPending { $script:Sim.RebootPending }
 function Invoke-WdaReboot { param([int] $WarningSeconds, [string] $Reason) $script:Sim.RebootRequested = $true }
 function Test-WdaUpdateTask { param([hashtable] $WU) $script:Sim.WuTask }
@@ -117,6 +130,15 @@ function Install-WdaPackage {
         'initiated'     { $s.InstalledAfterBoot = $script:Sim.Boots + 1; $code = 0x8A15010B }
         'timeout'       { return @{ ExitCode = $null; TimedOut = $true; Output = '' } }
         'crash'         { if ($s.InstallCalls -eq 1) { $s.Installed = $true; throw 'Simulated engine crash during installation' } else { $s.Installed = $true } }
+        # Phase 5 fault injection
+        'fail-twice'    { if ($s.InstallCalls -ge 3) { $s.Installed = $true } else { $code = 0x8A150008 } }
+        'timeout-once'  { if ($s.InstallCalls -ge 2) { $s.Installed = $true } else { return @{ ExitCode = $null; TimedOut = $true; Output = '' } } }
+        'net-drop'      { if ($s.InstallCalls -eq 1) { $script:Sim.Online = $false; $script:Sim.OnlineAt = $script:Sim.Now.AddMinutes(90); $code = 0x8A150107 } else { $s.Installed = $true } }
+        'store-down'    { if ($script:Sim.SourceDown -contains $s.Source) { $code = 0x8A150045 } else { $s.Installed = $true } }
+        'unknown-once'  { if ($s.InstallCalls -ge 2) { $s.Installed = $true } else { $code = 0x80070005 } }
+        'fail-but-installed' { $s.Installed = $true; $code = 0x8A150008 }
+        'false-success' { $code = 0 }
+        'locked-once'   { if ($s.InstallCalls -ge 2) { $s.Installed = $true } else { $code = 0x8A150102 } }
     }
     @{ ExitCode = [int] $code; TimedOut = $false; Output = '' }
 }
@@ -201,6 +223,24 @@ function Test-Marker { param([hashtable] $Config) Test-Path -LiteralPath (Join-P
 function Save-Result {
     param([hashtable] $Config, [string] $Name)
     if ($ResultOut) { Copy-Item -LiteralPath (Join-Path $Config.dataRoot 'Applications\result.json') -Destination (Join-Path $ResultOut "$Name.json") -Force }
+}
+
+<# Holds a mutex in another process and returns once it is really held (no fixed sleep, so a busy machine cannot race it). #>
+function Start-MutexHolder {
+    param([string] $Name, [int] $Seconds = 30)
+    $flag = Join-Path ([IO.Path]::GetTempPath()) ("wda-held-" + [Guid]::NewGuid().ToString('N'))
+    $job = Start-Job -ArgumentList $Name, $flag, $Seconds -ScriptBlock {
+        param($name, $flag, $s)
+        $m = New-Object System.Threading.Mutex($false, $name)
+        [void] $m.WaitOne()
+        [IO.File]::WriteAllText($flag, 'held')
+        Start-Sleep -Seconds $s
+        $m.ReleaseMutex()
+    }
+    for ($i = 0; $i -lt 600 -and -not (Test-Path -LiteralPath $flag); $i++) { Start-Sleep -Milliseconds 100 }
+    if (-not (Test-Path -LiteralPath $flag)) { $job | Stop-Job -PassThru | Remove-Job -Force; throw 'the mutex holder did not start within 60 s' }
+    Remove-Item -LiteralPath $flag -Force
+    return $job
 }
 
 $tests = [ordered]@{}
@@ -777,15 +817,8 @@ $tests['corrupt state file is kept aside and the run continues'] = {
 $tests['only one application engine instance runs at a time'] = {
     Reset-Sim @((New-SimPackage 'Git.Git'))
     $c = New-AppTestConfig $script:Sim.Packages
-    $job = Start-Job -ArgumentList $c.mutexName -ScriptBlock {
-        param($name)
-        $m = New-Object System.Threading.Mutex($false, $name)
-        [void] $m.WaitOne()
-        Start-Sleep -Seconds 20
-        $m.ReleaseMutex()
-    }
+    $job = Start-MutexHolder $c.mutexName
     try {
-        Start-Sleep -Seconds 3
         Assert-Equal (Invoke-WdaMain $c) 'AlreadyRunning' 'second instance exits'
         Assert-Equal $script:Sim.Packages[0].InstallCalls 0 'nothing installed'
     } finally {
@@ -812,6 +845,419 @@ $tests['log records progress and failures'] = {
     foreach ($needle in 'installing App Git.Git (winget:Git.Git) attempt 1/2', '-> Succeeded App Git.Git', '-> Failed App Bad.Pkg [0x8A150008]', 'FINISHED: CompletedWithFailures', 'WinGet: WinGet 1.29.250 works') {
         Assert-True ($log.Contains($needle)) "log contains '$needle'"
     }
+}
+
+# ------------------------------------------------------------------------------------------------
+# Phase 5: resilience, fault injection and technician recovery
+# ------------------------------------------------------------------------------------------------
+
+function Get-StateFile { param([hashtable] $Config) Join-Path $Config.dataRoot 'Applications\state.json' }
+function Get-Attempts { param([hashtable] $Config) @(Get-Content -LiteralPath (Join-Path $Config.dataRoot 'Applications\logs\attempts.jsonl') | Where-Object { $_ } | ForEach-Object { $_ | ConvertFrom-Json }) }
+
+$tests['retry policy: bounded exponential backoff with jitter, never above the maximum'] = {
+    Reset-Sim
+    $c = New-AppTestConfig @() -Overrides @{ maxAttemptsPerPackage = 3 }
+    $pol = Get-WdaRetryPolicy $c
+    Assert-Equal "$($pol.automatic) $($pol.maxAttempts) $($pol.baseDelaySeconds) $($pol.maxDelaySeconds) $($pol.jitterRatio) $($pol.maxNetworkDeferrals)" 'True 3 60 900 0.2 6' 'defaults for a configuration without a retry block'
+    $script:Sim.Random = 0.5
+    Assert-Equal ((1..6 | ForEach-Object { Get-WdaBackoffSeconds $pol $_ }) -join ',') '60,120,240,480,900,900' 'doubling, capped'
+    $script:Sim.Random = 0.0
+    Assert-Equal (Get-WdaBackoffSeconds $pol 1) 48 'jitter -20%'
+    $script:Sim.Random = 0.9999
+    Assert-Equal (Get-WdaBackoffSeconds $pol 1) 72 'jitter +20%'
+    Assert-Equal (Get-WdaBackoffSeconds $pol 5) 900 'jitter never exceeds the maximum delay'
+    $wild = New-AppTestConfig @() -Overrides @{ maxAttemptsPerPackage = 99; retry = @{ baseDelaySeconds = 99999; maxDelaySeconds = -5; jitterRatio = 7; maxNetworkDeferrals = 500 } }
+    $w = Get-WdaRetryPolicy $wild
+    Assert-Equal "$($w.maxAttempts) $($w.baseDelaySeconds) $($w.maxDelaySeconds) $($w.jitterRatio) $($w.maxNetworkDeferrals)" '10 3600 3600 0.5 24' 'out-of-range configuration values are clamped (no unbounded retry)'
+    Assert-Equal (Get-WdaRetryPolicy (New-AppTestConfig @() -Overrides @{ retry = @{ automatic = $false } })).maxAttempts 1 'automatic retry off: one attempt per run'
+}
+
+$tests['transient failures: waits 60 s then 120 s (backoff) and succeeds on the third attempt'] = {
+    Reset-Sim @((New-SimPackage 'Vendor.Flaky' 'fail-twice'))
+    $c = New-AppTestConfig $script:Sim.Packages -Overrides @{ maxAttemptsPerPackage = 3 }
+    $o = Invoke-Logons $c
+    Assert-Equal ($o -join ',') 'Finished:Succeeded' 'one run, no extra restart'
+    Assert-Equal ($script:Sim.Waits -join ',') '60,120' 'backoff waits'
+    $p = Get-Pkg (Get-Result $c) 'Vendor.Flaky'
+    Assert-Equal "$($p.status) $($p.attempts) $($p.lifecycle) $($p.detection)" 'Succeeded 3 Succeeded Installed' 'result'
+    Assert-Equal @($p.history).Count 3 'every attempt in the history'
+    $a = Get-Attempts $c
+    Assert-Equal (($a | ForEach-Object { "$($_.attempt):$($_.result):$($_.class)" }) -join ' ') '1:Failed:Network 2:Failed:Network 3:Succeeded:Success' 'attempts.jsonl'
+    Assert-Equal $a[0].nextAction 'retry after 60 s' 'next scheduled action recorded'
+    Assert-Equal $a[0].operationId 'app:winget:vendor.flaky' 'stable operation id'
+}
+
+$tests['exhausted retry budget: FailedRetryable, outstanding, exactly maxAttempts installs'] = {
+    Reset-Sim @((New-SimPackage 'Vendor.Down' 'fail'), (New-SimPackage 'Git.Git'))
+    $c = New-AppTestConfig $script:Sim.Packages -Overrides @{ maxAttemptsPerPackage = 3 }
+    $o = Invoke-Logons $c
+    Assert-Equal $o[-1] 'Finished:CompletedWithFailures' 'outcome'
+    $r = Get-Result $c
+    $p = Get-Pkg $r 'Vendor.Down'
+    Assert-Equal "$($p.status) $($p.lifecycle) $($p.failureClass) $($p.retryable) $($p.attempts)" 'Failed FailedRetryable Network True 3' 'classification'
+    Assert-Equal $script:Sim.Packages[0].InstallCalls 3 'no more than the budget'
+    Assert-Equal ((@($r.outstanding) | ForEach-Object { $_.operationId }) -join ',') 'app:winget:vendor.down' 'outstanding work recorded'
+    Assert-Equal $r.schemaVersion 2 'result schema 2'
+    Assert-True ($r.reason -match 'recovery tool') 'reason points to recovery'
+    Save-Result $c 'phase5-exhausted'
+}
+
+$tests['permanent failures are never retried automatically (integrity, policy, cancelled, not found)'] = {
+    Reset-Sim @((New-SimPackage 'Vendor.Hash' 'hash'), (New-SimPackage 'Vendor.Cancel' 'cancel'), (New-SimPackage 'Vendor.Gone' 'notfound'))
+    $c = New-AppTestConfig $script:Sim.Packages -Overrides @{ maxAttemptsPerPackage = 3 }
+    [void] (Invoke-Logons $c)
+    $r = Get-Result $c
+    Assert-Equal "$((Get-Pkg $r 'Vendor.Hash').lifecycle) $((Get-Pkg $r 'Vendor.Hash').failureClass)" 'FailedPermanent Integrity' 'hash mismatch'
+    Assert-Equal $script:Sim.Packages[0].InstallCalls 1 'hash mismatch: one attempt only'
+    Assert-Equal "$((Get-Pkg $r 'Vendor.Cancel').lifecycle) $((Get-Pkg $r 'Vendor.Cancel').failureClass)" 'ManualActionRequired User' 'user cancellation'
+    Assert-Equal $script:Sim.Packages[1].InstallCalls 1 'cancellation: one attempt only'
+    Assert-Equal (Get-Pkg $r 'Vendor.Gone').lifecycle 'FailedPermanent' 'not in the source'
+    Assert-Equal $script:Sim.Packages[2].InstallCalls 0 'never attempted'
+    Assert-Equal @($script:Sim.Waits | Where-Object { $_ -ge 30 }).Count 0 'no backoff wait for permanent failures'
+}
+
+$tests['portable download integrity failure: not retried, no shortcut, permanent'] = {
+    $pkg = New-SimPackage 'Rufus.Rufus' 'hash' -Method portable -Portable @{ executable = 'rufus*.exe'; shortcut = 'Rufus' }
+    Reset-Sim @($pkg)
+    $c = New-AppTestConfig $script:Sim.Packages -Overrides @{ maxAttemptsPerPackage = 3 }
+    [void] (Invoke-Logons $c)
+    $p = Get-Pkg (Get-Result $c) 'Rufus.Rufus'
+    Assert-Equal "$($p.status) $($p.lifecycle) $($p.exitCode)" 'Failed FailedPermanent 0x8A150011' 'integrity'
+    Assert-Equal $pkg.InstallCalls 1 'one attempt'
+    Assert-Equal $script:Sim.Shortcuts.Count 0 'no shortcut to a file that failed verification'
+}
+
+$tests['unknown exit code, installer timeout and package lock contention are retried within the budget'] = {
+    Reset-Sim @((New-SimPackage 'Vendor.Odd' 'unknown-once'), (New-SimPackage 'Vendor.Slow' 'timeout-once'), (New-SimPackage 'Vendor.Busy' 'locked-once'))
+    $c = New-AppTestConfig $script:Sim.Packages
+    $o = Invoke-Logons $c
+    Assert-Equal $o[-1] 'Finished:Succeeded' 'all three succeed on retry'
+    $a = Get-Attempts $c
+    Assert-Equal (($a | Where-Object { $_.result -ne 'Succeeded' } | ForEach-Object { "$($_.name)=$($_.class)" }) -join ' ') 'App Vendor.Odd=Unknown App Vendor.Slow=Timeout App Vendor.Busy=Transient' 'classes'
+    Assert-Equal ($a | Where-Object { $_.class -eq 'Unknown' }).exitCode '0x80070005' 'unknown code kept'
+}
+
+$tests['network lost mid-run: progress kept, nothing failed, resumes when the network is back'] = {
+    Reset-Sim @((New-SimPackage 'Git.Git'), (New-SimPackage 'Vendor.Download' 'net-drop'), (New-SimPackage '7zip.7zip'))
+    $c = New-AppTestConfig $script:Sim.Packages
+    $first = Invoke-WdaMain $c
+    Assert-Equal $first 'WaitingForNetwork' 'run stops waiting for the network'
+    $st = Read-WdaJson (Get-StateFile $c)
+    Assert-Equal $st.packages['winget:git.git'].status 'Succeeded' 'finished work kept'
+    $d = $st.packages['winget:vendor.download']
+    Assert-Equal "$($d.status) $($d.attempts) $($d.waitingFor) $($d.networkDeferrals)" 'Pending 0 network 1' 'deferred, attempt not held against it'
+    Assert-Equal (Get-WdaLifecycle $d) 'WaitingForNetwork' 'lifecycle'
+    Assert-Equal $st.packages['winget:7zip.7zip'].status 'Pending' 'others not marked failed'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $c.dataRoot 'Applications\result.json'))) 'not final'
+    $script:Sim.Now = $script:Sim.Now.AddHours(1)
+    $o = Invoke-Logons $c
+    Assert-Equal $o[-1] 'Finished:Succeeded' 'resumed and finished'
+    Assert-Equal $script:Sim.Packages[0].InstallCalls 1 'Git not reinstalled'
+    $p = Get-Pkg (Get-Result $c) 'Vendor.Download'
+    Assert-Equal "$($p.attempts) $($p.totalAttempts)" '1 2' 'only the real attempt counts toward the limit'
+    Assert-True (@($p.history | Where-Object { $_.countsTowardLimit -eq $false }).Count -eq 1) 'deferral recorded in the history'
+}
+
+$tests['Microsoft Store source unavailable: WinGet packages continue, the Store package waits'] = {
+    Reset-Sim @((New-SimPackage '9NBLGGH4NNS1' 'store-down' -Source msstore), (New-SimPackage 'Git.Git'), (New-SimPackage '7zip.7zip'))
+    $script:Sim.SourceDown = @('msstore')
+    $c = New-AppTestConfig $script:Sim.Packages
+    Assert-Equal (Invoke-WdaMain $c) 'WaitingForNetwork' 'waits for the source'
+    $st = Read-WdaJson (Get-StateFile $c)
+    Assert-Equal "$($st.packages['winget:git.git'].status) $($st.packages['winget:7zip.7zip'].status)" 'Succeeded Succeeded' 'other source continued'
+    Assert-Equal $st.packages['msstore:9nblggh4nns1'].waitingFor 'source:msstore' 'waiting for that source'
+    $script:Sim.SourceDown = @()
+    $script:Sim.Now = $script:Sim.Now.AddHours(1)
+    Assert-Equal (Invoke-WdaMain $c) 'Finished:Succeeded' 'installs when the source is back'
+}
+
+$tests['source never returns: deferrals are bounded, then Failed (retryable), no loop'] = {
+    Reset-Sim @((New-SimPackage '9NBLGGH4NNS1' 'store-down' -Source msstore), (New-SimPackage 'Git.Git'))
+    $script:Sim.SourceDown = @('msstore')
+    $c = New-AppTestConfig $script:Sim.Packages -Overrides @{ retry = @{ maxNetworkDeferrals = 2 } }
+    $o = Invoke-Logons $c
+    Assert-Equal $o[-1] 'Finished:CompletedWithFailures' 'ends'
+    Assert-True ($o.Count -le 6) "bounded number of runs ($($o.Count))"
+    $p = Get-Pkg (Get-Result $c) '9NBLGGH4NNS1'
+    Assert-Equal "$($p.status) $($p.lifecycle) $($p.failureClass)" 'Failed FailedRetryable Network' 'retryable by a technician'
+}
+
+$tests['interrupted installer that finished anyway: confirmed, not reinstalled'] = {
+    Reset-Sim @((New-SimPackage 'Vendor.Partial' 'fail-but-installed'))
+    $c = New-AppTestConfig $script:Sim.Packages
+    $o = Invoke-Logons $c
+    Assert-Equal $o[-1] 'Finished:Succeeded' 'outcome'
+    Assert-Equal $script:Sim.Packages[0].InstallCalls 1 'winget list found it before a second attempt'
+    Assert-Equal (Get-Pkg (Get-Result $c) 'Vendor.Partial').detection 'Installed' 'detection'
+}
+
+$tests['successful exit code without the application: Unconfirmed, follow-up, never a silent success'] = {
+    Reset-Sim @((New-SimPackage 'Vendor.Ghost' 'false-success'))
+    $c = New-AppTestConfig $script:Sim.Packages
+    $o = Invoke-Logons $c
+    Assert-Equal $o[-1] 'Finished:CompletedWithFollowUp' 'follow-up'
+    $r = Get-Result $c
+    Assert-Equal (Get-Pkg $r 'Vendor.Ghost').detection 'Unconfirmed' 'detection'
+    Assert-True (@($r.followUp | Where-Object { $_ -match 'unconfirmed' }).Count -eq 1) 'listed'
+}
+
+$tests['power loss with operations left Running: reconciled with winget list, never stuck'] = {
+    Reset-Sim @((New-SimPackage 'Vendor.Done' 'installed'), (New-SimPackage 'Vendor.Notyet'))
+    $c = New-AppTestConfig $script:Sim.Packages
+    [void] (Invoke-WdaMain $c)
+    # Rewind to a state written just before both installers finished (both left "Installing").
+    Reset-Sim @((New-SimPackage 'Vendor.Done' 'installed'), (New-SimPackage 'Vendor.Notyet'))
+    $st = Read-WdaJson (Get-StateFile $c)
+    foreach ($k in 'winget:vendor.done', 'winget:vendor.notyet') { $st.packages[$k].status = 'Installing'; $st.packages[$k].attempts = 1 }
+    $st.final = $null
+    Write-WdaJson (Get-StateFile $c) $st
+    Remove-Item -LiteralPath (Join-Path $c.dataRoot 'Applications\result.json')
+    $o = Invoke-Logons $c
+    Assert-Equal $o[-1] 'Finished:Succeeded' 'outcome'
+    $r = Get-Result $c
+    Assert-Equal (Get-Pkg $r 'Vendor.Done').status 'Succeeded' 'installed one confirmed'
+    Assert-Equal $script:Sim.Packages[0].InstallCalls 0 'and not reinstalled'
+    Assert-Equal $script:Sim.Packages[1].InstallCalls 1 'missing one installed once'
+    Assert-Equal (Get-Pkg $r 'Vendor.Notyet').attempts 2 'interrupted attempt still counted'
+    Assert-True (@((Get-Pkg $r 'Vendor.Done').history | Where-Object { $_.result -eq 'Interrupted' }).Count -eq 1) 'interruption recorded'
+}
+
+$tests['state writes are atomic: the last good copy is kept and used when the state is damaged'] = {
+    Reset-Sim @((New-SimPackage 'Git.Git'), (New-SimPackage 'Vendor.Later' 'fail'))
+    $c = New-AppTestConfig $script:Sim.Packages -Overrides @{ maxAttemptsPerPackage = 1 }
+    [void] (Invoke-WdaMain $c)
+    $file = Get-StateFile $c
+    Assert-True (Test-Path -LiteralPath "$file.bak") 'backup written by every save'
+    Assert-True (-not (Test-Path -LiteralPath "$file.tmp")) 'no temporary file left behind'
+    # Reopen the finished run, then damage the state as a power loss mid-write would (truncated).
+    # Git.Git is "not installed" in the simulation now, so a state rebuilt from scratch would
+    # install it again: only the backup can keep the completed operation.
+    $st = Read-WdaJson $file; $st.final = $null; Write-WdaJson $file $st -Backup; Write-WdaJson $file $st -Backup
+    Remove-Item -LiteralPath (Join-Path $c.dataRoot 'Applications\result.json')
+    [IO.File]::WriteAllText($file, '{"version":2,"packages":{"winget:git.git":{"key":"winget:git.')
+    $script:Sim.Packages[0].Installed = $false
+    $script:Sim.Packages[0].InstallCalls = 0
+    $o = Invoke-WdaMain $c
+    Assert-Equal $o 'Finished:CompletedWithFailures' 'finishes'
+    Assert-Equal $script:Sim.Packages[0].InstallCalls 0 'completed operation not repeated'
+    $r = Get-Result $c
+    Assert-Equal $r.stateRecoveredFrom 'backup' 'recovered from the backup'
+    Assert-Equal (Get-Pkg $r 'Git.Git').status 'Succeeded' 'completed operation preserved'
+    Assert-True (Test-Path -LiteralPath "$file.corrupt") 'damaged copy kept for diagnosis'
+    Save-Result $c 'phase5-backup'
+}
+
+$tests['malformed or untrusted states are rejected, never trusted'] = {
+    $bad = @(
+        '{"version":99,"packages":{}}',
+        '{"version":2,"packages":{"winget:git.git":{"key":"winget:other.pkg","status":"Succeeded","attempts":0}}}',
+        '{"version":2,"packages":{"winget:git.git":{"key":"winget:git.git","status":"Hacked","attempts":0}}}',
+        '{"version":2,"packages":{"winget:git.git":{"key":"winget:git.git","status":"Pending","attempts":"1; rm"}}}',
+        '{"version":2,"packages":[1,2,3]}',
+        '{"version":2,"final":"Pwned","packages":{}}'
+    )
+    foreach ($json in $bad) {
+        Reset-Sim @((New-SimPackage 'Git.Git'))
+        $c = New-AppTestConfig $script:Sim.Packages
+        $dir = Join-Path $c.dataRoot 'Applications'
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        [IO.File]::WriteAllText((Join-Path $dir 'state.json'), $json)
+        Assert-True ($null -ne (Test-WdaStateShape (ConvertTo-WdaHashtable ($json | ConvertFrom-Json)))) "rejected: $json"
+        Assert-Equal (Invoke-WdaMain $c) 'Finished:Succeeded' "fresh, verified run instead: $json"
+        Assert-Equal (Get-Pkg (Get-Result $c) 'Git.Git').status 'Succeeded' 'the configuration decides what is installed'
+    }
+}
+
+$tests['state version 1 (engine 1.0/1.1) is upgraded without reopening completed work'] = {
+    Reset-Sim @((New-SimPackage 'Git.Git'), (New-SimPackage 'Vendor.Old' 'fail'), (New-SimPackage '7zip.7zip'))
+    $c = New-AppTestConfig $script:Sim.Packages
+    $dir = Join-Path $c.dataRoot 'Applications'
+    New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    $now = $script:Sim.Now.ToString('o')
+    $v1 = @{ version = 1; firstStartUtc = $now; installStartUtc = $now; starts = 2; reboots = 0; errors = 0; offlineStarts = 0; everOnline = $true; prepared = $true; restartForPending = $false; bootstrap = $null; final = $null; additional = @{}
+             packages = @{ 'winget:git.git' = @{ key = 'winget:git.git'; name = 'App Git.Git'; packageIdentifier = 'Git.Git'; source = 'winget'; status = 'Succeeded'; attempts = 1; exitCode = '0x00000000'; message = 'Installed.'; updatedUtc = $now; restart = ''; restartBoot = ''; interrupted = $false }
+                           'winget:vendor.old' = @{ key = 'winget:vendor.old'; name = 'App Vendor.Old'; packageIdentifier = 'Vendor.Old'; source = 'winget'; status = 'Failed'; attempts = 2; exitCode = '0x8A150008'; message = 'Download failed.'; updatedUtc = $now; restart = ''; restartBoot = ''; interrupted = $false } } }
+    [IO.File]::WriteAllText((Join-Path $dir 'state.json'), ($v1 | ConvertTo-Json -Depth 6))
+    $o = Invoke-Logons $c
+    Assert-Equal $o[-1] 'Finished:CompletedWithFailures' 'outcome'
+    Assert-Equal "$($script:Sim.Packages[0].InstallCalls) $($script:Sim.Packages[1].InstallCalls)" '0 0' 'Succeeded and Failed stay as they were (no reinstall, no silent retry)'
+    Assert-Equal $script:Sim.Packages[2].InstallCalls 1 'unfinished work continues'
+    $st = Read-WdaJson (Get-StateFile $c)
+    Assert-Equal $st.version 2 'upgraded'
+    Assert-Equal $st.packages['winget:vendor.old'].operationId 'app:winget:vendor.old' 'new fields added'
+    Assert-Equal $st.packages['winget:git.git'].status 'Succeeded' 'status unchanged'
+}
+
+$tests['runtime limit: finished work kept, the rest Failed (Budget, retryable), never a blanket Failed'] = {
+    Reset-Sim @((New-SimPackage 'Git.Git'), (New-SimPackage 'Vendor.Slow' 'fail'), (New-SimPackage '7zip.7zip'))
+    $c = New-AppTestConfig $script:Sim.Packages -Overrides @{ maxAttemptsPerPackage = 3; maxRuntimeHours = 1; retry = @{ baseDelaySeconds = 3600; maxDelaySeconds = 3600 } }
+    $o = Invoke-Logons $c
+    Assert-Equal $o[-1] 'Finished:CompletedWithFailures' 'not a blanket Failed'
+    $r = Get-Result $c
+    Assert-Equal (Get-Pkg $r 'Git.Git').status 'Succeeded' 'kept'
+    $p = Get-Pkg $r 'Vendor.Slow'
+    Assert-Equal "$($p.status) $($p.failureClass) $($p.retryable)" 'Failed Budget True' 'budget class'
+    Assert-True ($r.reason -match 'runtime limit') 'reason'
+}
+
+$tests['continue after a failure off: the queue stops, the rest stays outstanding, resume finishes it'] = {
+    Reset-Sim @((New-SimPackage 'Vendor.Bad' 'hash'), (New-SimPackage 'Git.Git'), (New-SimPackage '7zip.7zip'))
+    $c = New-AppTestConfig $script:Sim.Packages -Overrides @{ retry = @{ continueAfterFailure = $false } }
+    $o = Invoke-Logons $c
+    Assert-Equal $o[-1] 'Finished:CompletedWithFailures' 'outcome'
+    $r = Get-Result $c
+    Assert-Equal "$((Get-Pkg $r 'Git.Git').status) $((Get-Pkg $r '7zip.7zip').status)" 'Pending Pending' 'not attempted'
+    Assert-Equal @($r.outstanding).Count 3 'all three outstanding'
+    $rr = Invoke-WdaRetry $c -PendingOnly -RequestedBy 'PC\Tech'
+    Assert-Equal "$($rr.Outcome) $(@($rr.Accepted).Count)" 'Accepted 2' 'resume reopens the unfinished ones only'
+    [void] (Invoke-Logons $c)
+    $r = Get-Result $c
+    Assert-Equal "$((Get-Pkg $r 'Git.Git').status) $((Get-Pkg $r '7zip.7zip').status) $((Get-Pkg $r 'Vendor.Bad').status)" 'Succeeded Succeeded Failed' 'resumed; the permanent failure is untouched'
+    Assert-Equal $script:Sim.Packages[0].InstallCalls 1 'not retried'
+}
+
+$tests['automatic retry off: one attempt, then a technician retry succeeds'] = {
+    Reset-Sim @((New-SimPackage 'Vendor.Once' 'fail-once'))
+    $c = New-AppTestConfig $script:Sim.Packages -Overrides @{ retry = @{ automatic = $false } }
+    $o = Invoke-Logons $c
+    Assert-Equal $o[-1] 'Finished:CompletedWithFailures' 'no automatic retry'
+    Assert-Equal $script:Sim.Packages[0].InstallCalls 1 'one attempt'
+    Assert-Equal (Get-Pkg (Get-Result $c) 'Vendor.Once').lifecycle 'FailedRetryable' 'retryable'
+    Assert-Equal (Invoke-WdaRetry $c -AllFailed).Outcome 'Accepted' 'technician retry'
+    $o = Invoke-Logons $c
+    Assert-Equal $o[-1] 'Finished:Succeeded' 'succeeds'
+}
+
+$tests['recovery: retry one failed application; successful ones are not repeated; history kept'] = {
+    Reset-Sim @((New-SimPackage 'Git.Git'), (New-SimPackage 'Vendor.Down' 'fail'), (New-SimPackage '7zip.7zip'))
+    $c = New-AppTestConfig $script:Sim.Packages
+    [void] (Invoke-Logons $c)
+    Assert-True (Test-Marker $c) 'finished with failures'
+    $script:Sim.Packages[1].Behavior = 'ok'     # the technician fixed the cause
+    $r = Invoke-WdaRetry $c -Operations @('app:winget:vendor.down') -RequestedBy 'PC\Tech'
+    Assert-Equal $r.Outcome 'Accepted' 'accepted'
+    Assert-True (-not (Test-Marker $c)) 'marker removed while the stage runs again'
+    Assert-True (@(Get-ChildItem -LiteralPath (Join-Path $c.dataRoot 'Applications\history') -Filter 'result-*.json').Count -eq 1) 'previous result archived'
+    $o = Invoke-Logons $c
+    Assert-Equal $o[-1] 'Finished:Succeeded' 'now complete'
+    Assert-Equal "$($script:Sim.Packages[0].InstallCalls) $($script:Sim.Packages[2].InstallCalls)" '1 1' 'no successful operation repeated'
+    $p = Get-Pkg (Get-Result $c) 'Vendor.Down'
+    Assert-Equal "$($p.manualRetries) $($p.totalAttempts) $($p.attempts)" '1 3 1' 'fresh budget, total kept'
+    Assert-True (@($p.history | Where-Object { $_.trigger -eq 'manual' -and $_.message -match 'PC\\Tech' }).Count -eq 1) 'manual retry in the history'
+    Assert-Equal @((Get-Result $c).recoveries).Count 1 'recovery recorded'
+    Save-Result $c 'phase5-recovered'
+}
+
+$tests['recovery: refuses deselected, manual, installed, invalid and unknown operations; permanent needs -IncludePermanent'] = {
+    Reset-Sim @((New-SimPackage 'Git.Git'), (New-SimPackage 'Vendor.Hash' 'hash'))
+    $c = New-AppTestConfig $script:Sim.Packages -Overrides @{
+        manual = @(@{ key = 'catalog:rustdesk'; displayName = 'RustDesk'; instructions = 'Install it from the publisher.'; url = 'https://rustdesk.com/' })
+        deselected = @(@{ key = 'winget:mozilla.firefox'; packageIdentifier = 'Mozilla.Firefox'; source = 'winget'; displayName = 'Firefox' }) }
+    [void] (Invoke-Logons $c)
+    $ops = @('app:winget:git.git', 'app:winget:mozilla.firefox', 'catalog:rustdesk', 'app:winget:vendor.hash', 'app:winget:Bad;Pkg', 'app:winget:not.inplan', 'shell:Remove-Item')
+    $r = Invoke-WdaRetry $c -Operations $ops
+    Assert-Equal $r.Outcome 'Refused' 'nothing reopened'
+    $why = @{}; foreach ($x in $r.Refused) { $why[$x.operationId] = $x.reason }
+    Assert-True ($why['app:winget:git.git'] -match 'already installed') 'installed'
+    Assert-Equal $why['app:winget:mozilla.firefox'] 'explicitly deselected for this deployment' 'deselection respected (exact reason)'
+    Assert-True ($why['app:catalog:rustdesk'] -match 'not a valid operation id') 'manual entry'
+    Assert-True ($why['app:winget:vendor.hash'] -match 'IncludePermanent') 'permanent'
+    Assert-True ($why['app:winget:bad;pkg'] -match 'not a valid operation id') 'invalid id'
+    Assert-True ($why['app:winget:not.inplan'] -match 'not part of this deployment') 'unknown'
+    Assert-True ($why['app:shell:remove-item'] -match 'not a valid operation id') 'no arbitrary input'
+    Assert-Equal "$($script:Sim.Packages[0].InstallCalls) $($script:Sim.Packages[1].InstallCalls)" '1 1' 'nothing ran'
+    $r = Invoke-WdaRetry $c -Operations @('app:winget:vendor.hash') -IncludePermanent
+    Assert-Equal $r.Outcome 'Accepted' 'explicit technician override'
+    [void] (Invoke-Logons $c)
+    Assert-Equal $script:Sim.Packages[1].InstallCalls 2 'retried once more with the same checks'
+    Assert-Equal (Get-Pkg (Get-Result $c) 'Vendor.Hash').lifecycle 'FailedPermanent' 'the hash check still applies'
+}
+
+$tests['recovery: a dependent application is retried together with its failed dependency, in order'] = {
+    Reset-Sim @((New-SimPackage 'Microsoft.VCRedist.2015+.x64' 'fail'), (New-SimPackage 'Vendor.NeedsRuntime' -After @('winget:microsoft.vcredist.2015+.x64')))
+    $c = New-AppTestConfig $script:Sim.Packages
+    [void] (Invoke-Logons $c)
+    Assert-Equal (Get-Pkg (Get-Result $c) 'Vendor.NeedsRuntime').lifecycle 'BlockedByDependency' 'blocked'
+    $script:Sim.Packages[0].Behavior = 'ok'
+    $script:Sim.Order = @()
+    $r = Invoke-WdaRetry $c -Operations @('app:winget:vendor.needsruntime')
+    Assert-Equal (@($r.Accepted) -join ',') 'app:winget:vendor.needsruntime,app:winget:microsoft.vcredist.2015+.x64' 'dependency reopened too'
+    $o = Invoke-Logons $c
+    Assert-Equal $o[-1] 'Finished:Succeeded' 'both installed'
+    Assert-Equal ($script:Sim.Order -join ',') 'Microsoft.VCRedist.2015+.x64,Vendor.NeedsRuntime' 'dependency first'
+}
+
+$tests['recovery: never runs while the engine runs; no state means nothing to retry'] = {
+    Reset-Sim @((New-SimPackage 'Git.Git'))
+    $c = New-AppTestConfig $script:Sim.Packages
+    Assert-Equal (Invoke-WdaRetry $c -AllFailed).Outcome 'NoState' 'no state'
+    $job = Start-MutexHolder $c.mutexName
+    try {
+        Assert-Equal (Invoke-WdaRetry $c -AllFailed).Outcome 'Busy' 'refused while running'
+    } finally { $job | Stop-Job -PassThru | Remove-Job -Force }
+}
+
+$tests['a real engine 1.1.0 configuration (Phase 4.3 generator, no retry block) runs under StrictMode with safe defaults'] = {
+    $src = Join-Path $PSScriptRoot '..\fixtures\applications\engine-1.1.0-config.json'
+    $raw = Get-Content -LiteralPath $src -Raw | ConvertFrom-Json
+    $sims = @($raw.packages | ForEach-Object {
+        $sp = New-SimPackage $_.packageIdentifier -Source $_.source -Method $(if ($_.PSObject.Properties['method']) { [string] $_.method } else { '' })
+        if ($_.PSObject.Properties['portable'] -and $_.portable) { $sp.Portable = @{ executable = [string] $_.portable.executable; shortcut = [string] $_.portable.shortcut }; $sp.PortableFiles = @(([string] $_.portable.executable) -replace '\*', '-1.0') }
+        $sp
+    })
+    Reset-Sim $sims
+    $root = Join-Path ([IO.Path]::GetTempPath()) ("wda-test-" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $root -Force | Out-Null
+    Copy-Item -LiteralPath $src -Destination (Join-Path $root 'applications-config.json')
+    $c = Get-WdaConfig (Join-Path $root 'applications-config.json')
+    Assert-Equal "$($c.engineVersion) $($c.ContainsKey('retry'))" '1.1.0 False' 'a genuine 1.1.0 configuration'
+    $c.dataRoot = $root
+    $c.mutexName = "Local\wda-test-$([Guid]::NewGuid().ToString('N'))"
+    $c.coordination.windowsUpdate.enabled = $false
+    Set-StrictMode -Version 2.0
+    try { $o = Invoke-Logons $c } finally { Set-StrictMode -Off }
+    Assert-Equal $o[-1] 'Finished:CompletedWithFollowUp' 'finishes (RustDesk is a manual follow-up)'
+    $r = Get-Result $c
+    Assert-Equal "$($r.retryPolicy.automatic) $($r.retryPolicy.maxAttempts) $($r.retryPolicy.baseDelaySeconds)" 'True 2 60' 'engine defaults with the configured attempt limit'
+    Assert-Equal @($r.packages | Where-Object { $_.status -notin 'Succeeded', 'RequiresInteraction' }).Count 0 'every package installed'
+    Assert-True (@($r.packages).Count -ge 10) "the real plan ($(@($r.packages).Count) operations)"
+}
+
+$tests['documented example: 20 applications, 18 succeed, one recovers on automatic retry, one needs a technician'] = {
+    $ids = @(1..18 | ForEach-Object { New-SimPackage ("Vendor.App{0:D2}" -f $_) })
+    $flaky = New-SimPackage 'Vendor.FlakyDownload' 'fail-once'
+    $down = New-SimPackage 'Vendor.MirrorDown' 'fail'
+    Reset-Sim (@($ids[0..8]) + @($flaky) + @($ids[9..17]) + @($down))
+    $c = New-AppTestConfig $script:Sim.Packages -Overrides @{ maxAttemptsPerPackage = 3 }
+    $o = Invoke-Logons $c
+    Assert-Equal $o[-1] 'Finished:CompletedWithFailures' 'automatic phase'
+    $r = Get-Result $c
+    Assert-Equal "$($r.counts.succeeded) $($r.counts.failed)" '19 1' '18 + the one that recovered; one failed'
+    Assert-Equal (Get-Pkg $r 'Vendor.FlakyDownload').attempts 2 'recovered on the second attempt'
+    Assert-Equal "$((Get-Pkg $r 'Vendor.MirrorDown').attempts) $((Get-Pkg $r 'Vendor.MirrorDown').lifecycle)" '3 FailedRetryable' 'budget used up'
+    Assert-Equal ($script:Sim.Waits -join ',') '60,120' 'backoff: one 60 s wait (both first retries were due together), then 120 s'
+    Save-Result $c 'phase5-example-before'
+    $down.Behavior = 'ok'                            # the mirror is back / the technician fixed the cause
+    Assert-Equal (Invoke-WdaRetry $c -AllFailed -RequestedBy 'SHOP\Technician').Outcome 'Accepted' 'technician retry'
+    $o = Invoke-Logons $c
+    Assert-Equal $o[-1] 'Finished:Succeeded' 'all 20 installed'
+    Assert-Equal (@($script:Sim.Packages | Where-Object { $_.InstallCalls -gt 1 } | ForEach-Object { $_.Id }) -join ',') 'Vendor.FlakyDownload,Vendor.MirrorDown' 'only the two failing apps ran more than once'
+    Save-Result $c 'phase5-example-after'
+}
+
+$tests['stale install lock (owner process gone) is taken over at once; a live lock is not'] = {
+    Reset-Sim
+    $root = Join-Path ([IO.Path]::GetTempPath()) ("wda-test-" + [Guid]::NewGuid().ToString('N'))
+    $p = Get-WdbCoordinationPaths $root
+    New-Item -ItemType Directory -Path $p.Dir -Force | Out-Null
+    [IO.File]::WriteAllText($p.Lock, '{"owner":"Applications","pid":999999,"sinceUtc":"2026-10-19T00:00:00Z"}')
+    $l = Enter-WdbInstallLock $root 'Applications' 60
+    try {
+        Assert-True ($null -ne $l) 'stale lock file taken over'
+        Assert-Equal $script:Sim.LockPolls 0 'without waiting'
+        Assert-True ((Get-WdbInstallLockOwner $root) -match "`"pid`":$PID") 'new owner recorded'
+        Assert-Equal (Enter-WdbInstallLock $root 'Other' 0) $null 'a live lock is respected'
+    } finally { Exit-WdbInstallLock $l }
 }
 
 # ------------------------------------------------------------------------------------------------

@@ -15,11 +15,17 @@
     installed by the existing engines (WindowsUpdateEngine.ps1 as SYSTEM, ApplicationEngine.ps1 as
     the signed-in user), each from its own scheduled task. The orchestrator launches each engine's
     installer once, follows their real result files and writes one deployment status and report.
+
+    Phase 5 (orchestrator 1.1.0): state files are replaced atomically with a backup of the last good
+    copy (Read-WddDeploymentState falls back to it and never mistakes a damaged state for "no
+    deployment"), and every snapshot carries a machine-readable outcome with a stable exit code
+    (Get-WddDeploymentOutcome) for DeploymentRecovery.ps1 and later health reporting.
 #>
 
 Set-StrictMode -Version 2.0
 
-$script:DeployVersion = '1.0.0'
+$script:DeployVersion = '1.1.0'
+$script:DeployStateVersion = 2
 $script:EventSource = 'WindowsDeploymentBuilder'
 $script:ManifestFormat = 'windows-deployment-builder/deployment-manifest'
 $script:MutexName = 'Global\WindowsDeploymentBuilder-Deployment'
@@ -108,13 +114,27 @@ function ConvertTo-WddHashtable {
     return $InputObject
 }
 
+<#
+    Atomic write: <Path>.tmp is written through to disk, then replaces <Path> in one file-system
+    operation; -Backup keeps the replaced file as <Path>.bak (the last good copy).
+#>
 function Write-WddJson {
-    param([string] $Path, $Value)
+    param([string] $Path, $Value, [switch] $Backup)
     $dir = Split-Path -Parent $Path
     if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
     $json = $Value | ConvertTo-Json -Depth 12
     $tmp = "$Path.tmp"
-    [System.IO.File]::WriteAllText($tmp, $json, (New-Object System.Text.UTF8Encoding($false)))
+    $bytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes($json)
+    $fs = New-Object System.IO.FileStream($tmp, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None, 4096, [System.IO.FileOptions]::WriteThrough)
+    try { $fs.Write($bytes, 0, $bytes.Length); $fs.Flush($true) } finally { $fs.Dispose() }
+    if (Test-Path -LiteralPath $Path) {
+        try {
+            [System.IO.File]::Replace($tmp, $Path, $(if ($Backup) { "$Path.bak" } else { $null }))
+            return
+        } catch {
+            if ($Backup) { Copy-Item -LiteralPath $Path -Destination "$Path.bak" -Force }
+        }
+    }
     Move-Item -LiteralPath $tmp -Destination $Path -Force
 }
 
@@ -294,7 +314,14 @@ function Test-WddRestartPending {
     param([hashtable] $Paths)
     $m = Read-WddJson $Paths.RestartMarker
     if (-not $m) { return $false }
-    $written = ConvertTo-WddDate $m.writtenUtc
+    # The engines' shared Set-WdbRestartPending writes requestedUtc and the boot it was written in
+    # (bootTimeUtc); writtenUtc is the Phase 4 name. A marker from an earlier boot is not pending.
+    if ($m['bootTimeUtc']) {
+        $markerBoot = ConvertTo-WddDate $m['bootTimeUtc']
+        try { $boot = Get-WddBootTime } catch { return $true }
+        if (-not $markerBoot -or [Math]::Abs(($markerBoot - $boot).TotalSeconds) -gt 2) { return $false }
+    }
+    $written = ConvertTo-WddDate $(if ($m['writtenUtc']) { $m['writtenUtc'] } else { $m['requestedUtc'] })
     if (-not $written -or ((Get-WddNow) - $written).TotalMinutes -gt 30) { return $false }
     try { $boot = Get-WddBootTime } catch { return $true }
     return $written -ge $boot
@@ -314,11 +341,12 @@ function Get-WddStageSnapshot {
     param([hashtable] $Stage, [hashtable] $Paths, [hashtable] $State)
     $root = $Paths.Root
     $launch = if ($State -and $State.stages -and $State.stages.ContainsKey($Stage.id)) { $State.stages[$Stage.id] } else { $null }
-    $o = [ordered]@{ id = $Stage.id; name = $Stage.name; enabled = [bool] $Stage.enabled; context = $Stage.context; state = 'NotStarted'; status = ''; outcome = ''; detail = ''; reboots = 0; updatedUtc = $null; current = ''; done = $null; total = $null; result = $null }
+    $o = [ordered]@{ id = $Stage.id; name = $Stage.name; enabled = [bool] $Stage.enabled; context = $Stage.context; state = 'NotStarted'; status = ''; outcome = ''; detail = ''; reboots = 0; updatedUtc = $null; current = ''; done = $null; total = $null; result = $null; idle = ''; outstanding = 0 }
     $result = Read-WddJson (Join-Path $root $Stage.result)
     if ($result -and $result.status -in $script:FinalStageStatuses) {
         $o.state = 'Final'; $o.status = $result.status; $o.outcome = Get-WddOutcome $result.status; $o.detail = [string] $result.reason
         $o.reboots = [int] $result.reboots; $o.updatedUtc = $result.finishedUtc; $o.result = $result
+        if ($result.ContainsKey('outstanding')) { $o.outstanding = @($result.outstanding).Count }
         return $o
     }
     $status = Read-WddJson (Join-Path $root $Stage.status)
@@ -333,7 +361,18 @@ function Get-WddStageSnapshot {
     if ($launch.launchResult -eq 'LaunchFailed') { $o.state = 'LaunchFailed'; $o.detail = [string] $launch.message; return $o }
     $since = ConvertTo-WddDate $launch.launchedUtc
     $age = if ($since) { ((Get-WddNow) - $since).TotalMinutes } else { 0 }
-    if ($taskExists) { $o.state = $(if ($status) { 'Running' } else { 'Pending' }); return $o }
+    if ($taskExists) {
+        $o.state = $(if ($status) { 'Running' } else { 'Pending' })
+        # Phase 5: the user-context stage runs only while its user is signed in; say so when it has
+        # not checked in for a long time instead of looking busy.
+        $seen = ConvertTo-WddDate $o.updatedUtc
+        $limit = [int] $State.stalledAfterMinutes
+        if ($Stage.context -eq 'user' -and $limit -gt 0 -and $age -ge $limit -and (-not $seen -or ((Get-WddNow) - $seen).TotalMinutes -ge $limit)) {
+            $who = $(if ($launch.ContainsKey('user') -and $launch.user) { [string] $launch.user } else { 'the user who started the deployment' })
+            $o.idle = "has not run for more than $limit minutes; it runs only while $who is signed in."
+        }
+        return $o
+    }
     # No task and no result: the engine removed its task without a result, or the task was deleted.
     if ($age -ge [int] $State.stalledAfterMinutes) { $o.state = 'Stalled'; if (-not $o.detail) { $o.detail = 'The scheduled task is missing and there is no result. Run Resume-Deployment.ps1.' } }
     else { $o.state = $(if ($status) { 'Running' } else { 'Pending' }) }
@@ -349,7 +388,7 @@ function Get-WddSnapshot {
     $allFinal = ($engine.Count -eq 0) -or (@($engine | Where-Object { $_.state -ne 'Final' }).Count -eq 0)
     $blocked = @($engine | Where-Object { $_.state -in 'Stalled', 'LaunchFailed' })
     $current = @($engine | Where-Object { $_.state -in 'Running', 'Pending' } | Select-Object -First 1)
-    [ordered]@{
+    $snap = [ordered]@{
         packageId       = $Manifest.packageId
         updatedUtc      = (Get-WddNow).ToString('o')
         deploymentState = $(if ($State) { [string] $State.status } else { 'NotInitialized' })
@@ -361,6 +400,17 @@ function Get-WddSnapshot {
         needsAttention  = @($blocked | ForEach-Object { "$($_.name): $($_.state). $($_.detail)" })
         overall         = $(if ($allFinal) { Get-WddOverall $engine } else { 'InProgress' })
     }
+    Set-WddSnapshotOutcome $snap $State
+    return $snap
+}
+
+<# Adds outcome, outcomeCode and outcomeDetail (Phase 5) to a snapshot. #>
+function Set-WddSnapshotOutcome {
+    param($Snapshot, $State, [string] $Problem = '')
+    $out = Get-WddDeploymentOutcome $State $Snapshot $Problem
+    $Snapshot.outcome = $out.outcome
+    $Snapshot.outcomeCode = $out.exitCode
+    $Snapshot.outcomeDetail = $out.detail
 }
 
 <#
@@ -384,4 +434,90 @@ function Get-WddOverall {
     switch ($worst) { 'ok' { 'Succeeded' } 'followUp' { 'CompletedWithFollowUp' } 'failures' { 'CompletedWithFailures' } 'failed' { 'Failed' } default { 'Incomplete' } }
 }
 
-function Save-WddState { param([hashtable] $Paths, [hashtable] $State) Write-WddJson $Paths.State $State }
+function Save-WddState { param([hashtable] $Paths, [hashtable] $State) Write-WddJson $Paths.State $State -Backup }
+
+$script:DeployStates = @('Staging', 'StagingFailed', 'Launching', 'InProgress', 'Completed', 'IntegrityFailed')
+
+<# Shape check of deployment.json: a reason, or $null when the state is usable. #>
+function Test-WddStateShape {
+    param($S)
+    if ($S -isnot [hashtable]) { return 'not an object' }
+    if ("$($S['schemaVersion'])" -notmatch '^\d{1,3}$' -or [int] $S['schemaVersion'] -lt 1 -or [int] $S['schemaVersion'] -gt $script:DeployStateVersion) { return "unsupported schema version '$($S['schemaVersion'])'" }
+    if ([string] $S['packageId'] -notmatch '^[0-9A-F]{16}$') { return 'no valid packageId' }
+    if ([string] $S['status'] -notin $script:DeployStates) { return "unknown status '$($S['status'])'" }
+    if ($S.ContainsKey('stages') -and $null -ne $S['stages'] -and $S['stages'] -isnot [hashtable]) { return 'stages is not a map' }
+    return $null
+}
+
+<#
+    Reads deployment.json, falling back to the last good copy (deployment.json.bak). Returns
+      @{ State; Source = main | backup | missing | corrupt; Problem }
+    "corrupt" (a state file exists but neither copy is usable) is never treated as "no deployment":
+    callers stop and leave the decision to a technician (DeploymentRecovery.ps1 -Action Resume
+    rebuilds the state from the manifest and the engines' own files).
+#>
+function Read-WddDeploymentState {
+    param([hashtable] $Paths)
+    $problems = @()
+    $exists = $false
+    foreach ($candidate in @($Paths.State, "$($Paths.State).bak")) {
+        if (-not (Test-Path -LiteralPath $candidate)) { continue }
+        $exists = $true
+        $s = Read-WddJson $candidate
+        $why = $(if ($null -eq $s) { 'not valid JSON' } else { Test-WddStateShape $s })
+        if (-not $why) {
+            if (-not $s.ContainsKey('recoveries') -or $null -eq $s['recoveries']) { $s['recoveries'] = @() }
+            if (-not $s.ContainsKey('stages') -or $null -eq $s['stages']) { $s['stages'] = @{} }
+            $s.schemaVersion = $script:DeployStateVersion
+            if ($candidate -ne $Paths.State) {
+                Write-WddLog "Deployment state recovered from its last good copy ($(Split-Path -Leaf $candidate)); the damaged file was kept as deployment.json.corrupt." 'WARN'
+                if (Test-Path -LiteralPath $Paths.State) { Copy-Item -LiteralPath $Paths.State -Destination "$($Paths.State).corrupt" -Force -ErrorAction SilentlyContinue }
+                return @{ State = $s; Source = 'backup'; Problem = ($problems -join '; ') }
+            }
+            return @{ State = $s; Source = 'main'; Problem = '' }
+        }
+        $problems += "$(Split-Path -Leaf $candidate): $why"
+    }
+    if (-not $exists) { return @{ State = $null; Source = 'missing'; Problem = '' } }
+    return @{ State = $null; Source = 'corrupt'; Problem = ($problems -join '; ') }
+}
+
+# ------------------------------------------------------------------------------------------------
+# Outcome (Phase 5): one machine-readable result with a stable exit code
+# ------------------------------------------------------------------------------------------------
+
+$script:OutcomeCodes = [ordered]@{
+    Succeeded = 0; CompletedWithWarnings = 10; CompletedWithFailures = 20; Incomplete = 25
+    PausedAwaitingNetwork = 30; PausedAwaitingReboot = 31; PausedAwaitingUser = 32; InProgress = 40
+    FailedToInitialize = 50; Failed = 60
+}
+
+<#
+    Where the deployment stands, for people and programs:
+      ended    Succeeded, CompletedWithWarnings (manual actions or follow-ups), CompletedWithFailures,
+               Incomplete (ended before every stage finished), Failed
+      running  PausedAwaitingNetwork, PausedAwaitingReboot, PausedAwaitingUser, InProgress
+      never    FailedToInitialize (no usable state, staging or integrity failure)
+#>
+function Get-WddDeploymentOutcome {
+    param($State, $Snapshot, [string] $Problem = '')
+    $o = { param([string] $Name, [string] $Detail) [ordered]@{ outcome = $Name; exitCode = $script:OutcomeCodes[$Name]; detail = $Detail } }
+    if (-not $State) { return & $o 'FailedToInitialize' $(if ($Problem) { "The deployment state is unusable: $Problem" } else { 'No deployment has been started on this computer.' }) }
+    switch ([string] $State.status) {
+        'StagingFailed' { return & $o 'FailedToInitialize' ([string] $State.message) }
+        'IntegrityFailed' { return & $o 'FailedToInitialize' ([string] $State.message) }
+        'Completed' {
+            $map = @{ Succeeded = 'Succeeded'; CompletedWithFollowUp = 'CompletedWithWarnings'; CompletedWithFailures = 'CompletedWithFailures'; Incomplete = 'Incomplete'; Failed = 'Failed' }
+            $name = $(if ($map.ContainsKey([string] $State.overall)) { $map[[string] $State.overall] } else { 'Failed' })
+            return & $o $name ([string] $State.message)
+        }
+    }
+    $stages = @(if ($Snapshot) { @($Snapshot.stages) } else { @() })
+    $live = @($stages | Where-Object { $_ -and $_.state -ne 'Final' })
+    if (($Snapshot -and $Snapshot.restartPending) -or @($live | Where-Object { $_.status -in 'Rebooting', 'RebootDeferred' }).Count) { return & $o 'PausedAwaitingReboot' 'A restart is scheduled or in progress; the deployment continues after it.' }
+    $net = @($live | Where-Object { $_.status -eq 'WaitingForNetwork' })
+    if ($net.Count) { return & $o 'PausedAwaitingNetwork' ("$(($net | ForEach-Object { $_.name }) -join ', '): waiting for the network. $(($net | ForEach-Object { $_.detail } | Where-Object { $_ }) -join '; ')".Trim()) }
+    $user = @($live | Where-Object { $_.state -in 'Stalled', 'LaunchFailed' -or $_.idle })
+    if ($user.Count) { return & $o 'PausedAwaitingUser' (($user | ForEach-Object { "$($_.name): $(if ($_.idle) { $_.idle } else { "$($_.state). $($_.detail)" })" }) -join ' ') }
+    return & $o 'InProgress' $(if ($Snapshot -and $Snapshot.currentStage) { "Current stage: $($Snapshot.currentStage)." } else { 'Stages are starting.' })
+}

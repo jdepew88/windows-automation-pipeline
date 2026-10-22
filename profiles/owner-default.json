@@ -25,7 +25,7 @@
   },
   "accounts": {
     "accountMode": "unattendedLocal",
-    "personName": "",
+    "personName": "owner",
     "usernameMode": "derived",
     "customUsername": "",
     "accountGroup": "Administrators",
@@ -107,12 +107,17 @@
     "registerAppInstaller": true,
     "onlineRepair": false,
     "maxReboots": 3,
-    "maxAttemptsPerPackage": 2,
+    "maxAttemptsPerPackage": 3,
     "packageTimeoutMinutes": 30,
     "networkWaitMinutes": 15,
     "maxRuntimeHours": 4,
     "waitForUpdatesHours": 8,
-    "rebootWarningSeconds": 60
+    "rebootWarningSeconds": 60,
+    "recovery": {
+      "automaticRetry": true,
+      "continueAfterFailure": true,
+      "includeRecoveryTool": true
+    }
   },
   "additionalSoftware": {
     "items": []

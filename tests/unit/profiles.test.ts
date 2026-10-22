@@ -66,7 +66,7 @@ describe('owner-default profile', () => {
     const a = ownerDefaults();
     a.accounts.personName = 'Changed';
     a.bloatware.Calculator = 'remove';
-    expect(ownerDefaults().accounts.personName).toBe('');
+    expect(ownerDefaults().accounts.personName).toBe('owner');
     expect(ownerDefaults().bloatware.Calculator).toBe('keep');
   });
 });

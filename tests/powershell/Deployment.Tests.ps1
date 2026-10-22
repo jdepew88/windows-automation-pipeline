@@ -21,6 +21,8 @@ $pkgScripts = Join-Path $Fixture 'usb\WindowsDeployment\scripts'
 . (Join-Path $pkgScripts 'orchestrator\DeploymentOrchestrator.ps1')
 . (Join-Path $pkgScripts 'orchestrator\Show-DeploymentStatus.ps1')
 . (Join-Path $pkgScripts 'orchestrator\Resume-Deployment.ps1')
+# Phase 5: the recovery tool (it also loads the package's ApplicationEngine.ps1).
+. (Join-Path $pkgScripts 'recovery\DeploymentRecovery.ps1')
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Off
 
@@ -87,6 +89,9 @@ function Invoke-WddInstaller {
     if ($b -eq 'noTask') { return 1 }
     $task = if ($leaf -eq 'Install-UpdateEngine.ps1') { '\WindowsDeploymentBuilder\WindowsUpdate' } else { '\WindowsDeploymentBuilder\Applications' }
     $script:SimTasks[$task] = $script:SimIdentity.Name
+    # Like the real installers: a new installation archives the engine's previous run.
+    $dir = Join-Path $script:Paths.Root $(if ($leaf -eq 'Install-UpdateEngine.ps1') { 'Updates' } else { 'Applications' })
+    foreach ($n in 'state.json', 'result.json', 'status.json') { $f = Join-Path $dir $n; if (Test-Path -LiteralPath $f) { Move-Item -LiteralPath $f -Destination "$f.$($script:Installers.Count).bak" -Force } }
     return 0
 }
 
@@ -298,8 +303,11 @@ Test-Scenario 'duplicate execution: a second run launches nothing again; a concu
     Assert-Equal (Initialize-Embedded) 'Initialized' 'second run'
     Assert-Equal $script:Installers.Count 2 'installers ran once each'
     $m = New-Object System.Threading.Mutex($false, $script:MutexName)
-    $job = Start-Job -ScriptBlock { param($n) $x = New-Object System.Threading.Mutex($false, $n); [void]$x.WaitOne(); Start-Sleep -Seconds 8; $x.ReleaseMutex() } -ArgumentList $script:MutexName
-    Start-Sleep -Seconds 2
+    # The job signals once it really holds the mutex (a fixed sleep raced on a busy machine).
+    $flag = Join-Path $script:Tmp 'mutex-held'
+    $job = Start-Job -ScriptBlock { param($n, $f) $x = New-Object System.Threading.Mutex($false, $n); [void]$x.WaitOne(); [IO.File]::WriteAllText($f, 'held'); Start-Sleep -Seconds 8; $x.ReleaseMutex() } -ArgumentList $script:MutexName, $flag
+    for ($i = 0; $i -lt 600 -and -not (Test-Path -LiteralPath $flag); $i++) { Start-Sleep -Milliseconds 100 }
+    Assert-True (Test-Path -LiteralPath $flag) 'the other process holds the deployment mutex'
     $saved = $script:MutexName
     try {
         function Enter-WddMutex { param([int] $TimeoutSeconds = 0) $mm = New-Object System.Threading.Mutex($false, $saved); if ($mm.WaitOne([TimeSpan]::FromSeconds(0))) { return $mm }; $mm.Dispose(); return $null }
@@ -625,6 +633,352 @@ Test-Scenario 'Wi-Fi result: a profile that could not be added is listed as a fo
     $r = Read-WddJson $script:Paths.ReportJson
     Assert-Equal $r.wifi.status 'NoWirelessAdapter' 'wifi in report'
     Assert-True (@($r.remainingTasks | Where-Object { $_ -match '^Wi-Fi: NoWirelessAdapter' }).Count -eq 1) 'follow-up'
+}
+
+# ------------------------------------------------------------------------------------------------
+# Phase 5: full provisioning lifecycle. The REAL application engine and recovery tool from the
+# generated package run against the real staged package and its real applications-config.json
+# (WinGet, Microsoft Store, portable and manual entries); WinGet, tasks, time and restarts are
+# simulated. Nothing is installed or registered.
+# ------------------------------------------------------------------------------------------------
+
+function Reset-AppSim {
+    param([hashtable] $Behaviour = @{})
+    $script:AppSim = @{ Behaviour = $Behaviour; Installed = @{}; Calls = @{}; Online = $true; SourceDown = @(); Order = New-Object System.Collections.Generic.List[string]; Reboots = 0; ResumeInstalls = 0 }
+    $script:AppMutex = "Local\wda-dt-$([guid]::NewGuid().ToString('N'))"
+}
+function Get-WdaNow { $script:SimNow }
+function Wait-Wda { param([int] $Seconds) $script:SimNow = $script:SimNow.AddSeconds($Seconds) }
+function Get-WdaContext { @{ User = $script:SimIdentity.Name; IsSystem = $script:SimIdentity.IsSystem; IsElevated = $true } }
+function Test-WdaNetwork { $script:AppSim.Online }
+function Get-WdaNetworkDiagnosis {
+    param([string] $Source = 'winget')
+    if (-not $script:AppSim.Online) { return @{ Level = 'InternetUnavailable'; Detail = 'simulated' } }
+    if ($script:AppSim.SourceDown -contains $Source) { return @{ Level = 'SourceUnavailable'; Detail = 'simulated' } }
+    @{ Level = 'Online'; Detail = 'simulated' }
+}
+function Get-WdaRandom { 0.5 }
+function Test-WdaRebootPending { $false }
+function Invoke-WdaReboot { param([int] $WarningSeconds, [string] $Reason) $script:AppSim.Reboots++ }
+function Test-WdaUpdateTask { param([hashtable] $WU) $script:SimTasks.ContainsKey("$($WU.taskPath)$($WU.taskName)") }
+function Unregister-WdaTask { param([hashtable] $Config) [void] $script:SimTasks.Remove("$($Config.taskPath)$($Config.taskName)") }
+function Write-WdaEvent { param([int] $EventId, [string] $Message, [string] $EntryType = 'Information') $script:Events.Add($EventId) }
+function Get-WdbBootTime { $script:SimBoot.ToString('yyyy-MM-ddTHH:mm:ssZ') }
+function Wait-WdbLockPoll { }
+function Invoke-WgbBootstrap { param([switch] $CheckOnly, $AllowRegister, $AllowOnlineRepair, $OfflinePath, $MinimumVersion) @{ Status = 'Healthy'; Method = ''; Version = '1.29.250'; Message = 'WinGet 1.29.250 works.'; Path = 'C:\sim\winget.exe'; Steps = @() } }
+function Get-WdaPortableRoots { @(Join-Path $script:Tmp 'WinGetPackages') }
+function Get-WdaShortcutFolder { Join-Path $script:Tmp 'StartMenu' }
+function New-WdaShortcutFile { param([string] $Path, [string] $Target) [IO.File]::WriteAllText($Path, $Target) }
+function Test-WdaInstalled { param([hashtable] $P, [string] $LogFile = '') [bool] $script:AppSim.Installed[$P.packageIdentifier] }
+function Test-WdaAvailable { param([hashtable] $P, [string] $LogFile = '') 'Available' }
+function Install-WdaPackage {
+    param([hashtable] $P, [int] $TimeoutMinutes, [string] $LogFile = '')
+    $id = $P.packageIdentifier
+    $n = 1 + [int] $script:AppSim.Calls[$id]
+    $script:AppSim.Calls[$id] = $n
+    $script:AppSim.Order.Add($id)
+    $b = $(if ($script:AppSim.Behaviour.ContainsKey($id)) { $script:AppSim.Behaviour[$id] } else { 'ok' })
+    $code = 0
+    switch ($b) {
+        'ok'         { $script:AppSim.Installed[$id] = $true }
+        'fail'       { $code = 0x8A150008 }
+        'fail-once'  { if ($n -ge 2) { $script:AppSim.Installed[$id] = $true } else { $code = 0x8A150008 } }
+        'hash'       { $code = 0x8A150011 }
+        'reboot-now' { if ($script:AppSim.Reboots -ge 1) { $script:AppSim.Installed[$id] = $true } else { $code = 0x8A15010A } }
+        'net-drop'   { if ($n -eq 1) { $script:AppSim.Online = $false; $code = 0x8A150107 } else { $script:AppSim.Installed[$id] = $true } }
+    }
+    if ($script:AppSim.Installed[$id] -and $P.method -eq 'portable') {
+        $dir = Join-Path (Join-Path $script:Tmp 'WinGetPackages') "$($id)_Microsoft.Winget.Source_8wekyb3d8bbwe"
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        [IO.File]::WriteAllText((Join-Path $dir (($P.portable.executable) -replace '\*', '-4.6')), 'MZ')
+    }
+    @{ ExitCode = [int] $code; TimedOut = $false; Output = '' }
+}
+
+<# The engine configuration exactly as staged, with only its machine paths moved below the temporary folder. #>
+function Get-SimAppConfig {
+    $c = Get-WdaConfig (Join-Path $script:Paths.Package 'scripts\applications\applications-config.json')
+    $c.dataRoot = $script:Paths.Root
+    $c.mutexName = $script:AppMutex
+    $c.coordination.windowsUpdate.stateFile = Join-Path $script:Paths.Root 'Updates\state.json'
+    $c.coordination.windowsUpdate.resultFile = Join-Path $script:Paths.Root 'Updates\result.json'
+    $c.gatePollMinutes = 1
+    $c.lockWaitMinutes = 0
+    return $c
+}
+function Get-WdrAppConfig { param([hashtable] $Paths) Get-SimAppConfig }
+function Invoke-WdrAppInstaller { param([hashtable] $Paths) $script:AppSim.ResumeInstalls++; $script:SimTasks['\WindowsDeploymentBuilder\Applications'] = $script:SimIdentity.Name; return 0 }
+
+<# The application task: at sign-in and hourly, plus a simulated restart when the engine asks for one. #>
+function Invoke-AppRuns {
+    param([int] $Max = 25)
+    $out = @()
+    for ($i = 0; $i -lt $Max; $i++) {
+        $o = Invoke-WdaMain (Get-SimAppConfig)
+        $out += $o
+        if ($o -eq 'Rebooting') { $script:SimNow = $script:SimNow.AddMinutes(3); $script:SimBoot = $script:SimNow; $script:SimNow = $script:SimNow.AddMinutes(2); continue }
+        if ($o -like 'Finished:*' -or $o -eq 'AlreadyFinished') { break }
+        $script:SimNow = $script:SimNow.AddHours(1)
+    }
+    , $out
+}
+function Get-AppResult { Read-WddJson (Join-Path $script:Paths.Root 'Applications\result.json') }
+function Get-AppPkg { param($Result, [string] $Id) @($Result.packages) | Where-Object { $_.packageIdentifier -eq $Id } | Select-Object -First 1 }
+$script:FixtureApps = @('Google.Chrome', 'VideoLAN.VLC', '7zip.7zip', 'CodeSector.TeraCopy', 'Bitwarden.Bitwarden', 'Microsoft.VCRedist.2015+.x64', 'Microsoft.VCRedist.2015+.x86', '9NP83LWLPZ9K', 'Rufus.Rufus', 'Git.Git', 'Example.TestPackage')
+
+Test-Scenario 'Phase 5 package: recovery tool shipped, embedded, staged; manifest declares recovery and state schemas' {
+    $f = @($script:Manifest.files | Where-Object { $_.path -eq 'scripts/recovery/DeploymentRecovery.ps1' })
+    Assert-Equal $f.Count 1 'listed in the manifest'
+    Assert-Equal $f[0].embedded 'Deployment\scripts\recovery\DeploymentRecovery.ps1' 'embedded in the answer file'
+    Assert-Equal $script:Manifest.recovery.tool 'scripts/recovery/DeploymentRecovery.ps1' 'manifest recovery block'
+    Assert-Equal "$($script:Manifest.recovery.stateSchemas.deploymentState) $($script:Manifest.recovery.stateSchemas.applicationState) $($script:Manifest.recovery.stateSchemas.applicationResult)" '2 2 2' 'state schema versions'
+    Assert-Equal $script:Manifest.recovery.outcomeCodes.PausedAwaitingNetwork 30 'outcome codes'
+    $cfg = Read-WddJson (Join-Path $pkgRoot 'scripts\applications\applications-config.json')
+    Assert-Equal "$($cfg.engineVersion) $($cfg.maxAttemptsPerPackage) $($cfg.retry.automatic) $($cfg.retry.baseDelaySeconds)" '1.2.0 3 True 60' 'retry configuration'
+    Initialize-Embedded | Out-Null
+    Assert-True (Test-Path -LiteralPath (Join-Path $script:Paths.Package 'scripts\recovery\DeploymentRecovery.ps1')) 'staged on the computer'
+    Assert-True $script:Shortcuts.ContainsKey('Deployment recovery') 'recovery shortcut'
+    Assert-True ($script:Shortcuts['Deployment recovery'] -match 'DeploymentRecovery\.ps1" -Elevate') 'shortcut asks for elevation'
+}
+
+Test-Scenario 'Phase 5 lifecycle: mixed methods end to end; a transient failure is retried; outcome CompletedWithWarnings (10)' {
+    Reset-AppSim @{ 'Google.Chrome' = 'fail-once' }
+    Initialize-Embedded | Out-Null
+    Set-EngineResult 'windowsUpdate' 'Succeeded'
+    $o = Invoke-AppRuns
+    Assert-Equal $o[-1] 'Finished:CompletedWithFollowUp' 'manual RustDesk is a follow-up'
+    Assert-Equal $script:AppSim.Calls['Google.Chrome'] 2 'Chrome retried once'
+    foreach ($id in $script:FixtureApps | Where-Object { $_ -ne 'Google.Chrome' }) { Assert-Equal $script:AppSim.Calls[$id] 1 "$id installed exactly once" }
+    Assert-True (Test-Path -LiteralPath (Join-Path $script:Tmp 'StartMenu\Rufus.lnk')) 'portable shortcut'
+    Assert-Equal (Invoke-WddMonitor $script:Paths) 'Completed:CompletedWithFollowUp' 'deployment'
+    $s = Read-WddJson $script:Paths.Status
+    Assert-Equal "$($s.outcome) $($s.outcomeCode)" 'CompletedWithWarnings 10' 'machine-readable outcome'
+    $r = Read-WddJson $script:Paths.ReportJson
+    Assert-Equal "$($r.reportVersion) $($r.outcome) $($r.outcomeCode)" '2 CompletedWithWarnings 10' 'report outcome'
+    Assert-Equal ((@($r.outstanding) | ForEach-Object { "$($_.operationId)=$($_.lifecycle)" }) -join ',') 'app:catalog:rustdesk=ManualActionRequired' 'outstanding work'
+    Assert-Equal (@($r.applications.packages) | Where-Object { $_.packageIdentifier -eq 'Google.Chrome' }).totalAttempts 2 'attempts in the report'
+    Assert-True ($r.recoveryCommands.retryFailed -match 'DeploymentRecovery\.ps1" -Action RetryFailed') 'recovery commands'
+    $txt = Get-Content -LiteralPath $script:Paths.ReportText -Raw
+    Assert-True ($txt -match 'Outstanding work \(kept for recovery\)') 'text report section'
+    Assert-True ($txt -match 'Outcome        : CompletedWithWarnings \(exit code 10\)') 'text report outcome'
+}
+
+Test-Scenario 'Phase 5 lifecycle: restart during provisioning resumes after the boot; nothing is repeated; paused for reboot (31)' {
+    Reset-AppSim @{ 'VideoLAN.VLC' = 'reboot-now' }
+    Initialize-Embedded | Out-Null
+    Set-EngineResult 'windowsUpdate' 'Succeeded'
+    Assert-Equal (Invoke-WdaMain (Get-SimAppConfig)) 'Rebooting' 'restart requested before VLC can install'
+    Assert-Equal (Invoke-WddMonitor $script:Paths) 'InProgress' 'monitor during the restart window'
+    $s = Read-WddJson $script:Paths.Status
+    Assert-Equal "$($s.restartPending) $($s.outcome) $($s.outcomeCode)" 'True PausedAwaitingReboot 31' 'engine restart marker recognised'
+    $script:SimNow = $script:SimNow.AddMinutes(3); $script:SimBoot = $script:SimNow; $script:SimNow = $script:SimNow.AddMinutes(2)
+    Assert-Equal (Invoke-WddMonitor $script:Paths) 'InProgress' 'monitor at startup'
+    Assert-True (-not (Read-WddJson $script:Paths.Status).restartPending) 'marker from the previous boot ignored'
+    $o = Invoke-AppRuns
+    Assert-Equal $o[-1] 'Finished:CompletedWithFollowUp' 'finished after the restart'
+    Assert-Equal $script:AppSim.Calls['VideoLAN.VLC'] 2 'VLC attempted again after the restart'
+    Assert-Equal $script:AppSim.Calls['Google.Chrome'] 1 'packages installed before the restart are not repeated'
+    Assert-Equal (Invoke-WddMonitor $script:Paths) 'Completed:CompletedWithFollowUp' 'completed'
+}
+
+Test-Scenario 'Phase 5 lifecycle: lost network pauses the deployment (30) without failing anything, then resumes' {
+    Reset-AppSim @{ 'CodeSector.TeraCopy' = 'net-drop' }
+    Initialize-Embedded | Out-Null
+    Set-EngineResult 'windowsUpdate' 'Succeeded'
+    Assert-Equal (Invoke-WdaMain (Get-SimAppConfig)) 'WaitingForNetwork' 'engine waits'
+    Assert-Equal (Invoke-WddMonitor $script:Paths) 'InProgress' 'deployment continues'
+    $s = Read-WddJson $script:Paths.Status
+    Assert-Equal "$($s.outcome) $($s.outcomeCode)" 'PausedAwaitingNetwork 30' 'paused for the network'
+    $st = Read-WddJson (Join-Path $script:Paths.Root 'Applications\state.json')
+    Assert-Equal @($st.packages.Values | Where-Object { $_.status -eq 'Failed' }).Count 0 'nothing marked failed'
+    $script:AppSim.Online = $true
+    $o = Invoke-AppRuns
+    Assert-Equal $o[-1] 'Finished:CompletedWithFollowUp' 'resumed'
+    Assert-Equal $script:AppSim.Calls['Google.Chrome'] 1 'finished work not repeated'
+    Assert-Equal (Get-AppPkg (Get-AppResult) 'CodeSector.TeraCopy').attempts 1 'the lost-network attempt is not held against it'
+}
+
+Test-Scenario 'Phase 5 lifecycle: USB and setup files gone after staging; engine, monitor and recovery run from the local copy' {
+    Reset-AppSim @{ 'Git.Git' = 'fail' }
+    $copy = Join-Path $script:Tmp 'usb-copy'
+    Copy-Item -LiteralPath $pkgRoot -Destination $copy -Recurse
+    Assert-Equal (Invoke-WddInitialize $script:Manifest (Join-Path $copy 'deployment-manifest.json') 'Package' $copy '' $script:Paths -NoConsole) 'Initialized' 'staged from the USB copy'
+    Remove-Item -LiteralPath $copy -Recurse -Force    # the USB drive is removed
+    Set-EngineResult 'windowsUpdate' 'Succeeded'
+    [void] (Invoke-AppRuns)
+    Assert-Equal (Invoke-WddMonitor $script:Paths) 'Completed:CompletedWithFailures' 'finished without the USB'
+    $script:AppSim.Behaviour['Git.Git'] = 'ok'
+    Assert-Equal (Invoke-WdrRecovery $script:Manifest $script:Paths 'RetryFailed').Outcome 'Done' 'recovery without the USB'
+    [void] (Invoke-AppRuns)
+    Assert-Equal (Invoke-WddMonitor $script:Paths) 'Completed:CompletedWithFollowUp' 'completed after recovery'
+    Assert-Equal $script:Installers.Count 2 'no stage launched twice'
+}
+
+Test-Scenario 'Phase 5 recovery: retry failed after CompletedWithFailures; successful apps untouched; permanent failure needs -IncludePermanent' {
+    Reset-AppSim @{ 'Git.Git' = 'fail'; 'Bitwarden.Bitwarden' = 'hash' }
+    Initialize-Embedded | Out-Null
+    Set-EngineResult 'windowsUpdate' 'Succeeded'
+    [void] (Invoke-AppRuns)
+    Assert-Equal (Invoke-WddMonitor $script:Paths) 'Completed:CompletedWithFailures' 'first result'
+    Assert-Equal (Read-WddJson $script:Paths.Status).outcomeCode 20 'exit code 20'
+    $r = Read-WddJson $script:Paths.ReportJson
+    $out = @{}; foreach ($x in @($r.outstanding)) { $out[$x.operationId] = $x.lifecycle }
+    Assert-Equal "$($out['app:winget:git.git']) $($out['app:winget:bitwarden.bitwarden']) $($out['app:catalog:rustdesk'])" 'FailedRetryable FailedPermanent ManualActionRequired' 'outstanding classified'
+    Assert-Equal $script:AppSim.Calls['Git.Git'] 3 'three automatic attempts'
+    Assert-Equal $script:AppSim.Calls['Bitwarden.Bitwarden'] 1 'hash mismatch not retried'
+
+    $script:AppSim.Behaviour['Git.Git'] = 'ok'           # the technician fixed the cause
+    $rec = Invoke-WdrRecovery $script:Manifest $script:Paths 'RetryFailed'
+    Assert-Equal $rec.Outcome 'Done' 'accepted'
+    Assert-Equal (@($rec.Accepted) -join ',') 'app:winget:git.git' 'only the retryable failure'
+    Assert-True (@($rec.Refused).Count -eq 0) 'permanent failures are simply not selected by RetryFailed'
+    Assert-Equal $script:AppSim.ResumeInstalls 1 'application task registered again (no archive)'
+    $st = Read-WddJson $script:Paths.State
+    Assert-Equal $st.status 'InProgress' 'deployment reopened'
+    Assert-Equal @($st.recoveries).Count 1 'recovery recorded'
+    Assert-True $script:SimTasks.ContainsKey('\WindowsDeploymentBuilder\Deployment') 'monitor registered again'
+    Assert-True (-not (Test-Path -LiteralPath $script:Paths.Marker)) 'old marker set aside'
+    Assert-Equal @(Get-ChildItem -LiteralPath (Join-Path $script:Paths.Reports 'history') -Filter 'deployment-report-*').Count 2 'previous report (json + txt) kept'
+    [void] (Invoke-AppRuns)
+    Assert-Equal "$($script:AppSim.Calls['Git.Git']) $($script:AppSim.Calls['Google.Chrome'])" '4 1' 'Git once more; Chrome never again'
+    Assert-Equal (Invoke-WddMonitor $script:Paths) 'Completed:CompletedWithFailures' 'Bitwarden still failed'
+    $g = @((Read-WddJson $script:Paths.ReportJson).applications.packages) | Where-Object { $_.packageIdentifier -eq 'Git.Git' }
+    Assert-Equal "$($g.status) $($g.manualRetries) $($g.totalAttempts)" 'Succeeded 1 4' 'history in the report'
+
+    $rec = Invoke-WdrRecovery $script:Manifest $script:Paths 'Retry' -Operations @('app:winget:bitwarden.bitwarden')
+    Assert-Equal $rec.Outcome 'Refused' 'permanent without -IncludePermanent'
+    Assert-True ($rec.Refused[0].reason -match 'IncludePermanent') 'reason'
+    $script:AppSim.Behaviour['Bitwarden.Bitwarden'] = 'ok'
+    Assert-Equal (Invoke-WdrRecovery $script:Manifest $script:Paths 'Retry' -Operations @('app:winget:bitwarden.bitwarden') -IncludePermanent).Outcome 'Done' 'explicit override'
+    [void] (Invoke-AppRuns)
+    Assert-Equal (Invoke-WddMonitor $script:Paths) 'Completed:CompletedWithFollowUp' 'only the manual app remains'
+    Assert-Equal $script:Installers.Count 2 'Windows was not reinstalled and no stage was relaunched'
+}
+
+Test-Scenario 'Phase 5 recovery: refuses manual, deselected-or-installed, finished stages, tampered packages and non-administrators' {
+    Reset-AppSim @{ 'Git.Git' = 'fail' }
+    Initialize-Embedded | Out-Null
+    Set-EngineResult 'windowsUpdate' 'Succeeded'
+    [void] (Invoke-AppRuns)
+    [void] (Invoke-WddMonitor $script:Paths)
+    $rec = Invoke-WdrRecovery $script:Manifest $script:Paths 'Retry' -Operations @('app:catalog:rustdesk', 'app:winget:google.chrome', 'stage:windowsUpdate', 'app:winget:$(calc)')
+    Assert-Equal $rec.Outcome 'Refused' 'nothing reopened'
+    $why = @{}; foreach ($x in $rec.Refused) { $why[$x.operationId] = $x.reason }
+    Assert-True ($why['app:catalog:rustdesk'] -match 'not a valid operation id') 'manual entry refused'
+    Assert-True ($why['app:winget:google.chrome'] -match 'already installed') 'installed refused'
+    Assert-True ($why['stage:windowsUpdate'] -match 'only a stage that ended with failures') 'finished update stage refused'
+    Assert-True ($why['app:winget:$(calc)'] -match 'not a valid operation id') 'no expression is evaluated'
+    Assert-Equal (Read-WddJson $script:Paths.State).status 'Completed' 'state untouched'
+    Add-Content -LiteralPath (Join-Path $script:Paths.Package 'scripts\applications\ApplicationEngine.ps1') -Value '# tampered'
+    $rec = Invoke-WdrRecovery $script:Manifest $script:Paths 'RetryFailed'
+    Assert-Equal $rec.Outcome 'IntegrityFailed' 'tampered package refused'
+    Assert-True (@($rec.Refused | Where-Object { $_.operationId -eq 'file:scripts/applications/ApplicationEngine.ps1' }).Count -eq 1) 'modified file named'
+    Assert-Equal $script:AppSim.ResumeInstalls 0 'nothing registered'
+    $script:SimIdentity = @{ Name = 'PC\Guest'; IsSystem = $false; IsAdmin = $false }
+    Assert-Equal (Invoke-WdrRecovery $script:Manifest $script:Paths 'RetryFailed').Outcome 'NotElevated' 'administrators only'
+}
+
+Test-Scenario 'Phase 5 recovery: a failed Windows Update stage is relaunched once; the ongoing policy is not applied twice' {
+    Reset-AppSim
+    Initialize-Embedded | Out-Null
+    Set-EngineResult 'windowsUpdate' 'CompletedWithFailures' @{ failed = @(@{ kbs = @('KB5031455'); title = 'Cumulative Update'; attempts = 2; lastResult = 'Failed'; lastHResult = '0x80240022' }) }
+    [void] (Invoke-AppRuns)
+    Assert-Equal (Invoke-WddMonitor $script:Paths) 'Completed:CompletedWithFailures' 'update failures'
+    Assert-Equal (Read-WddJson $script:Paths.State).updatePolicy.status 'Applied' 'policy applied after the final update result'
+    $writes = $script:SimAuWrites
+    $r = Read-WddJson $script:Paths.ReportJson
+    Assert-True (@($r.outstanding | Where-Object { $_.operationId -eq 'stage:windowsUpdate' }).Count -eq 1) 'update stage outstanding'
+    $rec = Invoke-WdrRecovery $script:Manifest $script:Paths 'RetryFailed'
+    Assert-Equal (@($rec.Accepted) -join ',') 'stage:windowsUpdate' 'update stage relaunched (no application to retry)'
+    Assert-Equal ($script:Installers -join ',') 'Install-UpdateEngine.ps1,Install-ApplicationEngine.ps1,Install-UpdateEngine.ps1' 'its own installer, once'
+    Assert-Equal (Invoke-WddMonitor $script:Paths) 'InProgress' 'waits for the new update run'
+    Set-EngineResult 'windowsUpdate' 'Succeeded'
+    Assert-Equal (Invoke-WddMonitor $script:Paths) 'Completed:CompletedWithFollowUp' 'finished'
+    Assert-Equal $script:SimAuWrites $writes 'policy not written again'
+}
+
+Test-Scenario 'Phase 5 state: a damaged deployment.json uses its backup; both damaged stops safely and Resume rebuilds without relaunching' {
+    Reset-AppSim
+    Initialize-Embedded | Out-Null
+    [void] (Invoke-WddMonitor $script:Paths)
+    Assert-True (Test-Path -LiteralPath "$($script:Paths.State).bak") 'backup kept'
+    [IO.File]::WriteAllText($script:Paths.State, '{"schemaVersion":2,"packageId":"')
+    Assert-Equal (Invoke-WddMonitor $script:Paths) 'InProgress' 'backup used'
+    Assert-True (Test-Path -LiteralPath "$($script:Paths.State).corrupt") 'damaged copy kept'
+
+    [IO.File]::WriteAllText($script:Paths.State, 'garbage')
+    [IO.File]::WriteAllText("$($script:Paths.State).bak", '{"schemaVersion":2,"packageId":"NOT-A-PACKAGE","status":"Completed"}')
+    Assert-Equal (Invoke-WddMonitor $script:Paths) 'StateCorrupt' 'monitor stops'
+    $s = Read-WddJson $script:Paths.Status
+    Assert-Equal "$($s.deploymentState) $($s.outcome) $($s.outcomeCode)" 'StateCorrupt FailedToInitialize 50' 'status'
+    Assert-True ($script:Events -contains 3004) 'event'
+    Assert-Equal (Initialize-Embedded) 'StateCorrupt' 'setup never starts over on a damaged state'
+    Assert-Equal $script:Installers.Count 2 'nothing relaunched'
+    Assert-Equal (Invoke-WdrRecovery $script:Manifest $script:Paths 'RetryFailed').Outcome 'Refused' 'retry asks for Resume first'
+    $rec = Invoke-WdrRecovery $script:Manifest $script:Paths 'Resume'
+    Assert-Equal $rec.Outcome 'Done' 'resume rebuilds'
+    $st = Read-WddJson $script:Paths.State
+    Assert-Equal "$($st.status) $($st.stages.windowsUpdate.launchResult) $($st.stages.applications.launchResult)" 'InProgress Launched Launched' 'stages found, not relaunched'
+    Assert-Equal $script:Installers.Count 2 'still no second launch'
+    Set-EngineResult 'windowsUpdate' 'Succeeded'
+    [void] (Invoke-AppRuns)
+    Assert-Equal (Invoke-WddMonitor $script:Paths) 'Completed:CompletedWithFollowUp' 'completes normally'
+}
+
+Test-Scenario 'Phase 5 status: idle user stage is PausedAwaitingUser (32); Status -Json and PendingActions for the technician' {
+    Reset-AppSim
+    Initialize-Embedded | Out-Null
+    Set-EngineResult 'windowsUpdate' 'Succeeded'
+    Set-EngineStatus 'applications' 'WaitingForUpdates'
+    $script:SimNow = $script:SimNow.AddHours(5)    # nobody signed in: the user task never ran
+    [void] (Invoke-WddMonitor $script:Paths)
+    $s = Read-WddJson $script:Paths.Status
+    Assert-Equal "$($s.outcome) $($s.outcomeCode)" 'PausedAwaitingUser 32' 'paused for the user'
+    Assert-True ($s.outcomeDetail -match 'PC\\Alex is signed in') 'says who must sign in'
+    [void] (Invoke-AppRuns)
+    [void] (Invoke-WddMonitor $script:Paths)
+    $j = (Invoke-WdrAction $script:Manifest $script:Paths 'Status' -Json)
+    $st = $j.Text | ConvertFrom-Json
+    Assert-Equal "$($st.outcome) $($st.exitCode) $($j.Exit)" 'CompletedWithWarnings 10 10' 'machine-readable status and exit code'
+    Assert-Equal @($st.operations).Count 12 'every operation listed'
+    Assert-True (@($st.operations | Where-Object { $_.operationId -eq 'app:winget:git.git' -and $_.lifecycle -eq 'Succeeded' }).Count -eq 1) 'lifecycle per operation'
+    $p = (Invoke-WdrAction $script:Manifest $script:Paths 'PendingActions').Text
+    Assert-True ($p -match 'RustDesk: Manual action required') 'manual follow-up listed'
+    Assert-True ($p -match 'Manufacturer drivers') 'report follow-ups listed'
+}
+
+Test-Scenario 'Phase 5 diagnostics: one ZIP with logs, states and report; passwords redacted; answer files and Wi-Fi profiles never included' {
+    Reset-AppSim @{ 'Git.Git' = 'fail' }
+    $emb = Invoke-SimExtraction
+    Invoke-WddInitialize $script:Manifest (Join-Path $emb 'Deployment\deployment-manifest.json') 'Embedded' (Join-Path $emb 'Deployment') $emb $script:Paths -NoConsole | Out-Null
+    Set-EngineResult 'windowsUpdate' 'Succeeded'
+    [void] (Invoke-AppRuns)
+    [void] (Invoke-WddMonitor $script:Paths)
+    [IO.File]::AppendAllText((Join-Path $script:Paths.Root 'Applications\logs\engine.log'), "2026-10-20 09:00:00  INFO   test line password=Hunter2!Secret`r`n")
+    New-Item -ItemType Directory -Path (Join-Path $script:Paths.Root 'Network') -Force | Out-Null
+    [IO.File]::WriteAllText((Join-Path $script:Paths.Root 'Network\wifi-result.json'), '{"status":"Added","profileName":"Home","networkKey":"Wifi-Pass-123"}')
+    [IO.File]::WriteAllText((Join-Path $script:Paths.Root 'Network\Wifi.xml'), '<WLANProfile><keyMaterial>Wifi-Pass-123</keyMaterial></WLANProfile>')
+    [IO.File]::WriteAllText((Join-Path $emb 'Wifi.xml'), '<WLANProfile><keyMaterial>Wifi-Pass-123</keyMaterial></WLANProfile>')
+    $zip = Join-Path $script:Tmp 'out\diag.zip'
+    $r = Export-WdrDiagnostics $script:Manifest $script:Paths $zip
+    Assert-Equal $r.Outcome 'Done' 'exported'
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $z = [IO.Compression.ZipFile]::OpenRead($zip)
+    try {
+        $names = @($z.Entries | ForEach-Object { $_.FullName -replace '/', '\' })
+        foreach ($need in 'diagnostics.json', 'recovery-status.txt', 'state\deployment.json', 'Applications\state.json', 'Applications\result.json', 'Applications\logs\engine.log', 'Applications\logs\attempts.jsonl', 'reports\deployment-report.txt', 'Package\deployment-manifest.json') {
+            Assert-True ($names -contains $need) "contains $need"
+        }
+        Assert-Equal @($names | Where-Object { $_ -match '\.xml$|autounattend|unattend' }).Count 0 'no answer file or Wi-Fi profile'
+        $all = ($z.Entries | ForEach-Object { $s = $_.Open(); try { (New-Object IO.StreamReader($s)).ReadToEnd() } finally { $s.Dispose() } }) -join "`n"
+        Assert-True (-not $all.Contains('Hunter2!Secret')) 'password in a log redacted'
+        Assert-True (-not $all.Contains('Wifi-Pass-123')) 'Wi-Fi key redacted'
+        Assert-True ($all.Contains('[redacted]')) 'redaction marker'
+        $info = ($z.Entries | Where-Object { $_.FullName -eq 'diagnostics.json' } | ForEach-Object { $s = $_.Open(); try { (New-Object IO.StreamReader($s)).ReadToEnd() } finally { $s.Dispose() } }) | ConvertFrom-Json
+        Assert-Equal "$($info.outcome) $($info.outcomeCode)" 'CompletedWithFailures 20' 'outcome in the index'
+        Assert-True ([int] $info.redactedFiles -ge 2) 'redactions counted'
+    } finally { $z.Dispose() }
+    Assert-True (Test-Path -LiteralPath (Join-Path $emb 'Wifi.xml')) 'nothing outside the data root was touched'
 }
 
 Write-Output ''

@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://windows-deployment-builder.local/schemas/applications-result.v1.json",
+  "$id": "https://windows-deployment-builder.local/schemas/applications-result.v2.json",
   "title": "Windows Deployment Builder application stage result",
-  "description": "Written by ApplicationEngine.ps1 to C:\\ProgramData\\WindowsDeploymentBuilder\\Applications\\result.json when the stage reaches a final status. Every selected package appears in \"packages\" with a terminal status, or \"Pending\" when it was not attempted (Failed/Offline runs; run the installer again to resume).",
+  "description": "Written by ApplicationEngine.ps1 to C:\\ProgramData\\WindowsDeploymentBuilder\\Applications\\result.json when the stage reaches a final status. Every selected package appears in \"packages\" with a terminal status, or \"Pending\" when it was not attempted. Schema 2 (engine 1.2.0) adds each operation's lifecycle, failure class and attempt history, and \"outstanding\": the work the deployment recovery tool can retry or resume.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -18,11 +18,15 @@
     "counts",
     "packages",
     "additionalSoftware",
-    "followUp"
+    "followUp",
+    "outstanding",
+    "retryPolicy",
+    "recoveries",
+    "stateRecoveredFrom"
   ],
   "properties": {
     "schemaVersion": {
-      "const": 1
+      "const": 2
     },
     "stage": {
       "const": "applications"
@@ -175,7 +179,17 @@
           "attempts",
           "exitCode",
           "message",
-          "timestampUtc"
+          "timestampUtc",
+          "operationId",
+          "lifecycle",
+          "failureClass",
+          "retryable",
+          "detection",
+          "nextAttemptUtc",
+          "waitingFor",
+          "totalAttempts",
+          "manualRetries",
+          "history"
         ],
         "properties": {
           "key": {
@@ -216,6 +230,91 @@
           },
           "timestampUtc": {
             "type": "string"
+          },
+          "operationId": {
+            "type": "string",
+            "pattern": "^(app|additional):"
+          },
+          "lifecycle": {
+            "enum": [
+              "Pending",
+              "Running",
+              "Succeeded",
+              "AlreadySatisfied",
+              "FailedRetryable",
+              "FailedPermanent",
+              "WaitingForNetwork",
+              "WaitingForReboot",
+              "ManualActionRequired",
+              "SkippedByUser",
+              "BlockedByDependency"
+            ]
+          },
+          "failureClass": {
+            "enum": [
+              "",
+              "Success",
+              "Restart",
+              "Network",
+              "Transient",
+              "Timeout",
+              "Resource",
+              "Unknown",
+              "Permanent",
+              "Integrity",
+              "Policy",
+              "User",
+              "Manual",
+              "Dependency",
+              "Budget",
+              "Interrupted"
+            ]
+          },
+          "retryable": {
+            "type": "boolean"
+          },
+          "detection": {
+            "enum": [
+              "",
+              "Installed",
+              "InstalledRequiresRestart",
+              "NotInstalled",
+              "Unconfirmed",
+              "Unknown"
+            ]
+          },
+          "nextAttemptUtc": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "waitingFor": {
+            "type": "string"
+          },
+          "totalAttempts": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "manualRetries": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "history": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+              "type": "object",
+              "required": [
+                "trigger",
+                "attempt",
+                "result",
+                "class",
+                "countsTowardLimit",
+                "nextAction",
+                "message"
+              ]
+            }
           }
         }
       }
@@ -232,7 +331,17 @@
           "attempts",
           "exitCode",
           "message",
-          "timestampUtc"
+          "timestampUtc",
+          "operationId",
+          "lifecycle",
+          "failureClass",
+          "retryable",
+          "detection",
+          "nextAttemptUtc",
+          "waitingFor",
+          "totalAttempts",
+          "manualRetries",
+          "history"
         ],
         "properties": {
           "id": {
@@ -267,6 +376,91 @@
           },
           "timestampUtc": {
             "type": "string"
+          },
+          "operationId": {
+            "type": "string",
+            "pattern": "^(app|additional):"
+          },
+          "lifecycle": {
+            "enum": [
+              "Pending",
+              "Running",
+              "Succeeded",
+              "AlreadySatisfied",
+              "FailedRetryable",
+              "FailedPermanent",
+              "WaitingForNetwork",
+              "WaitingForReboot",
+              "ManualActionRequired",
+              "SkippedByUser",
+              "BlockedByDependency"
+            ]
+          },
+          "failureClass": {
+            "enum": [
+              "",
+              "Success",
+              "Restart",
+              "Network",
+              "Transient",
+              "Timeout",
+              "Resource",
+              "Unknown",
+              "Permanent",
+              "Integrity",
+              "Policy",
+              "User",
+              "Manual",
+              "Dependency",
+              "Budget",
+              "Interrupted"
+            ]
+          },
+          "retryable": {
+            "type": "boolean"
+          },
+          "detection": {
+            "enum": [
+              "",
+              "Installed",
+              "InstalledRequiresRestart",
+              "NotInstalled",
+              "Unconfirmed",
+              "Unknown"
+            ]
+          },
+          "nextAttemptUtc": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "waitingFor": {
+            "type": "string"
+          },
+          "totalAttempts": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "manualRetries": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "history": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+              "type": "object",
+              "required": [
+                "trigger",
+                "attempt",
+                "result",
+                "class",
+                "countsTowardLimit",
+                "nextAction",
+                "message"
+              ]
+            }
           }
         }
       }
@@ -276,6 +470,144 @@
       "items": {
         "type": "string"
       }
+    },
+    "outstanding": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "operationId",
+          "name",
+          "status",
+          "lifecycle",
+          "failureClass",
+          "retryable",
+          "message"
+        ],
+        "properties": {
+          "operationId": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "Pending",
+              "Installing",
+              "Succeeded",
+              "AlreadyInstalled",
+              "Skipped",
+              "SkippedByUser",
+              "RequiresInteraction",
+              "RequiresRestart",
+              "Failed",
+              "Unavailable"
+            ]
+          },
+          "lifecycle": {
+            "enum": [
+              "Pending",
+              "Running",
+              "Succeeded",
+              "AlreadySatisfied",
+              "FailedRetryable",
+              "FailedPermanent",
+              "WaitingForNetwork",
+              "WaitingForReboot",
+              "ManualActionRequired",
+              "SkippedByUser",
+              "BlockedByDependency"
+            ]
+          },
+          "failureClass": {
+            "enum": [
+              "",
+              "Success",
+              "Restart",
+              "Network",
+              "Transient",
+              "Timeout",
+              "Resource",
+              "Unknown",
+              "Permanent",
+              "Integrity",
+              "Policy",
+              "User",
+              "Manual",
+              "Dependency",
+              "Budget",
+              "Interrupted"
+            ]
+          },
+          "retryable": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "retryPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "automatic",
+        "maxAttempts",
+        "baseDelaySeconds",
+        "maxDelaySeconds",
+        "jitterRatio",
+        "continueAfterFailure",
+        "maxNetworkDeferrals"
+      ],
+      "properties": {
+        "automatic": {
+          "type": "boolean"
+        },
+        "maxAttempts": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10
+        },
+        "baseDelaySeconds": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3600
+        },
+        "maxDelaySeconds": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3600
+        },
+        "jitterRatio": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 0.5
+        },
+        "continueAfterFailure": {
+          "type": "boolean"
+        },
+        "maxNetworkDeferrals": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 24
+        }
+      }
+    },
+    "recoveries": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "stateRecoveredFrom": {
+      "enum": [
+        "",
+        "backup",
+        "rebuilt"
+      ]
     }
   }
 }

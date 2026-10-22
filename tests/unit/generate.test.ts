@@ -282,8 +282,11 @@ describe('account name edits propagate', () => {
     expect(embedded(r.root).get('FirstLogon.ps1')).toContain(`-Name 'DefaultUserName' -Type 'String' -Value '${user}'`);
   });
 
-  it('owner default without a name refuses to generate', () => {
-    const r = generate(ownerDefaults());
+  it('a cleared account name refuses to generate', () => {
+    // Phase 5: new deployments start with "owner"; an emptied name is still refused.
+    const p = ownerDefaults();
+    p.accounts.personName = '';
+    const r = generate(p);
     expect(r.ok).toBe(false);
     expect(r.issues).toContainEqual(expect.objectContaining({ path: 'accounts.personName', severity: 'error' }));
   });

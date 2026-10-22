@@ -19,10 +19,17 @@
 
 .PARAMETER Uninstall
     Removes the scheduled task. Logs and results are kept.
+
+.PARAMETER Resume
+    Phase 5 (used by the deployment recovery tool): continues the existing run instead of starting a
+    new one. The engine files are copied again from this folder (repairing missing or modified
+    copies), the task is registered again and started, but state, results and history are kept, so
+    nothing that already succeeded is repeated.
 #>
 [CmdletBinding()]
 param(
     [switch] $Uninstall,
+    [switch] $Resume,
     [switch] $NoStart,
     [int] $CheckInSeconds = 90
 )
@@ -60,18 +67,25 @@ if ($LASTEXITCODE -ne 0) { throw "icacls failed with exit code $LASTEXITCODE; re
 Write-Step "Secured $dataRoot (SYSTEM/Administrators full control, Users read)."
 
 # 3. Files. A new installation starts a new run; earlier state and results are archived.
+#    -Resume keeps them: the recovery tool has already reopened what should run again.
 $stamp = Get-Date -Format 'yyyyMMddHHmmss'
-foreach ($name in 'state.json', 'result.json', 'status.json', 'follow-up.txt') {
-    $p = Join-Path $installDir $name
-    if (Test-Path -LiteralPath $p) { Move-Item -LiteralPath $p -Destination (Join-Path $installDir "$name.$stamp.bak") -Force }
+if (-not $Resume) {
+    foreach ($name in 'state.json', 'state.json.bak', 'result.json', 'status.json', 'follow-up.txt') {
+        $p = Join-Path $installDir $name
+        if (Test-Path -LiteralPath $p) { Move-Item -LiteralPath $p -Destination (Join-Path $installDir "$name.$stamp.bak") -Force }
+    }
+    $marker = Join-Path (Join-Path $dataRoot 'state') 'applications.done'
+    if (Test-Path -LiteralPath $marker) { Remove-Item -LiteralPath $marker -Force }
 }
-$marker = Join-Path (Join-Path $dataRoot 'state') 'applications.done'
-if (Test-Path -LiteralPath $marker) { Remove-Item -LiteralPath $marker -Force }
 $source = (Resolve-Path -LiteralPath $PSScriptRoot).Path.TrimEnd('\')
 $target = (Resolve-Path -LiteralPath $installDir).Path.TrimEnd('\')
 if ($source -ne $target) {
     foreach ($name in 'ApplicationEngine.ps1', 'WinGetBootstrap.ps1', 'applications-config.json', 'winget-packages.json') {
         Copy-Item -LiteralPath (Join-Path $source $name) -Destination (Join-Path $target $name) -Force
+        # The task runs the copy, so the copy must be exactly what was verified.
+        if ((Get-FileHash -LiteralPath (Join-Path $source $name) -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath (Join-Path $target $name) -Algorithm SHA256).Hash) {
+            throw "The copy of $name in $target does not match its source; refusing to register the task."
+        }
     }
     foreach ($dir in 'offline', 'installers') {
         $from = Join-Path $source $dir

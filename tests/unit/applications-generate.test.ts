@@ -152,7 +152,9 @@ describe('engine configuration and commands', () => {
       registerAppInstaller: true,
       onlineRepair: false,
       maxReboots: 3,
-      maxAttemptsPerPackage: 2,
+      // Phase 5: three attempts (the recommended bounded policy), with backoff timing in the config.
+      maxAttemptsPerPackage: 3,
+      retry: { automatic: true, continueAfterFailure: true, baseDelaySeconds: 60, maxDelaySeconds: 900, jitterRatio: 0.2, maxNetworkDeferrals: 6 },
       coordination: { policy: 'updatesFirst', windowsUpdate: { enabled: true, stateFile: 'C:\\ProgramData\\WindowsDeploymentBuilder\\Updates\\state.json' } },
     });
     expect(c.packages.map((p) => `${p.source}:${p.packageIdentifier}`)).toEqual(['winget:Git.Git', 'msstore:9MSPC6MP8FM4']);

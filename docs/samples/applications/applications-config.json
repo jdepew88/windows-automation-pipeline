@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "engineVersion": "1.1.0",
+  "engineVersion": "1.2.0",
   "dataRoot": "C:\\ProgramData\\WindowsDeploymentBuilder",
   "taskPath": "\\WindowsDeploymentBuilder\\",
   "taskName": "Applications",
@@ -20,13 +20,21 @@
   "onlineRepair": false,
   "minimumWinGetVersion": "1.6.0",
   "maxReboots": 3,
-  "maxAttemptsPerPackage": 2,
+  "maxAttemptsPerPackage": 3,
   "packageTimeoutMinutes": 30,
   "networkWaitMinutes": 15,
   "maxRuntimeHours": 4,
   "waitForUpdatesHours": 8,
   "lockWaitMinutes": 60,
   "rebootWarningSeconds": 60,
+  "retry": {
+    "automatic": true,
+    "continueAfterFailure": true,
+    "baseDelaySeconds": 60,
+    "maxDelaySeconds": 900,
+    "jitterRatio": 0.2,
+    "maxNetworkDeferrals": 6
+  },
   "packages": [
     {
       "key": "winget:google.chrome",

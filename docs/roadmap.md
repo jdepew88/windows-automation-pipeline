@@ -39,6 +39,22 @@ after the initial updates, and Wi-Fi provisioning with adapter checks. Covered b
 or on hardware**; see `phase-4-3-quick-deployment-wizard/testing.md`. Report:
 `phase-4-3-quick-deployment-wizard/implementation-report.md`.
 
+## Phase 5: resilient provisioning, resume and retry (branch `feature/phase-5-resilient-provisioning`)
+
+Failure classes and bounded automatic retry with backoff, network and package-source aware
+deferral, crash and power-loss reconciliation, atomic state with last-good backups and versioned
+migrations, machine-readable outcomes and exit codes, outstanding work kept after the deployment
+ends, and the technician recovery tool (status, retry one or all, resume, pending actions,
+diagnostics without secrets). Covered by automated tests, including fault injection, the real
+generated package, the real engine and the recovery tool on a simulated machine. **Not validated in
+a VM or on hardware**; the first real test is on bare metal:
+`phase-5-resilient-provisioning/bare-metal-checklist.md`. Report:
+`phase-5-resilient-provisioning/implementation-report.md`.
+
+The remaining roadmap: Phase 6 application backup and restore, Phase 7 USB media preparation
+assistant, Phase 8 hardware-aware drivers, Phase 9 deployment verification and health (it can read
+`attempts.jsonl`, `status.json` outcomes and report v2).
+
 ## Milestone 2: validation and hardening
 
 - Run WSIM validation and both VM runs (with and without Internet). Fix any findings and record a `docs/validation-log.md`.
@@ -56,6 +72,9 @@ or on hardware**; see `phase-4-3-quick-deployment-wizard/testing.md`. Report:
 - Run the Phase 4.3 checks: `AUOptions=3` applied after the initial updates on Windows 11 Pro (and
   reported Unsupported on Home), Wi-Fi with a real adapter, a VM without Wi-Fi, and the predefined
   region skipping Setup's region pages.
+- Run the Phase 5 bare-metal checklist (`phase-5-resilient-provisioning/bare-metal-checklist.md`):
+  restarts resume, a network interruption pauses instead of failing, a failed application can be
+  retried, the report and the diagnostics ZIP are accurate and contain no secrets.
 
 ## Next: manufacturer drivers
 

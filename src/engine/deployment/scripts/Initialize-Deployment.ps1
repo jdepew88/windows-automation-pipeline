@@ -75,6 +75,14 @@ function Start-WddConsole {
     Start-Process -FilePath $ps -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$show`"", '-Watch')
 }
 
+function Get-WddRecoveryShortcut {
+    param([hashtable] $Paths)
+    $tool = Join-Path $Paths.Package 'scripts\recovery\DeploymentRecovery.ps1'
+    if (-not (Test-Path -LiteralPath $tool)) { return $null }
+    $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    @{ Target = $ps; Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$tool`" -Elevate" }
+}
+
 function Get-WddProgressShortcut {
     param([hashtable] $Paths)
     $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
@@ -89,7 +97,7 @@ function New-WddState {
     param([hashtable] $Manifest, [string] $SourceMode, [hashtable] $Identity)
     $now = Get-WddNow
     @{
-        schemaVersion        = 1
+        schemaVersion        = 2
         packageId            = $Manifest.packageId
         packageVersion       = $Manifest.packageVersion
         orchestratorVersion  = $script:DeployVersion
@@ -104,6 +112,7 @@ function New-WddState {
         monitorRuns          = 0
         overall              = ''
         message              = ''
+        recoveries           = @()
     }
 }
 
@@ -114,6 +123,8 @@ function Invoke-WddLaunchStage {
     param([hashtable] $Stage, [hashtable] $Paths, [hashtable] $State, [hashtable] $Identity, [int] $MaxAttempts)
     $rec = if ($State.stages.ContainsKey($Stage.id)) { $State.stages[$Stage.id] } else { @{ launchResult = ''; attempts = 0; launchedUtc = $null; exitCode = $null; message = '' } }
     $State.stages[$Stage.id] = $rec
+    # Phase 5: who the stage runs as (a user-context stage only runs while that user is signed in).
+    if (-not $rec.ContainsKey('user') -or -not $rec.user) { $rec.user = $(if ($Stage.context -eq 'user') { [string] $Identity.Name } else { 'SYSTEM' }) }
     if ($rec.launchResult -eq 'Launched') { Write-WddLog "Stage $($Stage.id) was already launched; not launching it again."; return $rec }
     # Interrupted earlier launch: if its task exists the installer finished registering it.
     if ($rec.launchResult -eq 'Launching' -and (Get-WddTask $Stage.task.path $Stage.task.name)) {
@@ -167,7 +178,13 @@ function Invoke-WddInitialize {
     $mutex = Enter-WddMutex 120
     if (-not $mutex) { Write-WddLog 'Another deployment process is running; nothing to do.' 'WARN'; return 'Busy' }
     try {
-        $state = Read-WddJson $Paths.State
+        $read = Read-WddDeploymentState $Paths
+        if ($read.Source -eq 'corrupt') {
+            # Never start over on top of a damaged state: that would launch stages a second time.
+            Write-WddLog "The deployment state is damaged ($($read.Problem)); refusing to start over. Run DeploymentRecovery.ps1 -Action Resume." 'ERROR'
+            return 'StateCorrupt'
+        }
+        $state = $read.State
         if ($state) {
             if ($state.packageId -ne $Manifest.packageId -and $state.status -notin 'Completed', 'StagingFailed') {
                 Write-WddLog "A different deployment ($($state.packageId)) is still in progress; refusing to start $($Manifest.packageId). Finish or reset it first (see recovery instructions)." 'ERROR'
@@ -192,7 +209,9 @@ function Invoke-WddInitialize {
             if (-not $staged.Ok) {
                 $state.status = 'StagingFailed'; $state.overall = 'Failed'; $state.message = $staged.Message
                 Save-WddState $Paths $state
-                Write-WddJson $Paths.Status ([ordered]@{ packageId = $Manifest.packageId; updatedUtc = (Get-WddNow).ToString('o'); deploymentState = 'StagingFailed'; overall = 'Failed'; message = $staged.Message; missing = $staged.Missing; modified = $staged.Mismatched })
+                $snap = [ordered]@{ packageId = $Manifest.packageId; updatedUtc = (Get-WddNow).ToString('o'); deploymentState = 'StagingFailed'; overall = 'Failed'; message = $staged.Message; missing = $staged.Missing; modified = $staged.Mismatched }
+                Set-WddSnapshotOutcome $snap $state
+                Write-WddJson $Paths.Status $snap
                 Write-WddEvent 3002 "Deployment not started: $($staged.Message) See $($Paths.Log)." 'Error'
                 return 'StagingFailed'
             }
@@ -218,6 +237,12 @@ function Invoke-WddInitialize {
             $sc = Get-WddProgressShortcut $Paths
             New-WddShortcut 'Deployment progress' $sc.Target $sc.Arguments 'Windows Deployment Builder: deployment progress'
         } catch { Write-WddLog "Could not create the progress shortcut: $($_.Exception.Message)" 'WARN' }
+        # Phase 5: the technician recovery entry point, when the package carries it.
+        $rt = Get-WddRecoveryShortcut $Paths
+        if ($rt) {
+            try { New-WddShortcut 'Deployment recovery' $rt.Target $rt.Arguments 'Windows Deployment Builder: status, retry failed applications, resume, diagnostics (asks for administrator rights)' }
+            catch { Write-WddLog "Could not create the recovery shortcut: $($_.Exception.Message)" 'WARN' }
+        }
         Write-WddEvent 3000 "Deployment $($Manifest.packageId) started. Status: $($Paths.Status)."
         try { Start-WddTask $script:MonitorTask.path $script:MonitorTask.name } catch { Write-WddLog "Could not start the monitor now; it runs within 15 minutes: $($_.Exception.Message)" 'WARN' }
         if (-not $NoConsole) { try { Start-WddConsole $Paths } catch { Write-WddLog "Could not open the progress window: $($_.Exception.Message)" 'WARN' } }

@@ -62,7 +62,12 @@ function New-WddReport {
     $appsReport = $null
     if ($apps) {
         $r = $apps.result
-        $pk = @(if ($r) { @($r.packages) | Where-Object { $_ } | ForEach-Object { [ordered]@{ name = $_.name; packageIdentifier = $_.packageIdentifier; source = $_.source; status = $_.status; attempts = $_.attempts; exitCode = $_.exitCode; message = $_.message } } })
+        # Phase 5: lifecycle, failure class and attempt totals come from result schema 2 (absent in schema 1).
+        $pk = @(if ($r) { @($r.packages) | Where-Object { $_ } | ForEach-Object {
+            $x = [ordered]@{ name = $_.name; packageIdentifier = $_.packageIdentifier; source = $_.source; status = $_.status; attempts = $_.attempts; exitCode = $_.exitCode; message = $_.message }
+            foreach ($k in 'operationId', 'lifecycle', 'failureClass', 'retryable', 'detection', 'totalAttempts', 'manualRetries') { if ($_.ContainsKey($k)) { $x[$k] = $_[$k] } }
+            $x
+        } })
         $add = @(if ($r) { @($r.additionalSoftware) | Where-Object { $_ } })
         $appsReport = [ordered]@{ state = $apps.state; status = $apps.status; reason = $apps.detail; reboots = $apps.reboots
                                   counts = $(if ($r) { $r.counts } else { $null }); packages = $pk; additionalSoftware = $add
@@ -84,10 +89,39 @@ function New-WddReport {
         elseif ($policy.status -notin 'Applied', 'AlreadyApplied') { $remaining += "Ongoing Windows Update policy: $($policy.status). $($policy.message)" }
     }
     $remaining += 'Manufacturer drivers: not part of this deployment (driver stage not implemented). Install chipset, graphics and OEM drivers manually if Windows Update did not provide them.'
+    # Phase 5: what is still open and how to recover it, kept after the deployment ends.
+    $tool = Join-Path $Paths.Package 'scripts\recovery\DeploymentRecovery.ps1'
+    $hasTool = Test-Path -LiteralPath $tool
+    $outstanding = @()
+    if ($apps -and $apps.result -and $apps.result.ContainsKey('outstanding')) {
+        foreach ($x in @($apps.result.outstanding) | Where-Object { $_ }) {
+            $how = switch ([string] $x.lifecycle) {
+                'FailedRetryable' { 'retry (automatic retries used up)' } 'BlockedByDependency' { 'retry (with its dependency)' }
+                'WaitingForNetwork' { 'resume when the network is back' } 'Pending' { 'resume' } 'FailedPermanent' { 'correct the cause, then retry with -IncludePermanent' }
+                'ManualActionRequired' { 'install or finish it by hand' } 'WaitingForReboot' { 'restart the computer' } default { 'check' }
+            }
+            $outstanding += [ordered]@{ operationId = $x.operationId; name = $x.name; lifecycle = $x.lifecycle; failureClass = $x.failureClass; retryable = $x.retryable; action = $how; message = $x.message }
+        }
+    } elseif ($apps -and $apps.state -ne 'Final') {
+        $outstanding += [ordered]@{ operationId = 'stage:applications'; name = 'Applications'; lifecycle = 'Pending'; failureClass = ''; retryable = $true; action = 'resume'; message = "The application stage is $($apps.state)." }
+    }
+    if ($wu -and $wu.state -eq 'Final' -and $wu.status -in 'CompletedWithFailures', 'Failed', 'Offline') {
+        $outstanding += [ordered]@{ operationId = 'stage:windowsUpdate'; name = 'Windows Update'; lifecycle = 'FailedRetryable'; failureClass = $(if ($wu.status -eq 'Offline') { 'Network' } else { 'Transient' }); retryable = $true; action = 'retry the update stage (installed updates are never offered again)'; message = [string] $wu.detail }
+    }
+    $recoveryCommands = [ordered]@{
+        status      = "powershell.exe -ExecutionPolicy Bypass -File `"$tool`" -Action Status"
+        retryFailed = "powershell.exe -ExecutionPolicy Bypass -File `"$tool`" -Action RetryFailed"
+        retryOne    = "powershell.exe -ExecutionPolicy Bypass -File `"$tool`" -Action Retry -Operation <operationId>"
+        resume      = "powershell.exe -ExecutionPolicy Bypass -File `"$tool`" -Action Resume"
+        diagnostics = "powershell.exe -ExecutionPolicy Bypass -File `"$tool`" -Action ExportDiagnostics"
+    }
+    $outcome = Get-WddDeploymentOutcome @{ status = 'Completed'; overall = $Overall; message = $Reason } $null
     [ordered]@{
         format             = 'windows-deployment-builder/deployment-report'
-        reportVersion      = 1
+        reportVersion      = 2
         overall            = $Overall
+        outcome            = $outcome.outcome
+        outcomeCode        = $outcome.exitCode
         reason             = $Reason
         generatedUtc       = (Get-WddNow).ToString('o')
         packageId          = $Manifest.packageId
@@ -105,8 +139,11 @@ function New-WddReport {
         incompleteStages   = $incomplete
         errors             = $errors
         remainingTasks     = $remaining
-        logs               = [ordered]@{ deployment = $Paths.Log; windowsUpdate = (Join-Path $Paths.Root 'Updates\logs\engine.log'); applications = (Join-Path $Paths.Root 'Applications\logs\engine.log') }
-        recovery           = "Resume: powershell.exe -ExecutionPolicy Bypass -File `"$(Join-Path $Paths.Package 'scripts\orchestrator\Resume-Deployment.ps1')`""
+        outstanding        = $outstanding
+        recoveries         = @(if ($State.ContainsKey('recoveries')) { @($State.recoveries) })
+        logs               = [ordered]@{ deployment = $Paths.Log; windowsUpdate = (Join-Path $Paths.Root 'Updates\logs\engine.log'); applications = (Join-Path $Paths.Root 'Applications\logs\engine.log'); attempts = (Join-Path $Paths.Root 'Applications\logs\attempts.jsonl') }
+        recovery           = "$(if ($hasTool) { "Recovery tool (as administrator; status, retry, resume, diagnostics): $($recoveryCommands.status). " })Resume only: powershell.exe -ExecutionPolicy Bypass -File `"$(Join-Path $Paths.Package 'scripts\orchestrator\Resume-Deployment.ps1')`""
+        recoveryCommands   = $(if ($hasTool) { $recoveryCommands } else { $null })
     }
 }
 
@@ -116,6 +153,7 @@ function Format-WddReport {
     $l.Add('Windows Deployment Builder - deployment report')
     $l.Add('==============================================')
     $l.Add("Overall result : $($Report.overall)")
+    if ($Report.Contains('outcome')) { $l.Add("Outcome        : $($Report.outcome) (exit code $($Report.outcomeCode))") }
     if ($Report.reason) { $l.Add("               : $($Report.reason)") }
     $l.Add("Generated (UTC): $($Report.generatedUtc)")
     $l.Add("Package        : $($Report.packageId) (package $($Report.packageVersion), orchestrator $($Report.orchestratorVersion))")
@@ -136,7 +174,10 @@ function Format-WddReport {
         $a = $Report.applications
         $l.Add("  Result: $($a.status) ($($a.state)). $($a.reason)")
         $l.Add("  Restarts: $($a.reboots)")
-        foreach ($p in @($a.packages)) { $l.Add(('  {0,-20} {1} ({2}:{3}) {4}' -f $p.status, $p.name, $p.source, $p.packageIdentifier, $p.message)) }
+        foreach ($p in @($a.packages)) {
+            $tries = $(if ($p.Contains('totalAttempts') -and [int] $p.totalAttempts -gt 1) { " [$($p.totalAttempts) attempts$(if ([int] $p.manualRetries) { ", $($p.manualRetries) manual retr$(if ([int] $p.manualRetries -eq 1) { 'y' } else { 'ies' })" })]" } else { '' })
+            $l.Add(('  {0,-20} {1} ({2}:{3}){4} {5}' -f $p.status, $p.name, $p.source, $p.packageIdentifier, $tries, $p.message))
+        }
         foreach ($s in @($a.additionalSoftware)) { $l.Add(('  {0,-20} {1} (Additional Software) {2}' -f $s.status, $s.name, $s.message)) }
     } else { $l.Add('  Not part of this deployment.') }
     $l.Add('')
@@ -162,10 +203,20 @@ function Format-WddReport {
     $l.Add('Remaining tasks')
     foreach ($x in $Report.remainingTasks) { $l.Add("  - $x") }
     $l.Add('')
+    if ($Report.Contains('outstanding')) {
+        $l.Add('Outstanding work (kept for recovery)')
+        if (@($Report.outstanding).Count) {
+            foreach ($x in $Report.outstanding) { $l.Add(('  {0,-22} {1} [{2}]: {3}' -f $x.lifecycle, $x.name, $x.operationId, $x.action)) }
+        } else { $l.Add('  None.') }
+        $l.Add('')
+    }
     $l.Add('Logs')
     foreach ($k in $Report.logs.Keys) { $l.Add(('  {0,-14} {1}' -f $k, $Report.logs[$k])) }
     $l.Add('')
     $l.Add("Recovery: $($Report.recovery)")
+    if ($Report.Contains('recoveryCommands') -and $Report.recoveryCommands) {
+        foreach ($k in $Report.recoveryCommands.Keys) { $l.Add(('  {0,-12} {1}' -f $k, $Report.recoveryCommands[$k])) }
+    }
     return ($l -join "`r`n") + "`r`n"
 }
 
@@ -193,6 +244,7 @@ function Complete-WddDeployment {
     Save-WddState $Paths $State
     $Snapshot.deploymentState = 'Completed'
     $Snapshot.overall = $overall
+    Set-WddSnapshotOutcome $Snapshot $State
     Write-WddJson $Paths.Status $Snapshot
     Write-WddLog "FINISHED: $overall. $reason Report: $($Paths.ReportText)" $(if ($overall -eq 'Succeeded') { 'INFO' } else { 'WARN' })
     $eventId = switch ($overall) { 'Succeeded' { 3100 } 'CompletedWithFollowUp' { 3101 } 'CompletedWithFailures' { 3102 } 'Failed' { 3103 } default { 3104 } }
@@ -210,7 +262,7 @@ if ($script:CompleteMain) {
     $manifest = Read-WddManifest (Join-Path $package 'deployment-manifest.json')
     $paths = Get-WddPaths $manifest.dataRoot
     Initialize-WddLogging $paths
-    $state = Read-WddJson $paths.State
+    $state = (Read-WddDeploymentState $paths).State
     if (-not $state) { Write-Output 'No deployment state found.'; exit 1 }
     $snapshot = Get-WddSnapshot $manifest $paths $state
     if ($script:CompleteArgs.Finish) {

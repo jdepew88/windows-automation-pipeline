@@ -76,7 +76,7 @@ describe.skipIf(!onWindows)('PowerShell (Windows only)', () => {
       }
       expect(out).toMatch(/\b\d+ passed, 0 failed/);
       const results = readdirSync(dir);
-      expect(results.sort()).toEqual(['bootstrap-failed.json', 'failures.json', 'followup.json', 'offline.json', 'succeeded.json']);
+      expect(results.sort()).toEqual(['bootstrap-failed.json', 'failures.json', 'followup.json', 'offline.json', 'phase5-backup.json', 'phase5-example-after.json', 'phase5-example-before.json', 'phase5-exhausted.json', 'phase5-recovered.json', 'succeeded.json']);
       for (const f of results) {
         const parsed = ApplicationsResultSchema.safeParse(JSON.parse(stripBom(readFileSync(join(dir, f), 'utf8'))));
         expect(parsed.success ? [] : parsed.error.issues, f).toEqual([]);
@@ -133,12 +133,12 @@ describe.skipIf(!onWindows)('PowerShell (Windows only)', () => {
     expect(out).toEqual(expected);
   }, 60_000);
 
-  it('PowerShell and TypeScript map the same WinGet exit codes the same way', () => {
+  it('PowerShell and TypeScript map the same WinGet exit codes the same way (status, retry, restart, failure class)', () => {
     const engine = script('../../src/engine/applications/scripts/ApplicationEngine.ps1');
-    const out = ps(['-Command', `. '${engine}'; $script:ExitCodes.GetEnumerator() | Sort-Object Name | ForEach-Object { '{0}|{1}|{2}|{3}' -f $_.Name, $_.Value[0], $_.Value[1], $_.Value[2] }`]);
+    const out = ps(['-Command', `. '${engine}'; $script:ExitCodes.GetEnumerator() | Sort-Object Name | ForEach-Object { '{0}|{1}|{2}|{3}|{4}' -f $_.Name, $_.Value[0], $_.Value[1], $_.Value[2], $_.Value[4] }`]);
     const fromPs = out.trim().split(/\r?\n/).sort();
     const fromTs = Object.entries(WINGET_EXIT_CODES)
-      .map(([code, m]) => `${code}|${m.status}|${m.retry ? 'True' : 'False'}|${m.restart}`)
+      .map(([code, m]) => `${code}|${m.status}|${m.retry ? 'True' : 'False'}|${m.restart}|${m.class}`)
       .sort();
     expect(fromPs).toEqual(fromTs);
   }, 60_000);

@@ -162,8 +162,14 @@ export const FIELD_GROUPS: Partial<Record<SectionId, FieldGroup[]>> = {
       paths: ['applications.registerAppInstaller', 'applications.onlineRepair'],
     },
     {
-      title: 'Retries & limits',
-      paths: ['applications.maxAttemptsPerPackage', 'applications.packageTimeoutMinutes', 'applications.networkWaitMinutes', 'applications.maxRuntimeHours'],
+      title: 'Reliability & recovery',
+      description:
+        'Progress is saved after every step, so restarts, power loss and lost connections never repeat finished work. Temporary failures are retried with a growing wait; what still fails can be retried later with the recovery tool without reinstalling Windows.',
+      paths: ['applications.recovery.automaticRetry', 'applications.maxAttemptsPerPackage', 'applications.recovery.continueAfterFailure', 'applications.recovery.includeRecoveryTool'],
+    },
+    {
+      title: 'Limits',
+      paths: ['applications.packageTimeoutMinutes', 'applications.networkWaitMinutes', 'applications.maxRuntimeHours'],
     },
   ],
   system: [

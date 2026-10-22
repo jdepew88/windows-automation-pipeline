@@ -65,7 +65,12 @@ test('loads the owner profile into the exact controls', async ({ page }) => {
   await expect(page.locator('[data-testid="advanced-considerations"] [data-consideration="autologon-admin"]')).toContainText('physical access');
 });
 
-test('requires a name, then derives username and computer name live', async ({ page }) => {
+test('starts with "owner"; an emptied name is required again; username and computer name derive live', async ({ page }) => {
+  // Phase 5: new deployments are prefilled with the local username "owner".
+  await go(page, 'accounts');
+  await expect(page.locator('input[name="accounts.personName"]')).toHaveValue('owner');
+  await expect(page.getByTestId('identity')).toContainText('Username: owner');
+  await setName(page, '');
   await expect(page.getByTestId('status')).toContainText('Cannot generate');
   await expect(field(page, 'accounts.personName').locator('.issues .error')).toContainText("person's name");
   await go(page, 'review');
@@ -169,7 +174,7 @@ test('export → change → import round-trips; reset restores owner defaults', 
   await page.locator('[data-action="reset"]').click();
   await expect(radio(page, 'taskbar.search', 'icon')).toBeChecked();
   await expect(radio(page, 'bloatware.Calculator', 'keep')).toBeChecked();
-  await expect(page.locator('input[name="accounts.personName"]')).toHaveValue('');
+  await expect(page.locator('input[name="accounts.personName"]')).toHaveValue('owner');
   await expect(page.getByTestId('diff')).toContainText('No changes');
 
   await page.getByTestId('import-input').setInputFiles({ name: 'p.json', mimeType: 'application/json', buffer: Buffer.from(json) });
@@ -464,7 +469,7 @@ test('application provisioning (Advanced): package IDs, install order with depen
   await radio(page, 'applications.restartPolicy', 'never').check();
   await page.locator('input[name="applications.maxAttemptsPerPackage"]').fill('9');
   await expect(field(page, 'applications.maxAttemptsPerPackage').locator('.issues .error')).toContainText('between 1 and 5');
-  await page.locator('input[name="applications.maxAttemptsPerPackage"]').fill('3');
+  await page.locator('input[name="applications.maxAttemptsPerPackage"]').fill('4');
   await expect(page.getByTestId('status')).toContainText('Ready');
 
   await go(page, 'accounts');
@@ -476,7 +481,7 @@ test('application provisioning (Advanced): package IDs, install order with depen
 
   const [dl] = await Promise.all([page.waitForEvent('download'), page.getByTestId('assets').locator('[data-asset="applications-config.json"] [data-action="download-asset"]').click()]);
   const cfg = JSON.parse(await readFile((await dl.path())!, 'utf8'));
-  expect(cfg).toMatchObject({ restartPolicy: 'never', maxAttemptsPerPackage: 3 });
+  expect(cfg).toMatchObject({ restartPolicy: 'never', maxAttemptsPerPackage: 4 });
   const pk = cfg.packages.map((p: { packageIdentifier: string }) => p.packageIdentifier);
   expect(pk.indexOf('Microsoft.WSL')).toBeLessThan(pk.indexOf('Docker.DockerDesktop'));
   expect(cfg.packages.find((p: { packageIdentifier: string }) => p.packageIdentifier === 'Microsoft.VisualStudioCode').version).toBe('1.95.0');
@@ -664,10 +669,58 @@ test('deployment package: ZIP built offline in the browser, answer file at the r
 });
 
 test('deployment package is blocked while the configuration has errors', async ({ page }) => {
+  await setName(page, '');
   await go(page, 'deployment');
   await expect(page.getByTestId('package-status')).toContainText('Package blocked');
   await expect(page.locator('#section-deployment [data-action="download-package"]')).toBeDisabled();
   await setName(page, 'Alex');
   await go(page, 'deployment');
   await expect(page.locator('#section-deployment [data-action="download-package"]')).toBeEnabled();
+});
+
+// Phase 5: reliability and recovery ---------------------------------------------------------------
+
+test('Phase 5: Reliability & recovery settings have safe defaults and shape the package', async ({ page }) => {
+  const { readZip } = await import('../../src/engine/deployment/zip');
+  const download = async () => {
+    await go(page, 'deployment');
+    const [dl] = await Promise.all([page.waitForEvent('download'), page.locator('#section-deployment [data-action="download-package"]').click()]);
+    return new Map(readZip(new Uint8Array(await readFile((await dl.path())!))).map((e) => [e.path, new TextDecoder().decode(e.data)]));
+  };
+  const tool = 'WindowsDeployment/scripts/recovery/DeploymentRecovery.ps1';
+  // The group is part of the Advanced view (the Basic view keeps the safe defaults out of sight).
+  await page.getByRole('button', { name: 'Advanced', exact: true }).click();
+  await go(page, 'applications');
+  await expect(page.locator('#section-applications').getByText('Reliability & recovery', { exact: true })).toBeVisible();
+  for (const p of ['applications.recovery.automaticRetry', 'applications.recovery.continueAfterFailure', 'applications.recovery.includeRecoveryTool']) await expect(checkbox(page, p)).toBeChecked();
+  await expect(page.locator('input[name="applications.maxAttemptsPerPackage"]')).toHaveValue('3');
+
+  let files = await download();
+  expect(files.has(tool)).toBe(true);
+  expect(files.get('autounattend.xml')).toContain('C:\\Windows\\Setup\\Scripts\\Deployment\\scripts\\recovery\\DeploymentRecovery.ps1');
+  let cfg = JSON.parse(files.get('WindowsDeployment/scripts/applications/applications-config.json')!);
+  expect(cfg).toMatchObject({ engineVersion: '1.2.0', maxAttemptsPerPackage: 3, retry: { automatic: true, continueAfterFailure: true, baseDelaySeconds: 60, maxDelaySeconds: 900 } });
+  let manifest = JSON.parse(files.get('WindowsDeployment/deployment-manifest.json')!);
+  expect(manifest.recovery).toMatchObject({ tool: 'scripts/recovery/DeploymentRecovery.ps1', automaticRetry: true, maxAttemptsPerPackage: 3 });
+  expect(files.get('WindowsDeployment/README.txt')).toContain('Manual recovery');
+
+  await go(page, 'applications');
+  await checkbox(page, 'applications.recovery.automaticRetry').uncheck();
+  await checkbox(page, 'applications.recovery.continueAfterFailure').uncheck();
+  await checkbox(page, 'applications.recovery.includeRecoveryTool').uncheck();
+  // The choices survive a round trip through Quick Deployment (one shared configuration).
+  await page.locator('.mode-switch [data-mode="quick"]').click();
+  await page.locator('.mode-switch [data-mode="advanced"]').click();
+  await go(page, 'applications');
+  await expect(checkbox(page, 'applications.recovery.includeRecoveryTool')).not.toBeChecked();
+
+  files = await download();
+  expect(files.has(tool)).toBe(false);
+  // Not embedded (the other scripts only check whether it exists).
+  expect(files.get('autounattend.xml')).not.toContain('<File path="C:\\Windows\\Setup\\Scripts\\Deployment\\scripts\\recovery\\DeploymentRecovery.ps1"');
+  cfg = JSON.parse(files.get('WindowsDeployment/scripts/applications/applications-config.json')!);
+  expect(cfg.retry).toMatchObject({ automatic: false, continueAfterFailure: false });
+  manifest = JSON.parse(files.get('WindowsDeployment/deployment-manifest.json')!);
+  expect(manifest.recovery).toMatchObject({ tool: null, automaticRetry: false, maxAttemptsPerPackage: 1 });
+  for (const f of manifest.files) expect(files.has(`WindowsDeployment/${f.path}`), f.path).toBe(true);
 });

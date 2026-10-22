@@ -176,6 +176,15 @@ answer file writing it during specialize (only when the update engine runs; see
 `Add-WifiProfile.ps1` with an adapter check, a first-sign-in retry and a result file
 (`docs/phase-4-3-quick-deployment-wizard/wifi.md`).
 
+Phase 5 makes provisioning recoverable without a new scheduler or installer: the application
+engine (1.2.0) classifies failures, retries transient ones with bounded backoff, defers packages
+while the network or their source is unreachable, records every attempt (`attempts.jsonl`) and
+writes its state atomically with a last-good backup; the orchestrator (1.1.0) does the same for the
+deployment state, never mistakes a damaged state for "no deployment", and publishes one
+machine-readable outcome with an exit code; `scripts/recovery/DeploymentRecovery.ps1` lets a
+technician retry failed or unfinished operations through the engines' own logic. The Windows Update
+engine is unchanged. See `docs/phase-5-resilient-provisioning/architecture.md`.
+
 ## Extension points for later milestones
 
 - `profile.deferred.installPowerShell7` is recorded and round-tripped. Nothing reads it during

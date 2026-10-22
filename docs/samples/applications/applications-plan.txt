@@ -6,7 +6,8 @@ Runs as:       the signed-in user, elevated (scheduled task \WindowsDeploymentBu
 Coordination:  updates first - waits for the Windows Update stage to finish
 WinGet:        checked first; App Installer registration is attempted if needed
 Restarts:      when a package requires one (at most 3)
-Attempts:      2 per package, 30 min timeout each, 4 h in total
+Attempts:      up to 3 per package for temporary failures (waits 60 s, then doubling, at most 15 min), 30 min timeout each, 4 h in total
+Failures:      permanent ones (hash, policy, not found, cancelled) are never retried automatically; other applications continue after a failure
 
 For every package: "winget list" first (already installed = left unchanged), then:
 

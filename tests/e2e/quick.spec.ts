@@ -51,6 +51,9 @@ test('opens in Quick Deployment with Windows 11 Pro, x64 and the owner update pr
   await expect(page.locator('.mode-switch [data-mode="quick"]')).toHaveAttribute('aria-pressed', 'true');
   await expect(wiz(page).getByTestId('wizard-count')).toHaveText('Step 1 of 5 · 4 remaining');
   await expect(wiz(page).getByText('Local account username', { exact: true })).toBeVisible();
+  // Phase 5: new deployments start with the local username "owner"; the computer name follows until edited.
+  await expect(wiz(page).getByTestId('wiz-username')).toHaveValue('owner');
+  await expect(wiz(page).getByTestId('wiz-computername')).toHaveValue('owner-Computer');
   await wiz(page).locator('[data-testid="wiz-windows"] summary').click();
   await expect(wiz(page).getByTestId('wiz-edition')).toHaveValue('pro');
   await expect(wiz(page).getByTestId('wiz-arch')).toHaveText(/^x64/);
@@ -66,6 +69,8 @@ test('opens in Quick Deployment with Windows 11 Pro, x64 and the owner update pr
 });
 
 test('top and bottom Next share one validation; the Applications shortcut cannot skip a missing username', async ({ page }) => {
+  await expect(step(page, 'identity')).toHaveAttribute('data-status', 'complete');
+  await wiz(page).getByTestId('wiz-username').fill('');
   await expect(step(page, 'identity')).toHaveAttribute('data-status', 'incomplete');
   for (const b of ['top-next', 'bottom-next', 'go-apps', 'go-review']) {
     await wiz(page).locator(`[data-wiz="${b}"]`).click();
