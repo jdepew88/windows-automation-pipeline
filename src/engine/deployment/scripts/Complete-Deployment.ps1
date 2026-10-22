@@ -115,6 +115,16 @@ function New-WddReport {
         resume      = "powershell.exe -ExecutionPolicy Bypass -File `"$tool`" -Action Resume"
         diagnostics = "powershell.exe -ExecutionPolicy Bypass -File `"$tool`" -Action ExportDiagnostics"
     }
+    # Phase 6: the application stage's restoration result (inventory migration and settings restore).
+    $restorationFile = Join-Path $Paths.Root 'Applications\restoration.json'
+    $restoration = Read-WddJson $restorationFile
+    $restorationReport = $null
+    if ($restoration -and $restoration['format'] -eq 'windows-deployment-builder/restoration-result') {
+        $restorationReport = [ordered]@{ file = $restorationFile; inventoryId = [string] $restoration['inventoryId']; backupId = [string] $restoration['backupId']
+                                         backup = $restoration['backup']; counts = $restoration['counts']
+                                         settings = @(@($restoration['settings']) | Where-Object { $_ } | ForEach-Object { [ordered]@{ adapterId = $_['adapterId']; name = $_['name']; outcome = $_['outcome']; detail = $_['detail'] } }) }
+        if (@($restoration['settings']).Count) { $recoveryCommands.restoreSettings = "powershell.exe -ExecutionPolicy Bypass -File `"$tool`" -Action RestoreSettings -BackupPath <backup folder>" }
+    }
     $outcome = Get-WddDeploymentOutcome @{ status = 'Completed'; overall = $Overall; message = $Reason } $null
     [ordered]@{
         format             = 'windows-deployment-builder/deployment-report'
@@ -144,6 +154,7 @@ function New-WddReport {
         logs               = [ordered]@{ deployment = $Paths.Log; windowsUpdate = (Join-Path $Paths.Root 'Updates\logs\engine.log'); applications = (Join-Path $Paths.Root 'Applications\logs\engine.log'); attempts = (Join-Path $Paths.Root 'Applications\logs\attempts.jsonl') }
         recovery           = "$(if ($hasTool) { "Recovery tool (as administrator; status, retry, resume, diagnostics): $($recoveryCommands.status). " })Resume only: powershell.exe -ExecutionPolicy Bypass -File `"$(Join-Path $Paths.Package 'scripts\orchestrator\Resume-Deployment.ps1')`""
         recoveryCommands   = $(if ($hasTool) { $recoveryCommands } else { $null })
+        restoration        = $restorationReport
     }
 }
 
@@ -208,6 +219,15 @@ function Format-WddReport {
         if (@($Report.outstanding).Count) {
             foreach ($x in $Report.outstanding) { $l.Add(('  {0,-22} {1} [{2}]: {3}' -f $x.lifecycle, $x.name, $x.operationId, $x.action)) }
         } else { $l.Add('  None.') }
+        $l.Add('')
+    }
+    if ($Report.Contains('restoration') -and $Report.restoration) {
+        $x = $Report.restoration
+        $l.Add('Application restoration')
+        if ($x.counts) { $l.Add('  ' + (($x.counts.Keys | Sort-Object | ForEach-Object { "$_ $($x.counts[$_])" }) -join ', ')) }
+        if ($x.backupId) { $l.Add("  Settings backup $($x.backupId): $($x.backup.status). $($x.backup.message)") }
+        foreach ($s in @($x.settings)) { $l.Add(('  {0,-32} {1}: {2}' -f $s.name, $s.outcome, $s.detail)) }
+        $l.Add("  Details: $($x.file)")
         $l.Add('')
     }
     $l.Add('Logs')

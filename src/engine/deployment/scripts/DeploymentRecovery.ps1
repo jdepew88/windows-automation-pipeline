@@ -24,6 +24,11 @@
       -Action Resume             continues interrupted provisioning: unfinished operations, a
                                  missing task or monitor, a damaged deployment state (rebuilt from
                                  the manifest and the engines' own files)
+      -Action RestoreSettings -BackupPath <folder or .zip>
+                                 Phase 6: stages the application settings backup this deployment
+                                 expects (identified by the SHA-256 pinned in its configuration;
+                                 any other or modified backup is refused) and restores the settings
+                                 that are still outstanding; restored settings are never repeated
       -Action ExportDiagnostics [-OutputPath <zip>]
                                  logs, states, results and the report as one ZIP, with passwords
                                  and Wi-Fi keys removed; answer files and Wi-Fi profiles are never
@@ -40,8 +45,9 @@
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('Menu', 'Status', 'PendingActions', 'RetryFailed', 'Retry', 'Resume', 'ExportDiagnostics')]
+    [ValidateSet('Menu', 'Status', 'PendingActions', 'RetryFailed', 'Retry', 'Resume', 'RestoreSettings', 'ExportDiagnostics')]
     [string] $Action = 'Menu',
+    [string] $BackupPath = '',
     [string[]] $Operation = @(),
     [switch] $IncludePermanent,
     [switch] $Json,
@@ -51,7 +57,7 @@ param(
 
 $script:RecoveryMain = $MyInvocation.InvocationName -ne '.'
 # Captured first: the scripts dot-sourced below bind their own parameters in this scope.
-$script:RecoveryArgs = @{ Action = $Action; Operation = @($Operation); IncludePermanent = [bool] $IncludePermanent; Json = [bool] $Json; OutputPath = $OutputPath; Elevate = [bool] $Elevate }
+$script:RecoveryArgs = @{ Action = $Action; BackupPath = $BackupPath; Operation = @($Operation); IncludePermanent = [bool] $IncludePermanent; Json = [bool] $Json; OutputPath = $OutputPath; Elevate = [bool] $Elevate }
 . (Join-Path $PSScriptRoot '..\common\DeploymentCommon.ps1')
 . (Join-Path $PSScriptRoot '..\bootstrap\Initialize-Deployment.ps1')
 . (Join-Path $PSScriptRoot '..\orchestrator\Show-DeploymentStatus.ps1')
@@ -98,11 +104,11 @@ function Get-WdrOperations {
     foreach ($f in 'state.json', 'state.json.bak') { $s = Read-WddJson (Join-Path $app $f); if ($s -and $s.ContainsKey('packages')) { break } }
     $ops = @()
     if (-not $s) { return @() }
-    foreach ($map in 'packages', 'additional') {
+    foreach ($map in 'packages', 'additional', 'settings') {
         if (-not $s.ContainsKey($map) -or $s[$map] -isnot [hashtable]) { continue }
         foreach ($e in @($s[$map].Values)) {
             if ($e -isnot [hashtable]) { continue }
-            $id = $(if ($e.ContainsKey('operationId') -and $e.operationId) { [string] $e.operationId } elseif ($map -eq 'packages') { "app:$($e['key'])" } else { "additional:$($e['id'])" })
+            $id = $(if ($e.ContainsKey('operationId') -and $e.operationId) { [string] $e.operationId } elseif ($map -eq 'packages') { "app:$($e['key'])" } elseif ($map -eq 'settings') { "settings:$($e['id'])" } else { "additional:$($e['id'])" })
             $life = $(if (Get-Command Get-WdaLifecycle -ErrorAction SilentlyContinue) { Get-WdaLifecycle $e } else { [string] $e.status })
             $ops += [ordered]@{ operationId = $id; name = [string] $e['name']; status = [string] $e['status']; lifecycle = $life; failureClass = [string] $e['failureClass']
                                 retryable = [bool] $e['retryable']; attempts = [int] $e['attempts']; totalAttempts = [int] $e['totalAttempts']; detection = [string] $e['detection']; message = [string] $e['message'] }
@@ -320,6 +326,41 @@ function Invoke-WdrRecovery {
     }
 }
 
+<#
+    Phase 6: makes the settings backup this deployment expects available and restores what is still
+    outstanding. The backup is identified only by the manifest SHA-256 pinned in the verified
+    application configuration; it is validated (every file, path and hash) by the restore library
+    of the staged package, copied to <dataRoot>\Backup\incoming\<folder> and validated again by the
+    engine before anything is restored. Then the outstanding settings operations are reopened
+    through the engine's own Retry logic (RetryFailed rules: restored ones are never repeated).
+#>
+function Invoke-WdrRestoreSettings {
+    param([hashtable] $Manifest, [hashtable] $Paths, [string] $BackupPath)
+    Initialize-WddLogging $Paths
+    $identity = Get-WddIdentity
+    if (-not $identity.IsAdmin) { return @{ Outcome = 'NotElevated'; Message = 'Run the recovery tool as administrator.'; Accepted = @(); Refused = @() } }
+    $cfg = Get-WdrAppConfig $Paths
+    $plan = $(if ($cfg -and $cfg.ContainsKey('settingsRestore')) { $cfg['settingsRestore'] } else { $null })
+    if ($plan -isnot [hashtable] -or -not @(Get-WdaSettingsPlan $cfg).Count) { return @{ Outcome = 'NothingToDo'; Message = 'This deployment does not restore application settings.'; Accepted = @(); Refused = @() } }
+    if (-not $BackupPath) { return @{ Outcome = 'Refused'; Message = "Name the backup folder or ZIP with -BackupPath (expected: $($plan['folderName']))."; Accepted = @(); Refused = @() } }
+    $lib = Join-Path $Paths.Package 'scripts\applications\WdbMigration.ps1'
+    if (-not (Test-Path -LiteralPath $lib)) { return @{ Outcome = 'IntegrityFailed'; Message = 'The restore library is not part of the staged package.'; Accepted = @(); Refused = @() } }
+    if (-not (Get-Command Open-WdbBackup -CommandType Function -ErrorAction SilentlyContinue)) { . $lib -Mode Library }
+    $work = Join-Path $Paths.Root 'Backup\work'
+    if (-not (Test-Path -LiteralPath $work)) { New-Item -ItemType Directory -Path $work -Force | Out-Null }
+    try { $v = Open-WdbBackup $BackupPath $work ([string] $plan['manifestSha256']) } catch { return @{ Outcome = 'Refused'; Message = "The backup could not be opened: $($_.Exception.Message)"; Accepted = @(); Refused = @() } }
+    if (-not $v.Ok) {
+        Write-WddLog "RestoreSettings refused $BackupPath`: $(@($v.Problems) -join ' ')" 'WARN'
+        return @{ Outcome = 'IntegrityFailed'; Message = "The backup is not the one this deployment expects, or it is damaged: $(@($v.Problems) -join ' ') Nothing was restored."; Accepted = @(); Refused = @() }
+    }
+    $incoming = Join-Path (Join-Path $Paths.Root 'Backup\incoming') ([string] $plan['folderName'])
+    [void] (Copy-WdbBackup $v $incoming)
+    Write-WddLog "RestoreSettings: backup $($plan['backupId']) validated from $BackupPath and placed in $incoming."
+    $ops = @(Get-WdrOperations $Paths | Where-Object { $_.operationId -like 'settings:*' -and $_.status -notin 'Succeeded', 'AlreadyInstalled', 'SkippedByUser', 'Unavailable' } | ForEach-Object { $_.operationId })
+    if (-not $ops.Count) { return @{ Outcome = 'NothingToDo'; Message = 'The backup was validated and staged; no settings are outstanding.'; Accepted = @(); Refused = @() } }
+    return Invoke-WdrRecovery $Manifest $Paths 'Retry' -Operations $ops -IncludePermanent
+}
+
 # ------------------------------------------------------------------------------------------------
 # Diagnostics
 # ------------------------------------------------------------------------------------------------
@@ -412,8 +453,13 @@ function Export-WdrDiagnostics {
 # ------------------------------------------------------------------------------------------------
 
 function Invoke-WdrAction {
-    param([hashtable] $Manifest, [hashtable] $Paths, [string] $Action, [string[]] $Operation = @(), [switch] $IncludePermanent, [switch] $Json, [string] $OutputPath = '')
+    param([hashtable] $Manifest, [hashtable] $Paths, [string] $Action, [string[]] $Operation = @(), [switch] $IncludePermanent, [switch] $Json, [string] $OutputPath = '', [string] $BackupPath = '')
     switch ($Action) {
+        'RestoreSettings' {
+            $r = Invoke-WdrRestoreSettings $Manifest $Paths $BackupPath
+            $text = $(if ($Json) { [pscustomobject]$r | ConvertTo-Json -Depth 6 } else { "RestoreSettings: $($r.Outcome). $($r.Message)" })
+            return @{ Text = $text; Exit = [int] $script:RecoveryExit[$r.Outcome] }
+        }
         'Status' {
             $st = Get-WdrStatus $Manifest $Paths
             return @{ Text = $(if ($Json) { $st | ConvertTo-Json -Depth 8 } else { Format-WdrStatus $st }); Exit = [int] $st.exitCode }
@@ -445,6 +491,7 @@ function Show-WdrMenu {
         Write-Output '  1  Refresh status            4  Retry one application'
         Write-Output '  2  Retry failed operations   5  Resume interrupted provisioning'
         Write-Output '  3  View pending actions      6  Export diagnostic report'
+        Write-Output '  7  Restore application settings from a backup folder'
         Write-Output '  0  Exit'
         $c = Read-Host 'Choose'
         $r = switch ($c) {
@@ -458,8 +505,9 @@ function Show-WdrMenu {
             }
             '5' { Invoke-WdrAction $Manifest $Paths 'Resume' }
             '6' { Invoke-WdrAction $Manifest $Paths 'ExportDiagnostics' }
+            '7' { Invoke-WdrAction $Manifest $Paths 'RestoreSettings' -BackupPath (Read-Host 'Backup folder or .zip (for example E:\WindowsDeployment\backups\WDB-AppBackup-...)') }
             '0' { return }
-            default { @{ Text = 'Choose 0-6.'; Exit = 0 } }
+            default { @{ Text = 'Choose 0-7.'; Exit = 0 } }
         }
         if ($r) { Write-Output ''; Write-Output $r.Text }
     }
@@ -481,7 +529,7 @@ if ($script:RecoveryMain) {
         Show-WdrMenu $manifest $paths
         exit 0
     }
-    $r = Invoke-WdrAction $manifest $paths $a.Action -Operation $a.Operation -IncludePermanent:$a.IncludePermanent -Json:$a.Json -OutputPath $a.OutputPath
+    $r = Invoke-WdrAction $manifest $paths $a.Action -Operation $a.Operation -IncludePermanent:$a.IncludePermanent -Json:$a.Json -OutputPath $a.OutputPath -BackupPath $a.BackupPath
     Write-Output $r.Text
     exit $r.Exit
 }

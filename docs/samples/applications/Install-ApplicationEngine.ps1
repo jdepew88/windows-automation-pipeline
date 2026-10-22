@@ -80,7 +80,9 @@ if (-not $Resume) {
 $source = (Resolve-Path -LiteralPath $PSScriptRoot).Path.TrimEnd('\')
 $target = (Resolve-Path -LiteralPath $installDir).Path.TrimEnd('\')
 if ($source -ne $target) {
-    foreach ($name in 'ApplicationEngine.ps1', 'WinGetBootstrap.ps1', 'applications-config.json', 'winget-packages.json') {
+    # WdbMigration.ps1 (Phase 6) is present only when the deployment restores application settings.
+    $optional = @('WdbMigration.ps1' | Where-Object { Test-Path -LiteralPath (Join-Path $source $_) })
+    foreach ($name in @('ApplicationEngine.ps1', 'WinGetBootstrap.ps1', 'applications-config.json', 'winget-packages.json') + $optional) {
         Copy-Item -LiteralPath (Join-Path $source $name) -Destination (Join-Path $target $name) -Force
         # The task runs the copy, so the copy must be exactly what was verified.
         if ((Get-FileHash -LiteralPath (Join-Path $source $name) -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath (Join-Path $target $name) -Algorithm SHA256).Hash) {

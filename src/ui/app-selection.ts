@@ -204,6 +204,7 @@ export function createApplicationsEditor(def: Parameters<CustomRenderer>[0], sto
           if (created) say('info', `Saved "${created.name}"`, ['It is ticked now and reproduces exactly this selection. It is stored in this browser; export it as JSON for a backup.']);
         },
       }),
+      h('a', { class: 'btn', href: '#section-migration', 'data-action': 'app-import-computer', title: 'Inventory an existing Windows computer and choose which of its applications to reinstall' }, icon('monitor'), 'Import applications from an existing computer'),
       btn('Import JSON…', 'importIcon', { 'data-action': 'app-import', title: 'A Windows Deployment Builder profile file or a native "winget export" file', onclick: () => fileInput.click() }),
       fileInput,
       btn('Export as WinGet JSON', 'exportIcon', {

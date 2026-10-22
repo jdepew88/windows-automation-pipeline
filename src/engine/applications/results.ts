@@ -41,7 +41,7 @@ const Attempt = z
 
 /** Result schema 2 (engine 1.2.0): every operation also carries its lifecycle and attempt history. */
 const Resilience = {
-  operationId: z.string().regex(/^(app|additional):/),
+  operationId: z.string().regex(/^(app|additional|settings):/),
   lifecycle: z.enum(LIFECYCLE_STATES),
   failureClass: z.enum(FAILURE_CLASSES),
   retryable: z.boolean(),
@@ -81,6 +81,41 @@ const AdditionalResult = z
   })
   .strict();
 
+/** Phase 6 (engine 1.3.0): one settings restore operation per adapter, after its application. */
+export const RESTORATION_OUTCOMES = [
+  'InstalledSuccessfully',
+  'AlreadyInstalled',
+  'ConfigurationRestored',
+  'ConfigurationPartiallyRestored',
+  'KeptExisting',
+  'ManualActionRequired',
+  'WaitingForUser',
+  'WaitingForBackup',
+  'BlockedByDependency',
+  'Unsupported',
+  'Failed',
+  'SkippedByUser',
+  'Pending',
+] as const;
+export const BACKUP_STAGE_STATUSES = ['NotSearched', 'Staged', 'NotFound', 'Invalid', 'LibraryMissing'] as const;
+
+const SettingsItem = z.object({ logical: z.string(), action: z.enum(['written', 'identical', 'kept', 'replace', 'write', 'partial', 'review', 'failed']), detail: z.string() }).strict();
+
+const SettingsResult = z
+  .object({
+    id: z.string().regex(/^[a-z0-9][a-z0-9-]{0,31}$/),
+    name: z.string(),
+    status: z.enum(PACKAGE_STATUSES),
+    restoreOutcome: z.enum(RESTORATION_OUTCOMES),
+    attempts: z.number().int().min(0),
+    message: z.string(),
+    timestampUtc: z.string(),
+    items: z.array(SettingsItem),
+    followUps: z.array(z.string()),
+    ...Resilience,
+  })
+  .strict();
+
 const count = z.number().int().min(0);
 
 export const ApplicationsResultSchema = z
@@ -112,6 +147,9 @@ export const ApplicationsResultSchema = z
       .strict(),
     recoveries: z.array(z.object({ atUtc: z.string(), by: z.string(), mode: z.enum(['retry', 'retryFailed', 'resume']), accepted: z.array(z.string()), refused: z.array(z.string()), includePermanent: z.boolean() }).strict()),
     stateRecoveredFrom: z.enum(['', 'backup', 'rebuilt']),
+    /** Phase 6: present only when the deployment restores application settings. */
+    settings: z.array(SettingsResult).optional(),
+    settingsBackup: z.object({ status: z.enum(BACKUP_STAGE_STATUSES), message: z.string() }).strict().optional(),
   })
   .strict();
 export type ApplicationsResult = z.infer<typeof ApplicationsResultSchema>;
@@ -120,7 +158,7 @@ const str = { type: 'string' } as const;
 const int = { type: 'integer', minimum: 0 } as const;
 const nullableStr = { type: ['string', 'null'] } as const;
 const resilienceProps = {
-  operationId: { type: 'string', pattern: '^(app|additional):' },
+  operationId: { type: 'string', pattern: '^(app|additional|settings):' },
   lifecycle: { enum: [...LIFECYCLE_STATES] },
   failureClass: { enum: [...FAILURE_CLASSES] },
   retryable: { type: 'boolean' },
@@ -204,8 +242,48 @@ export const RESULTS_JSON_SCHEMA = {
     },
     recoveries: { type: 'array', items: { type: 'object' } },
     stateRecoveredFrom: { enum: ['', 'backup', 'rebuilt'] },
+    settings: {
+      type: 'array',
+      description: 'Phase 6 (engine 1.3.0), only when settings are restored: one operation per settings adapter (operationId settings:<adapter>).',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['id', 'name', 'status', 'restoreOutcome', 'attempts', 'message', 'timestampUtc', 'items', 'followUps', ...RESILIENCE_REQUIRED],
+        properties: {
+          id: { type: 'string', pattern: '^[a-z0-9][a-z0-9-]{0,31}$' },
+          name: str,
+          status: { enum: [...PACKAGE_STATUSES] },
+          restoreOutcome: { enum: [...RESTORATION_OUTCOMES] },
+          attempts: int,
+          message: str,
+          timestampUtc: str,
+          items: { type: 'array', items: { type: 'object', required: ['logical', 'action', 'detail'] } },
+          followUps: { type: 'array', items: str },
+          ...resilienceProps,
+        },
+      },
+    },
+    settingsBackup: { type: 'object', additionalProperties: false, required: ['status', 'message'], properties: { status: { enum: [...BACKUP_STAGE_STATUSES] }, message: str } },
   },
 } as const;
+
+/** Phase 6: restoration.json, the per-application restoration result (for the report and the later health check). */
+export const RestorationResultSchema = z
+  .object({
+    format: z.literal('windows-deployment-builder/restoration-result'),
+    formatVersion: z.literal(1),
+    generatedUtc: z.string(),
+    stageStatus: z.enum(FINAL_STATUSES),
+    inventoryId: z.string(),
+    backupId: z.string(),
+    backup: z.object({ status: z.enum([...BACKUP_STAGE_STATUSES, 'None']), message: z.string() }).strict(),
+    applications: z.array(z.object({ inventoryId: z.string(), displayName: z.string(), decision: z.enum(['restore', 'manual', 'optional', 'exclude']), key: z.string(), outcome: z.enum(RESTORATION_OUTCOMES), detail: z.string() }).strict()),
+    settings: z.array(z.object({ adapterId: z.string(), name: z.string(), outcome: z.enum(RESTORATION_OUTCOMES), detail: z.string(), items: z.array(SettingsItem), followUps: z.array(z.string()), attempts: count }).strict()),
+    followUps: z.array(z.string()),
+    counts: z.record(z.enum(RESTORATION_OUTCOMES), count),
+  })
+  .strict();
+export type RestorationResult = z.infer<typeof RestorationResultSchema>;
 
 /** WinGet exit codes the engine maps explicitly (mirrors $script:ExitCodes in ApplicationEngine.ps1). */
 export const WINGET_EXIT_CODES: Record<string, { status: (typeof PACKAGE_STATUSES)[number]; retry: boolean; restart: 'none' | 'later' | 'now' | 'initiated'; symbol: string; class: (typeof FAILURE_CLASSES)[number] }> = {

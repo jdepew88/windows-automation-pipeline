@@ -10,6 +10,7 @@ import {
   APP_STAGING_DIR,
   APP_TASK_NAME,
   EMBEDDED_APP_FILES,
+  embeddedAppFiles,
   applicationAssets,
   applicationsActive,
 } from '../../engine/applications';
@@ -245,6 +246,6 @@ export function validate(p: Profile, issues: Issue[]): void {
 export function modify(ctx: GenContext): void {
   if (!applicationsActive(ctx.profile)) return;
   for (const asset of applicationAssets(ctx.profile)) {
-    if ((EMBEDDED_APP_FILES as readonly string[]).includes(asset.name)) ctx.embedFile(`${APP_STAGING_DIR}\\${asset.name}`, asset.content);
+    if (embeddedAppFiles(ctx.profile).includes(asset.name)) ctx.embedFile(`${APP_STAGING_DIR}\\${asset.name}`, asset.content);
   }
 }

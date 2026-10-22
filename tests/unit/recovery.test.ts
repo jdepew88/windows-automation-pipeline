@@ -23,7 +23,7 @@ describe('Phase 5 defaults and compatibility', () => {
     expect(a.maxAttemptsPerPackage).toBe(3);
     expect(a.recovery).toEqual({ automaticRetry: true, continueAfterFailure: true, includeRecoveryTool: true });
     const c = applicationsConfig(profile());
-    expect(c.engineVersion).toBe('1.2.0');
+    expect(c.engineVersion).toBe('1.3.0');
     expect(c.retry).toEqual({ automatic: true, continueAfterFailure: true, ...RETRY_TIMING });
     expect(RETRY_TIMING).toEqual({ baseDelaySeconds: 60, maxDelaySeconds: 900, jitterRatio: 0.2, maxNetworkDeferrals: 6 });
   });

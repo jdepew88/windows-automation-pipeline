@@ -1,4 +1,4 @@
-# Windows Deployment Builder (Milestone 1 + Phase 2 Windows Update + Phase 3 WinGet provisioning + Phase 4 USB deployment + Phase 4.2 application profiles + Phase 4.3 Quick Deployment + Phase 5 resilient provisioning)
+# Windows Deployment Builder (Milestone 1 + Phase 2 Windows Update + Phase 3 WinGet provisioning + Phase 4 USB deployment + Phase 4.2 application profiles + Phase 4.3 Quick Deployment + Phase 5 resilient provisioning + Phase 6 application backup and restore)
 
 A local, offline, browser-based generator for **Windows 11 Pro `autounattend.xml`** answer files,
 written entirely in TypeScript. It is built on the option model and XML patterns of
@@ -74,6 +74,32 @@ DeploymentRecovery.ps1 -Action Status | PendingActions | RetryFailed | Retry -Op
 Settings: Advanced Configuration › Applications › Reliability & recovery. Details:
 [docs/phase-5-resilient-provisioning/recovery.md](docs/phase-5-resilient-provisioning/recovery.md).
 New deployments start with the local username `owner` (Quick Deployment and Advanced).
+
+## Reconstruct an existing computer (Phase 6)
+
+**Advanced Configuration › Application Backup & Restore** (or "Import applications from an existing
+computer" in the application catalog):
+
+1. Run the local collector `WdbMigration.ps1 -Mode Inventory` on the existing computer. It only
+   reads: WinGet, the Windows uninstall records, Store packages and, if you name them, portable
+   folders and repository folders. No passwords, tokens, user names or uninstall commands are
+   collected; nothing is uploaded.
+2. Import the inventory here and review every application. Only identifiers WinGet itself reported
+   are exact matches; name matches are "strong" or "possible" (a possible match must be confirmed
+   before it can be installed); unknown applications can only be manual follow-ups;
+   hardware-specific utilities are left to the later hardware-aware driver phase.
+3. Save the result as a named profile (default "Personal Workstation", built on Network Engineer /
+   Developer / Technician, which stays unchanged).
+4. Optionally back up supported settings with `-Mode Backup` (VS Code, Cursor, Windows Terminal,
+   Git, OpenSSH config, PuTTY and WinSCP sessions without passwords, Notepad++, WinGet settings, and
+   PowerShell profiles for review). Attach its `backup-manifest.json`: the deployment accepts only
+   that backup, by the SHA-256 of its manifest, and restores the settings after their applications
+   are installed. Copy the backup folder to the USB drive as `WindowsDeployment\backups\<folder>`.
+
+Not every program, setting or licence can be restored: browsers, credential stores, private keys,
+Docker data, game launchers and account-bound apps are listed as unsupported, and everything that
+needs a person ends up in the follow-up list and in `restoration.json`. Details:
+[docs/phase-6-application-backup-restore/architecture.md](docs/phase-6-application-backup-restore/architecture.md).
 
 ## Owner defaults (highlights)
 
@@ -204,11 +230,15 @@ from code).
 - [docs/phase-5-resilient-provisioning/security.md](docs/phase-5-resilient-provisioning/security.md): security controls of retry and recovery
 - [docs/phase-5-resilient-provisioning/bare-metal-checklist.md](docs/phase-5-resilient-provisioning/bare-metal-checklist.md): the first real installation, step by step
 - [docs/phase-5-resilient-provisioning/testing.md](docs/phase-5-resilient-provisioning/testing.md) and [implementation-report.md](docs/phase-5-resilient-provisioning/implementation-report.md)
+- [docs/phase-6-application-backup-restore/architecture.md](docs/phase-6-application-backup-restore/architecture.md): inventory, backup and restore, restore sequencing, profile and recovery integration
+- [docs/phase-6-application-backup-restore/collector.md](docs/phase-6-application-backup-restore/collector.md): using `WdbMigration.ps1` on the existing computer
+- [docs/phase-6-application-backup-restore/inventory-and-matching.md](docs/phase-6-application-backup-restore/inventory-and-matching.md), [backup-format.md](docs/phase-6-application-backup-restore/backup-format.md), [adapters.md](docs/phase-6-application-backup-restore/adapters.md), [security.md](docs/phase-6-application-backup-restore/security.md)
+- [docs/phase-6-application-backup-restore/testing.md](docs/phase-6-application-backup-restore/testing.md), [bare-metal-checklist.md](docs/phase-6-application-backup-restore/bare-metal-checklist.md) and [implementation-report.md](docs/phase-6-application-backup-restore/implementation-report.md)
 
 ## Not yet implemented
 
 Manufacturer driver installation (a later phase; the interface is defined in
 `src/engine/drivers/contract.ts` and the orchestrator reports the stage as not implemented), PXE or
 network delivery, automatic execution of Additional Software installers, ISO/boot media editing,
-unattended disk formatting, and customer data restoration. The profile records `deferred.installPowerShell7` as an extension point
+unattended disk formatting, and restoration of user files and documents (Phase 6 restores applications and supported application settings only). The profile records `deferred.installPowerShell7` as an extension point
 only. To install PowerShell 7, select "PowerShell 7" under Application provisioning.

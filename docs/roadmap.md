@@ -51,9 +51,23 @@ a VM or on hardware**; the first real test is on bare metal:
 `phase-5-resilient-provisioning/bare-metal-checklist.md`. Report:
 `phase-5-resilient-provisioning/implementation-report.md`.
 
-The remaining roadmap: Phase 6 application backup and restore, Phase 7 USB media preparation
-assistant, Phase 8 hardware-aware drivers, Phase 9 deployment verification and health (it can read
-`attempts.jsonl`, `status.json` outcomes and report v2).
+## Phase 6: application inventory, backup and restore (branch `feature/phase-6-application-backup-restore`)
+
+Local read-only inventory collector (WinGet, uninstall records, Store/MSIX, opt-in portable folders,
+development tools), a versioned inventory format, catalog matching that never substitutes guesses,
+review and named migration profiles on a base profile, ten settings adapters with secret filtering,
+a hash-manifested backup format with safe validation and extraction, settings restore after
+installation inside the application engine (Phase 5 retry and recovery, `RestoreSettings` in the
+recovery tool) and `restoration.json` for Phase 9. Covered by automated tests on simulated
+computers, including a second real generated package. **Not validated on real hardware**; the owner
+deferred all real installations until the roadmap is complete. Report:
+`phase-6-application-backup-restore/implementation-report.md`.
+
+The remaining roadmap: Phase 7 USB media preparation assistant (it should copy the settings backup
+to `WindowsDeployment\backups\<folder>` and check its manifest hash), Phase 8 hardware-aware
+drivers (it takes over the hardware-specific applications a migration review excludes), Phase 9
+deployment verification and health (it can read `attempts.jsonl`, `status.json` outcomes, report v2
+and `restoration.json`). The first real installation is one combined bare-metal test of all phases.
 
 ## Milestone 2: validation and hardening
 
@@ -75,6 +89,9 @@ assistant, Phase 8 hardware-aware drivers, Phase 9 deployment verification and h
 - Run the Phase 5 bare-metal checklist (`phase-5-resilient-provisioning/bare-metal-checklist.md`):
   restarts resume, a network interruption pauses instead of failing, a failed application can be
   retried, the report and the diagnostics ZIP are accurate and contain no secrets.
+- Run the Phase 6 checklist (`phase-6-application-backup-restore/bare-metal-checklist.md`) as part of
+  the combined test: a real inventory and backup of the owner's workstation, the migration profile,
+  settings restored after installation, nothing secret restored, recovery with a supplied backup.
 
 ## Next: manufacturer drivers
 

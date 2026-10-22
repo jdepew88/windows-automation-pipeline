@@ -1,6 +1,7 @@
 import engineSource from './scripts/ApplicationEngine.ps1?raw';
 import bootstrapSource from './scripts/WinGetBootstrap.ps1?raw';
 import installerSource from './scripts/Install-ApplicationEngine.ps1?raw';
+import migrationSource from '../migration/scripts/WdbMigration.ps1?raw';
 import type { Profile } from '../schema/profile';
 import type { AdditionalItem } from '../schema/applications';
 import { DATA_ROOT, RESULT_FILE as WU_RESULT_FILE, TASK_NAME as WU_TASK_NAME, TASK_PATH, type DeploymentAsset } from '../windows-update';
@@ -8,6 +9,7 @@ import { allProfiles, installable, manualItems, resolveSelection, type PlannedPa
 import { exportWinGetJson } from './winget-json';
 import { exportAppProfiles } from './profiles';
 import { RESULTS_JSON_SCHEMA } from './results';
+import { migrationConfig, restorePlanText, settingsRestoreActive, settingsRestoreConfig, migrationActive } from '../migration/plan';
 
 /**
  * Phase 3 application provisioning: engine configuration, the exact WinGet commands, the plan
@@ -16,7 +18,7 @@ import { RESULTS_JSON_SCHEMA } from './results';
  * native WinGet package list, which the engine reads at run time.
  */
 
-export const APP_ENGINE_VERSION = '1.2.0';
+export const APP_ENGINE_VERSION = '1.3.0';
 export const APP_STAGING_DIR = 'C:\\Windows\\Setup\\Scripts\\Applications';
 export const APP_ROOT = `${DATA_ROOT}\\Applications`;
 export const APP_TASK_NAME = 'Applications';
@@ -33,6 +35,10 @@ export const APP_PLAN_FILE = 'applications-plan.txt';
 export const APP_RESULTS_SCHEMA_FILE = 'applications-results.schema.json';
 export const ORCHESTRATION_FILE = 'orchestration.json';
 export const APP_README_FILE = 'README-Applications.txt';
+/** Phase 6: the settings restore library (also the stand-alone inventory and backup tool) and the plan. */
+export const MIGRATION_SCRIPT_FILE = 'WdbMigration.ps1';
+export const RESTORE_PLAN_FILE = 'restore-plan.txt';
+export const RESTORATION_FILE = `${APP_ROOT}\\restoration.json`;
 
 /**
  * Phase 5 retry timing (engine 1.2.0). Fixed, reviewed values rather than settings: the first retry
@@ -107,7 +113,7 @@ export function isReviewed(item: AdditionalItem, reviewed = REVIEWED_INSTALLERS)
 /** True when the application stage has anything to do (otherwise nothing is generated for it). */
 export function applicationsActive(p: Profile): boolean {
   if (!p.applications.enabled) return false;
-  return resolveSelection(p.applications.selection).packages.length > 0 || p.additionalSoftware.items.length > 0;
+  return resolveSelection(p.applications.selection).packages.length > 0 || p.additionalSoftware.items.length > 0 || settingsRestoreActive(p);
 }
 
 export interface ApplicationsConfig {
@@ -153,6 +159,10 @@ export interface ApplicationsConfig {
   manual: { key: string; displayName: string; instructions: string; url: string }[];
   /** Engine 1.1.0: apps a profile selects but the customer deselected, reported as SkippedByUser. */
   deselected: { key: string; packageIdentifier: string; source: string; displayName: string }[];
+  /** Engine 1.3.0 (Phase 6): settings restored after their applications, from one pinned backup. */
+  settingsRestore?: ReturnType<typeof settingsRestoreConfig>;
+  /** Engine 1.3.0 (Phase 6): the migration review, reported per application in restoration.json. */
+  migration?: ReturnType<typeof migrationConfig>;
   additionalSoftware: {
     id: string;
     name: string;
@@ -228,6 +238,9 @@ export function applicationsConfig(p: Profile, sel: SelectionResult = resolveSel
       prerequisites: i.prerequisites,
       license: i.license,
     })),
+    // Phase 6 blocks only when the deployment migrates, so other configurations are unchanged.
+    ...(settingsRestoreActive(p) ? { settingsRestore: settingsRestoreConfig(p) } : {}),
+    ...(migrationActive(p) && migrationConfig(p) ? { migration: migrationConfig(p) } : {}),
   };
 }
 
@@ -394,8 +407,22 @@ export function applicationAssets(p: Profile): DeploymentAsset[] {
     { name: APP_PLAN_FILE, content: crlf(planPreview(p, sel)), mime: 'text/plain', description: 'Installation plan preview with the exact commands', group: 'applications' },
     { name: APP_RESULTS_SCHEMA_FILE, content: json(RESULTS_JSON_SCHEMA), mime: 'application/json', description: 'JSON Schema of result.json', group: 'applications' },
     { name: APP_README_FILE, content: crlf(readme()), mime: 'text/plain', description: 'How to use the files and read the results', group: 'applications' },
+    ...(settingsRestoreActive(p)
+      ? [{ name: MIGRATION_SCRIPT_FILE, content: crlf(migrationSource), mime: 'text/plain', description: 'Settings restore library (validates the pinned backup, restores supported settings)', group: 'applications' as const }]
+      : []),
+    ...(migrationActive(p) ? [{ name: RESTORE_PLAN_FILE, content: crlf(restorePlanText(p)), mime: 'text/plain', description: 'Application restoration plan: what is reinstalled, restored, manual or excluded', group: 'applications' as const }] : []),
   ];
 }
 
 /** Files embedded in the answer file (extracted to APP_STAGING_DIR during specialize). */
 export const EMBEDDED_APP_FILES = [APP_ENGINE_FILE, APP_BOOTSTRAP_FILE, APP_INSTALLER_FILE, APP_CONFIG_FILE, APP_PACKAGES_FILE] as const;
+
+/** Embedded files of this profile: Phase 6 adds the restore library when settings are restored. */
+export function embeddedAppFiles(p: Profile): string[] {
+  return [...EMBEDDED_APP_FILES, ...(settingsRestoreActive(p) ? [MIGRATION_SCRIPT_FILE] : [])];
+}
+
+/** The stand-alone collector for the source computer (Review & download, Application Backup & Restore). */
+export function collectorAsset(): DeploymentAsset {
+  return { name: MIGRATION_SCRIPT_FILE, content: crlf(migrationSource), mime: 'text/plain', description: 'Inventory, settings backup and restore tool for the existing computer (read-only inventory)', group: 'applications' };
+}

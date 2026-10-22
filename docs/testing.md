@@ -37,6 +37,11 @@ Unit test coverage by acceptance criterion:
   - busy installer, already finished, pending restart, corrupt state;
   - single instance (mutex across processes), log content, config defaults.
 
+- **Phase 6 (application inventory, backup and restore)**: `migration.test.ts`,
+  `Migration.Tests.ps1` (collector, backup, validation, restore on a simulated computer), the
+  Phase 6 scenarios in `Applications.Tests.ps1` and `Deployment.Tests.ps1` (a second real generated
+  package with a pinned backup) and `migration.spec.ts`; see
+  [phase-6-application-backup-restore/testing.md](phase-6-application-backup-restore/testing.md).
 - **Phase 5 (resilient provisioning, resume and retry)**: `recovery.test.ts`, the Phase 5 scenarios
   in `Applications.Tests.ps1` (fault injection on the engine) and `Deployment.Tests.ps1` (the full
   lifecycle: real package, real engine, monitor and recovery tool), and the Reliability & recovery

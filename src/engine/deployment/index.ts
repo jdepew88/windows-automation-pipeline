@@ -16,7 +16,9 @@ import { resolveIdentity } from '../naming';
 import { exportProfile, hasSecrets } from '../profiles';
 import { orchestrationAsset } from '../orchestration';
 import { DATA_ROOT, EMBEDDED_UPDATE_FILES, ENGINE_VERSION, POLICY_RESULT_FILE, TASK_NAME, TASK_PATH, ongoingPolicyDeferred, resolveDrivers, updateEngineAssets } from '../windows-update';
-import { APP_ENGINE_VERSION, APP_PROFILE_FILE, APP_TASK_NAME, EMBEDDED_APP_FILES, RETRY_TIMING, applicationAssets, applicationsActive } from '../applications';
+import { APP_ENGINE_VERSION, APP_PROFILE_FILE, APP_TASK_NAME, RESTORATION_FILE, RETRY_TIMING, applicationAssets, applicationsActive, embeddedAppFiles } from '../applications';
+import { migrationActive, settingsRestoreActive } from '../migration/plan';
+import { adapterById } from '../migration/adapters';
 import { allProfiles, effectiveDevices, resolveSelection } from '../applications/selection';
 import { DRIVER_STAGE } from '../drivers/contract';
 import { isEffective, PHASES } from '../../features/scripts';
@@ -121,6 +123,27 @@ export function updatePolicyPlan(p: Profile) {
   };
 }
 
+/** The manifest's migration block (Phase 6): counts, the pinned backup and where to put it. */
+function migrationManifest(p: Profile) {
+  const m = p.migration;
+  const count = (d: string) => m.decisions.filter((x) => x.decision === d).length;
+  return {
+    inventoryId: m.source?.inventoryId ?? null,
+    decisions: { restore: count('restore'), manual: count('manual'), optional: count('optional'), exclude: count('exclude') },
+    settingsRestore: settingsRestoreActive(p)
+      ? {
+          backupId: m.backup!.backupId,
+          manifestSha256: m.backup!.manifestSha256,
+          folderName: m.backup!.folderName,
+          expectedLocation: `WindowsDeployment\\backups\\${m.backup!.folderName}`,
+          adapters: m.settings.filter((s) => s.enabled && adapterById(s.adapterId)).map((s) => ({ id: s.adapterId, conflict: s.conflict })),
+          includedInPackage: false,
+        }
+      : null,
+    result: RESTORATION_FILE,
+  };
+}
+
 const embeddedDeploymentPath = (path: string) => `Deployment\\${path.replace(/\//g, '\\')}`;
 
 /** Every file of the WindowsDeployment folder except the manifest itself. */
@@ -153,7 +176,7 @@ export function packageFiles(p: Profile): PackageFile[] {
       content: a.content,
       role: a.name.endsWith('.json') ? 'configuration' : a.name.endsWith('.ps1') ? 'engine' : 'documentation',
       description: a.description,
-      embedded: (EMBEDDED_APP_FILES as readonly string[]).includes(a.name) ? `Applications\\${a.name}` : null,
+      embedded: embeddedAppFiles(p).includes(a.name) ? `Applications\\${a.name}` : null,
     });
   }
   const orch = orchestrationAsset(p);
@@ -320,6 +343,8 @@ export function buildManifest(p: Profile) {
       removedFromProfiles: sel.removed.map((x) => x.key),
       additionalSoftware: p.additionalSoftware.items.map((i) => ({ name: i.name, execution: i.execution })),
     },
+    // Phase 6: only when the deployment migrates applications or restores settings.
+    ...(migrationActive(p) ? { migration: migrationManifest(p) } : {}),
     // Phase 4.3: only when the policy is deferred, so other manifests keep their Phase 4 shape.
     ...(updatePolicyPlan(p) ? { updatePolicy: updatePolicyPlan(p) } : {}),
     // Phase 5: resilience and technician recovery.
@@ -438,6 +463,9 @@ function stageLines(p: Profile): string {
     ...(updatePolicyPlan(p)
       ? [`     Ongoing update policy, set once Windows Update has finished: ${p.updates.mode === 'notifyInstall' ? 'download automatically, notify before installing' : 'notify before downloading and installing'}`]
       : []),
+    ...(migrationActive(p)
+      ? [`     Restoration plan: ${p.migration.decisions.filter((d) => d.decision === 'restore').length} application(s) from the inventory${settingsRestoreActive(p) ? `; settings of ${p.migration.settings.filter((s) => s.enabled).length} application(s) restored after installation` : ''} (restore-plan.txt)`]
+      : []),
     '  3. Manufacturer drivers  not implemented in this version (nothing is installed)',
     '  4. Report               C:\\ProgramData\\WindowsDeploymentBuilder\\reports\\deployment-report.txt',
   ].join('\n');
@@ -462,6 +490,20 @@ Successful applications are never installed again; history is kept.`
   return `
 ${auto}
 ${tool}
+`;
+}
+
+/** Phase 6: where the settings backup goes (it is never part of this ZIP). */
+function backupText(p: Profile): string {
+  if (!settingsRestoreActive(p)) return '';
+  const b = p.migration.backup!;
+  return `
+Application settings backup (not included in this ZIP; it stays on a drive you control)
+  Copy the backup folder ${b.folderName} to the USB drive as
+    WindowsDeployment\\backups\\${b.folderName}
+  The deployment accepts only that backup (manifest SHA-256 ${b.manifestSha256}) and restores the
+  settings after their applications are installed. Without it, the settings are listed as a manual
+  action: run "Deployment recovery" and choose "Restore application settings from a backup folder".
 `;
 }
 
@@ -492,7 +534,7 @@ formats or selects a disk; you choose where Windows is installed.
 
 Progress on the installed computer: "Deployment progress" on the desktop, or
   C:\\ProgramData\\WindowsDeploymentBuilder\\Deployment\\status.json
-${recoveryText(p)}
+${recoveryText(p)}${backupText(p)}
 Status: generated and tested with simulations only. Validate in a virtual machine or on a spare
 computer before relying on it.
 `;
@@ -545,7 +587,7 @@ Recovery: see the report, or run (elevated)
   ... -Status                 shows progress
   ... -RestartStage <stage>   starts windowsUpdate or applications again
 ${recoveryText(p)}
-Remove the USB drive, or at least ${p.output.answerFileName}, after installing: another computer
+${backupText(p)}Remove the USB drive, or at least ${p.output.answerFileName}, after installing: another computer
 booted from it would be installed with the same settings, and the file may contain passwords.
 `;
 }

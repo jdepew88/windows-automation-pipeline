@@ -185,6 +185,15 @@ machine-readable outcome with an exit code; `scripts/recovery/DeploymentRecovery
 technician retry failed or unfinished operations through the engines' own logic. The Windows Update
 engine is unchanged. See `docs/phase-5-resilient-provisioning/architecture.md`.
 
+Phase 6 adds application inventory, backup and restore without a second installer: the local
+collector `WdbMigration.ps1` (inventory, settings backup, validation, restore) produces a versioned
+inventory and a hash-manifested settings backup; the website matches the inventory against the
+catalog (`src/engine/migration`), turns the review into an ordinary custom profile and pins the
+backup's manifest SHA-256 (`profile.migration`). Applications are reinstalled by the normal queue;
+the application engine (1.3.0) then restores settings as `settings:<adapter>` operations of the same
+state, retry and recovery model, from a backup it finds by name and accepts only by hash, and writes
+`restoration.json`. See `docs/phase-6-application-backup-restore/architecture.md`.
+
 ## Extension points for later milestones
 
 - `profile.deferred.installPowerShell7` is recorded and round-tripped. Nothing reads it during

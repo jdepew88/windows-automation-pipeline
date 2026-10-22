@@ -3940,3 +3940,111 @@ div.callout {
 .status-card.pending .status-icon {
   background: var(--warn);
 }
+
+/* Phase 6: Application Backup & Restore ------------------------------------------------------- */
+.mig-steps {
+  margin: 0 0 12px;
+  padding-left: 20px;
+  display: grid;
+  gap: 8px;
+}
+.mig-cmd {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.mig-facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 12px;
+  margin: 8px 0;
+}
+.mig-facts dt {
+  color: var(--muted);
+}
+.mig-facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.mig-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  list-style: none;
+  padding: 0;
+  margin: 6px 0;
+}
+.mig-list {
+  display: grid;
+  gap: 8px;
+  margin: 10px 0;
+}
+.mig-row {
+  display: grid;
+  grid-template-columns: auto 1fr minmax(180px, 240px);
+  gap: 10px;
+  align-items: start;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.mig-row.invalid {
+  border-color: var(--warn-border);
+  background: var(--warn-soft);
+}
+.mig-main {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+.mig-main strong {
+  overflow-wrap: anywhere;
+}
+.mig-reasons {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.mig-id {
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.mig-decide {
+  display: grid;
+  gap: 6px;
+}
+.mig-decide select {
+  width: 100%;
+}
+.mig-create {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: end;
+  margin-top: 10px;
+}
+.mig-settings {
+  display: grid;
+  gap: 10px;
+}
+.mig-followups {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 4px;
+}
+@media (max-width: 720px) {
+  .mig-row {
+    grid-template-columns: auto 1fr;
+  }
+  .mig-decide {
+    grid-column: 1 / -1;
+  }
+}

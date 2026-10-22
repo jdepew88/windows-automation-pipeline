@@ -122,6 +122,14 @@
   "additionalSoftware": {
     "items": []
   },
+  "migration": {
+    "enabled": false,
+    "source": null,
+    "decisions": [],
+    "backup": null,
+    "settings": [],
+    "followUps": []
+  },
   "system": {
     "disableFastStartup": true,
     "disableErrorReporting": true,

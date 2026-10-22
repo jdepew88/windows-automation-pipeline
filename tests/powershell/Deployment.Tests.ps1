@@ -42,6 +42,10 @@ function Assert-True($Value, [string] $Message) { if (-not $Value) { throw "ASSE
 # ------------------------------------------------------------------------------------------------
 
 function Reset-Sim {
+    # Phase 6 scenarios switch to the migration package; every scenario starts with the main one.
+    $script:usb = Join-Path $Fixture 'usb'
+    $script:pkgRoot = Join-Path $script:usb 'WindowsDeployment'
+    $script:manifestPath = Join-Path $script:pkgRoot 'deployment-manifest.json'
     $script:Tmp = Join-Path ([IO.Path]::GetTempPath()) ("wdd-" + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $script:Tmp | Out-Null
     $script:SimNow = [DateTime]::new(2026, 10, 20, 8, 0, 0, [DateTimeKind]::Utc)
@@ -734,7 +738,7 @@ Test-Scenario 'Phase 5 package: recovery tool shipped, embedded, staged; manifes
     Assert-Equal "$($script:Manifest.recovery.stateSchemas.deploymentState) $($script:Manifest.recovery.stateSchemas.applicationState) $($script:Manifest.recovery.stateSchemas.applicationResult)" '2 2 2' 'state schema versions'
     Assert-Equal $script:Manifest.recovery.outcomeCodes.PausedAwaitingNetwork 30 'outcome codes'
     $cfg = Read-WddJson (Join-Path $pkgRoot 'scripts\applications\applications-config.json')
-    Assert-Equal "$($cfg.engineVersion) $($cfg.maxAttemptsPerPackage) $($cfg.retry.automatic) $($cfg.retry.baseDelaySeconds)" '1.2.0 3 True 60' 'retry configuration'
+    Assert-Equal "$($cfg.engineVersion) $($cfg.maxAttemptsPerPackage) $($cfg.retry.automatic) $($cfg.retry.baseDelaySeconds)" '1.3.0 3 True 60' 'retry configuration'
     Initialize-Embedded | Out-Null
     Assert-True (Test-Path -LiteralPath (Join-Path $script:Paths.Package 'scripts\recovery\DeploymentRecovery.ps1')) 'staged on the computer'
     Assert-True $script:Shortcuts.ContainsKey('Deployment recovery') 'recovery shortcut'
@@ -979,6 +983,118 @@ Test-Scenario 'Phase 5 diagnostics: one ZIP with logs, states and report; passwo
         Assert-True ([int] $info.redactedFiles -ge 2) 'redactions counted'
     } finally { $z.Dispose() }
     Assert-True (Test-Path -LiteralPath (Join-Path $emb 'Wifi.xml')) 'nothing outside the data root was touched'
+}
+
+# ------------------------------------------------------------------------------------------------
+# Phase 6: application restoration. The second generated package (deployment-fixture.ts
+# writeMigrationFixture) carries a reviewed inventory and pins a settings backup that lies on the
+# simulated USB drive. The package's own engine, restore library and recovery tool run; the user
+# profile, WinGet, tasks and drives are simulated.
+# ------------------------------------------------------------------------------------------------
+
+$migFixture = Join-Path $Fixture 'migration'
+if (Test-Path -LiteralPath $migFixture) {
+    . (Join-Path $migFixture 'usb\WindowsDeployment\scripts\applications\WdbMigration.ps1') -Mode Library
+    Set-StrictMode -Off
+}
+$script:MigBackupFolder = 'WDB-AppBackup-20261021-120000-a1b2c3'
+
+function Use-MigrationPackage {
+    $script:usb = Join-Path $migFixture 'usb'
+    $script:pkgRoot = Join-Path $script:usb 'WindowsDeployment'
+    $script:manifestPath = Join-Path $script:pkgRoot 'deployment-manifest.json'
+    $script:Manifest = Read-WddManifest $script:manifestPath
+    $script:UsbBackups = Join-Path $script:pkgRoot 'backups'
+    $home0 = Join-Path $script:Tmp 'Users\Alex'
+    $script:WdbEnv = @{ USERPROFILE = $home0; APPDATA = "$home0\AppData\Roaming"; LOCALAPPDATA = "$home0\AppData\Local"; DOCUMENTS = "$home0\Documents"; PROGRAMFILES = (Join-Path $script:Tmp 'Program Files'); PROGRAMFILESX86 = (Join-Path $script:Tmp 'Program Files (x86)'); PROGRAMDATA = (Join-Path $script:Tmp 'ProgramData'); USERNAME = 'Alex' }
+    New-Item -ItemType Directory -Path $script:WdbEnv.APPDATA, $script:WdbEnv.LOCALAPPDATA -Force | Out-Null
+}
+function Get-WdbEnvironment { $script:WdbEnv }
+function Test-WdbProcessRunning { param([string] $Name) $false }
+function Get-WdbUninstallEntries {
+    $names = @{ 'Microsoft.VisualStudioCode' = 'Microsoft Visual Studio Code (User)'; 'Git.Git' = 'Git' }
+    @($names.Keys | Where-Object { $script:AppSim.Installed[$_] } | ForEach-Object { @{ Hive = 'HKCU'; View = '64'; KeyName = $_; Values = @{ DisplayName = $names[$_]; DisplayVersion = '1.0' } } })
+}
+function Get-WdaBackupCandidates { param([hashtable] $Config, [string] $FolderName) @(@(Join-Path (Join-Path $Config.dataRoot 'Backup\incoming') $FolderName) + @($script:UsbBackups | Where-Object { $_ } | ForEach-Object { Join-Path $_ $FolderName })) }
+function Protect-WdaBackupFolder { param([string] $Path) }
+
+if (Test-Path -LiteralPath $migFixture) {
+
+Test-Scenario 'Phase 6 package: restore library embedded and staged, restoration plan shipped, the backup never inside the package' {
+    Use-MigrationPackage
+    $f = @($script:Manifest.files | Where-Object { $_.path -eq 'scripts/applications/WdbMigration.ps1' })
+    Assert-Equal $f[0].embedded 'Applications\WdbMigration.ps1' 'restore library embedded in the answer file'
+    Assert-True (@($script:Manifest.files | Where-Object { $_.path -eq 'scripts/applications/restore-plan.txt' }).Count -eq 1) 'restoration plan in the package'
+    Assert-Equal @($script:Manifest.files | Where-Object { $_.path -match 'backups/|data/' }).Count 0 'no backup data in the package'
+    $m = Read-WddJson (Join-Path $script:UsbBackups "$script:MigBackupFolder\backup-manifest.json")
+    $cfg = Read-WddJson (Join-Path $script:pkgRoot 'scripts\applications\applications-config.json')
+    Assert-Equal $cfg.settingsRestore.manifestSha256 (Get-WddRawHash (Join-Path $script:UsbBackups "$script:MigBackupFolder\backup-manifest.json")) 'the plan pins exactly this backup manifest'
+    Assert-Equal $script:Manifest.migration.settingsRestore.expectedLocation "WindowsDeployment\backups\$script:MigBackupFolder" 'manifest says where the backup goes'
+    Assert-Equal $m.backupId $cfg.settingsRestore.backupId 'backup id'
+    Assert-True (Test-WdbBackup (Join-Path $script:UsbBackups $script:MigBackupFolder) $cfg.settingsRestore.manifestSha256).Ok 'a manifest written by TypeScript validates in PowerShell'
+    Initialize-Embedded | Out-Null
+    Assert-True (Test-Path -LiteralPath (Join-Path $script:Paths.Package 'scripts\applications\WdbMigration.ps1')) 'staged with the engine'
+}
+
+Test-Scenario 'Phase 6 lifecycle: applications first, then settings from the USB backup; restoration.json and the report' {
+    Use-MigrationPackage
+    Reset-AppSim
+    Initialize-Embedded | Out-Null
+    $o = Invoke-AppRuns
+    Assert-Equal $o[-1] 'Finished:CompletedWithFollowUp' 'manual items are follow-ups'
+    Assert-Equal $script:AppSim.Calls['Microsoft.VisualStudioCode'] 1 'VS Code installed once'
+    Assert-Equal ([IO.File]::ReadAllText((Join-Path $script:WdbEnv.APPDATA 'Code\User\settings.json'))) "{ `"editor.fontSize`": 15, `"files.autoSave`": `"afterDelay`" }`n" 'VS Code settings restored'
+    Assert-True ([IO.File]::ReadAllText((Join-Path $script:WdbEnv.USERPROFILE '.gitconfig')) -match 'Alex Example') 'Git identity restored'
+    $order = @(Get-Content -LiteralPath (Join-Path $script:Paths.Root 'Applications\logs\attempts.jsonl') | ForEach-Object { ($_ | ConvertFrom-Json).operationId })
+    Assert-True ([array]::IndexOf($order, 'settings:vscode') -gt [array]::IndexOf($order, 'app:winget:microsoft.visualstudiocode')) 'settings after the application'
+    $x = Read-WddJson (Join-Path $script:Paths.Root 'Applications\restoration.json')
+    Assert-Equal ((@($x.applications) | ForEach-Object { "$($_.displayName)=$($_.outcome)" }) -join ';') 'Contoso Field Tool=ManualActionRequired;Git=InstalledSuccessfully;Microsoft Visual Studio Code=InstalledSuccessfully;NVIDIA Graphics Driver=SkippedByUser' 'per-application outcomes'
+    Assert-Equal ((@($x.settings) | ForEach-Object { "$($_.adapterId)=$($_.outcome)" }) -join ';') 'git=ConfigurationRestored;vscode=ConfigurationRestored' 'settings outcomes'
+    Assert-Equal $x.backup.status 'Staged' 'backup staged from the USB drive'
+    Assert-Equal (Invoke-WddMonitor $script:Paths) 'Completed:CompletedWithFollowUp' 'deployment finished'
+    $r = Read-WddJson $script:Paths.ReportJson
+    Assert-Equal $r.restoration.counts.ConfigurationRestored 2 'restoration in the report'
+    Assert-True ($r.recoveryCommands.restoreSettings -match '-Action RestoreSettings') 'recovery command'
+    Assert-True ((Get-Content -Raw $script:Paths.ReportText) -match 'Application restoration') 'report text'
+}
+
+Test-Scenario 'Phase 6 recovery: USB removed before staging; a wrong backup is refused; RestoreSettings restores only what is outstanding' {
+    Use-MigrationPackage
+    Reset-AppSim
+    $script:UsbBackups = $null
+    Initialize-Embedded | Out-Null
+    $o = Invoke-AppRuns
+    Assert-Equal $o[-1] 'Finished:CompletedWithFollowUp' 'follow-up, not failure'
+    $res = Read-WddJson (Join-Path $script:Paths.Root 'Applications\result.json')
+    Assert-Equal ((@($res.settings) | ForEach-Object { "$($_.id)=$($_.restoreOutcome)" }) -join ';') 'git=WaitingForBackup;vscode=WaitingForBackup' 'waiting for the backup'
+    Assert-Equal (Invoke-WddMonitor $script:Paths) 'Completed:CompletedWithFollowUp' 'deployment finished'
+    $pending = @(Get-WdrPendingActions $script:Manifest $script:Paths)
+    Assert-True (@($pending | Where-Object { $_ -match 'RestoreSettings' }).Count -ge 1) 'pending actions explain what to do'
+    # A copy with one modified file is refused before anything is staged or restored.
+    $bad = Join-Path $script:Tmp 'E\bad'
+    Copy-Item -LiteralPath (Join-Path $migFixture "usb\WindowsDeployment\backups\$script:MigBackupFolder") -Destination $bad -Recurse
+    [IO.File]::WriteAllText((Join-Path $bad 'data\vscode\settings.json'), '{ "evil": true }')
+    $r = Invoke-WdrRestoreSettings $script:Manifest $script:Paths $bad
+    Assert-Equal $r.Outcome 'IntegrityFailed' 'tampered backup refused'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $script:WdbEnv.APPDATA 'Code'))) 'nothing restored'
+    $good = Join-Path $script:Tmp 'E\good'
+    Copy-Item -LiteralPath (Join-Path $migFixture "usb\WindowsDeployment\backups\$script:MigBackupFolder") -Destination $good -Recurse
+    New-Item -ItemType File -Path (Join-Path $script:WdbEnv.USERPROFILE '.gitconfig') -Value "[user]`n`tname = Already Here`n" -Force | Out-Null
+    $r = Invoke-WdrRestoreSettings $script:Manifest $script:Paths $good
+    Assert-Equal $r.Outcome 'Done' "accepted: $($r.Message)"
+    Assert-Equal ((@($r.Accepted) | Sort-Object) -join ',') 'settings:git,settings:vscode' 'only the settings operations reopened'
+    $o = Invoke-AppRuns
+    Assert-Equal $o[-1] 'Finished:CompletedWithFollowUp' 'settings done; the manual Contoso Field Tool stays a follow-up'
+    $res0 = Read-WddJson (Join-Path $script:Paths.Root 'Applications\result.json')
+    Assert-Equal ((@($res0.outstanding) | ForEach-Object { $_.operationId } | Sort-Object) -join ',') 'additional:migration-app-000000000003,app:catalog:rustdesk' 'only the manual installations (Contoso, RustDesk of Core Essentials) are outstanding'
+    foreach ($id in 'Microsoft.VisualStudioCode', 'Git.Git') { Assert-Equal $script:AppSim.Calls[$id] 1 "$id was not installed again" }
+    $res = Read-WddJson (Join-Path $script:Paths.Root 'Applications\result.json')
+    Assert-Equal ((@($res.settings) | ForEach-Object { "$($_.id)=$($_.restoreOutcome)" }) -join ';') 'git=KeptExisting;vscode=ConfigurationRestored' 'existing Git settings kept by policy'
+    Assert-True ([IO.File]::ReadAllText((Join-Path $script:WdbEnv.USERPROFILE '.gitconfig')) -match 'Already Here') 'existing file untouched'
+    $again = Invoke-WdrRestoreSettings $script:Manifest $script:Paths $good
+    Assert-Equal $again.Outcome 'NothingToDo' 'restored settings are never repeated'
+}
+
 }
 
 Write-Output ''

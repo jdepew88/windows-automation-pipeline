@@ -9,6 +9,7 @@ import * as updates from './updates';
 import * as windowsUpdate from './windows-update';
 import * as applications from './applications';
 import * as additionalSoftware from './additional-software';
+import * as migration from './migration';
 import * as system from './system';
 import * as explorer from './explorer';
 import * as taskbar from './taskbar';
@@ -43,6 +44,11 @@ export const SECTIONS: SectionDef[] = [
     title: 'Additional Software',
     intro: 'Installers that WinGet does not cover. Recorded with their official source and checksum; this version lists them for manual follow-up and never downloads anything.',
   },
+  {
+    id: 'migration',
+    title: 'Application Backup & Restore',
+    intro: 'Reconstruct an existing computer: inventory its applications with the local collector, review what to reinstall, save it as a named profile, and restore supported settings after installation. Not every program, setting or licence can be restored; anything unsupported is listed with the reason.',
+  },
   { id: 'system', title: 'System tweaks' },
   { id: 'explorer', title: 'File Explorer' },
   { id: 'taskbar', title: 'Taskbar' },
@@ -67,6 +73,7 @@ export const ALL_SETTINGS: SettingDef[] = [
   ...windowsUpdate.settings,
   ...applications.settings,
   ...additionalSoftware.settings,
+  ...migration.settings,
   ...system.settings,
   ...explorer.settings,
   ...taskbar.settings,
@@ -92,6 +99,7 @@ export const VALIDATORS: ((p: Profile, issues: Issue[]) => void)[] = [
   windowsUpdate.validate,
   applications.validate,
   additionalSoftware.validate,
+  migration.validate,
   desktop.validate,
   start.validate,
   bloatware.validate,
@@ -100,4 +108,4 @@ export const VALIDATORS: ((p: Profile, issues: Issue[]) => void)[] = [
   advancedXml.validate,
 ];
 
-export { setup, accounts, security, privacy, updates, windowsUpdate, applications, additionalSoftware, system, explorer, taskbar, desktop, start, personalization, bloatware, virtualization, wifi, scripts, advancedXml, output };
+export { setup, accounts, security, privacy, updates, windowsUpdate, applications, additionalSoftware, migration, system, explorer, taskbar, desktop, start, personalization, bloatware, virtualization, wifi, scripts, advancedXml, output };

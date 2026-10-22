@@ -20,6 +20,7 @@ export type SectionId =
   | 'windowsUpdate'
   | 'applications'
   | 'additionalSoftware'
+  | 'migration'
   | 'system'
   | 'explorer'
   | 'taskbar'

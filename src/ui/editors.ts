@@ -1,4 +1,5 @@
 import type { Architecture, BloatwareAction, ComponentEntry, Pass, Profile, Script, ScriptPhase, ScriptType } from '../engine/schema/profile';
+import { migrationBackupEditor, migrationFollowUpsEditor, migrationReviewEditor, migrationSettingsEditor, migrationSourceEditor } from './migration';
 import { BLOATWARE, BLOATWARE_GROUP_LABELS, appliesToWindows11, type BloatwareGroup } from '../features/bloatware/catalog';
 import { PHASES } from '../features/scripts';
 import { COMPONENTS } from '../data';
@@ -243,4 +244,9 @@ export const CUSTOM_RENDERERS: Record<string, CustomRenderer> = {
   'advancedXml.components': components,
   'applications.selection': applicationsEditor,
   'additionalSoftware.items': additionalSoftwareEditor,
+  'migration.source': migrationSourceEditor,
+  'migration.decisions': migrationReviewEditor,
+  'migration.followUps': migrationFollowUpsEditor,
+  'migration.backup': migrationBackupEditor,
+  'migration.settings': migrationSettingsEditor,
 };

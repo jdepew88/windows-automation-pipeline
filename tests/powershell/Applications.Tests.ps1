@@ -14,6 +14,8 @@ $ErrorActionPreference = 'Stop'
 $scripts = Join-Path $PSScriptRoot '..\..\src\engine\applications\scripts'
 . (Join-Path $scripts 'ApplicationEngine.ps1')
 . (Join-Path $scripts 'WinGetBootstrap.ps1')
+# Phase 6: the settings restore library the engine loads next to itself in a deployment.
+. (Join-Path $PSScriptRoot '..\..\src\engine\migration\scripts\WdbMigration.ps1') -Mode Library
 
 $script:Failures = 0
 $script:Passed = 0
@@ -1083,7 +1085,8 @@ $tests['state version 1 (engine 1.0/1.1) is upgraded without reopening completed
     Assert-Equal "$($script:Sim.Packages[0].InstallCalls) $($script:Sim.Packages[1].InstallCalls)" '0 0' 'Succeeded and Failed stay as they were (no reinstall, no silent retry)'
     Assert-Equal $script:Sim.Packages[2].InstallCalls 1 'unfinished work continues'
     $st = Read-WdaJson (Get-StateFile $c)
-    Assert-Equal $st.version 2 'upgraded'
+    Assert-Equal $st.version 3 'upgraded to the current state version (3 since Phase 6)'
+    Assert-Equal @($st.settings.Keys).Count 0 'an empty settings map is added'
     Assert-Equal $st.packages['winget:vendor.old'].operationId 'app:winget:vendor.old' 'new fields added'
     Assert-Equal $st.packages['winget:git.git'].status 'Succeeded' 'status unchanged'
 }
@@ -1328,6 +1331,186 @@ $tests['bootstrap: online repair only when allowed'] = {
     $b = Invoke-WgbBootstrap -AllowRegister $true -AllowOnlineRepair $true
     Assert-Equal $b.Status 'Repaired' 'allowed'
     Assert-Equal $b.Method 'online repair' 'method'
+}
+
+# ------------------------------------------------------------------------------------------------
+# Phase 6: settings restore after installation (WdbMigration.ps1 library, simulated profile)
+# ------------------------------------------------------------------------------------------------
+
+function Get-WdbEnvironment { $script:Wdb.Env }
+function Get-WdbOsInfo { @{ osName = 'Microsoft Windows 11 Pro'; osVersion = '10.0.26100'; osBuild = '26100'; displayVersion = '24H2'; architecture = 'x64' } }
+function Test-WdbProcessRunning { param([string] $Name) $Name -in $script:Wdb.Running }
+# The applications are "present" for the restore library once the simulated WinGet installed them.
+function Get-WdbUninstallEntries {
+    $out = @()
+    foreach ($p in $script:Sim.Packages) { if ($p.Installed -and $script:Wdb.Names.ContainsKey($p.Id)) { $out += , @{ Hive = 'HKCU'; View = '64'; KeyName = $p.Id; Values = @{ DisplayName = $script:Wdb.Names[$p.Id]; DisplayVersion = '1.0' } } } }
+    $out
+}
+function Get-WdaBackupCandidates { param([hashtable] $Config, [string] $FolderName) @($script:Wdb.Candidates | ForEach-Object { Join-Path $_ $FolderName }) + @(Join-Path (Join-Path $Config.dataRoot 'Backup\incoming') $FolderName) }
+function Protect-WdaBackupFolder { param([string] $Path) $script:Wdb.Protected += $Path }
+
+<# A synthetic old profile -> backup (VS Code, Git, Notepad++), then an empty new profile. #>
+function New-Phase6Backup {
+    $root = Join-Path ([IO.Path]::GetTempPath()) ("wda-test-p6-" + [Guid]::NewGuid().ToString('N'))
+    $mk = { param([string] $Profile0) @{ USERPROFILE = $Profile0; APPDATA = "$Profile0\AppData\Roaming"; LOCALAPPDATA = "$Profile0\AppData\Local"; DOCUMENTS = "$Profile0\Documents"; PROGRAMFILES = "$root\pf"; PROGRAMFILESX86 = "$root\pf86"; PROGRAMDATA = "$root\pd"; USERNAME = 'Alex' } }
+    $script:Wdb = @{ Env = (& $mk "$root\old"); Running = @(); Candidates = @("$root\usb\WindowsDeployment\backups"); Protected = @()
+                     Names = @{ 'Microsoft.VisualStudioCode' = 'Microsoft Visual Studio Code (User)'; 'Notepad++.Notepad++' = 'Notepad++ (64-bit x64)' } }
+    $w = { param([string] $Rel, [string] $Text) $f = Join-Path $script:Wdb.Env.USERPROFILE $Rel; New-Item -ItemType Directory -Path (Split-Path -Parent $f) -Force | Out-Null; [IO.File]::WriteAllText($f, $Text) }
+    & $w 'AppData\Roaming\Code\User\settings.json' '{ "editor.fontSize": 15 }'
+    & $w '.gitconfig' "[user]`n`tname = Alex`n"
+    & $w 'AppData\Roaming\Notepad++\stylers.xml' '<NotepadPlus/>'
+    New-Item -ItemType Directory -Path "$root\usb\WindowsDeployment\backups" -Force | Out-Null
+    $b = New-WdbBackup @(Get-WdbBackupPlan @('vscode', 'git', 'notepadpp')) "$root\usb\WindowsDeployment\backups"
+    $script:Wdb.Env = & $mk "$root\new"
+    New-Item -ItemType Directory -Path $script:Wdb.Env.APPDATA, $script:Wdb.Env.LOCALAPPDATA -Force | Out-Null
+    return $b
+}
+
+function Get-Phase6Overrides {
+    param($Backup, [string[]] $Adapters = @('vscode', 'git'), [string] $Conflict = 'keepExisting')
+    $after = @{ vscode = @('winget:microsoft.visualstudiocode'); git = @(); notepadpp = @('winget:notepad++.notepad++') }
+    @{
+        engineVersion = '1.3.0'; maxAttemptsPerPackage = 3
+        retry = @{ automatic = $true; continueAfterFailure = $true; baseDelaySeconds = 60; maxDelaySeconds = 900; jitterRatio = 0.2; maxNetworkDeferrals = 6 }
+        settingsRestore = @{ backupId = $Backup.Manifest.backupId; manifestSha256 = $Backup.ManifestSha256; folderName = $Backup.FolderName
+                             adapters = @($Adapters | ForEach-Object { @{ id = $_; name = $_; conflict = $Conflict; after = @($after[$_]); installExtensions = $false } }) }
+        migration = @{ inventoryId = '0123456789abcdef'; applications = @(
+            @{ inventoryId = 'app-000000000001'; displayName = 'Visual Studio Code'; decision = 'restore'; key = 'winget:microsoft.visualstudiocode' },
+            @{ inventoryId = 'app-000000000002'; displayName = 'Contoso Field Tool'; decision = 'manual'; key = '' },
+            @{ inventoryId = 'app-000000000003'; displayName = 'Old Game'; decision = 'exclude'; key = '' },
+            @{ inventoryId = 'app-000000000004'; displayName = 'Maybe Later'; decision = 'optional'; key = 'winget:example.later' }) }
+    }
+}
+
+function Get-Settings { param($Result, [string] $Id) @($Result.settings | Where-Object { $_.id -eq $Id })[0] }
+function Get-Restoration { param([hashtable] $Config) Get-Content -LiteralPath (Join-Path $Config.dataRoot 'Applications\restoration.json') -Raw | ConvertFrom-Json }
+
+$tests['Phase 6: settings are restored after their application is installed, verified, and reported'] = {
+    Reset-Sim @((New-SimPackage 'Microsoft.VisualStudioCode'))
+    $b = New-Phase6Backup
+    $c = New-AppTestConfig -Packages $script:Sim.Packages -Overrides (Get-Phase6Overrides $b)
+    $o = Invoke-Logons $c
+    Assert-Equal $o[-1] 'Finished:Succeeded' "outcome $($o -join ',')"
+    $r = Get-Result $c
+    Assert-Equal (Get-Settings $r 'vscode').restoreOutcome 'ConfigurationRestored' 'vscode restored'
+    Assert-Equal (Get-Settings $r 'vscode').operationId 'settings:vscode' 'stable operation id'
+    Assert-Equal (Get-Settings $r 'git').restoreOutcome 'ConfigurationRestored' 'git restored (no application needed)'
+    Assert-Equal ([IO.File]::ReadAllText((Join-Path $script:Wdb.Env.APPDATA 'Code\User\settings.json'))) '{ "editor.fontSize": 15 }' 'file restored into the new profile'
+    Assert-Equal $r.settingsBackup.status 'Staged' 'backup staged'
+    Assert-True (Test-Path (Join-Path $c.dataRoot "Backup\$($b.Manifest.backupId)\backup-manifest.json")) 'staged under the data root'
+    Assert-True (@($script:Wdb.Protected).Count -ge 1) 'staged copy restricted'
+    $x = Get-Restoration $c
+    Assert-Equal $x.format 'windows-deployment-builder/restoration-result' 'restoration result'
+    Assert-Equal (@($x.applications | ForEach-Object { "$($_.displayName)=$($_.outcome)" }) -join ';') 'Visual Studio Code=InstalledSuccessfully;Contoso Field Tool=ManualActionRequired;Old Game=SkippedByUser;Maybe Later=SkippedByUser' 'application outcomes'
+    Assert-Equal (@($x.settings | ForEach-Object { "$($_.adapterId)=$($_.outcome)" }) -join ';') 'git=ConfigurationRestored;vscode=ConfigurationRestored' 'settings outcomes'
+    Save-Result $c 'phase6-restored'
+    if ($ResultOut) { Copy-Item -LiteralPath (Join-Path $c.dataRoot 'Applications\restoration.json') -Destination (Join-Path $ResultOut 'restoration-phase6.json') -Force }
+}
+
+$tests['Phase 6: settings of an application that failed are blocked, then restored after RetryFailed'] = {
+    Reset-Sim @((New-SimPackage 'Microsoft.VisualStudioCode' 'fail'))
+    $b = New-Phase6Backup
+    $c = New-AppTestConfig -Packages $script:Sim.Packages -Overrides (Get-Phase6Overrides $b)
+    $o = Invoke-Logons $c
+    Assert-Equal $o[-1] 'Finished:CompletedWithFailures' 'application failed'
+    $r = Get-Result $c
+    $s = Get-Settings $r 'vscode'
+    Assert-Equal "$($s.status)/$($s.restoreOutcome)/$($s.lifecycle)" 'Skipped/BlockedByDependency/BlockedByDependency' 'blocked by its application'
+    Assert-True (-not (Test-Path (Join-Path $script:Wdb.Env.APPDATA 'Code'))) 'nothing restored for a missing application'
+    Assert-True (@($r.outstanding | Where-Object { $_.operationId -eq 'settings:vscode' }).Count -eq 1) 'outstanding for the recovery tool'
+    $script:Sim.Packages[0].Behavior = 'ok'
+    $rr = Invoke-WdaRetry $c -AllFailed -RequestedBy 'TEST\Tech'
+    Assert-Equal (($rr.Accepted | Sort-Object) -join ',') 'app:winget:microsoft.visualstudiocode,settings:vscode' 'application and its settings reopened'
+    $o = Invoke-Logons $c
+    Assert-Equal $o[-1] 'Finished:Succeeded' 'recovered'
+    Assert-Equal (Get-Settings (Get-Result $c) 'vscode').restoreOutcome 'ConfigurationRestored' 'restored after the retry'
+    Assert-Equal (Get-Settings (Get-Result $c) 'git').totalAttempts 1 'git settings were not restored again'
+}
+
+$tests['Phase 6: a missing backup becomes a manual action with instructions; it is restored once supplied'] = {
+    Reset-Sim @((New-SimPackage 'Microsoft.VisualStudioCode'))
+    $b = New-Phase6Backup
+    $script:Wdb.Candidates = @()
+    $c = New-AppTestConfig -Packages $script:Sim.Packages -Overrides (Get-Phase6Overrides $b)
+    $o = Invoke-Logons $c
+    Assert-Equal $o[-1] 'Finished:CompletedWithFollowUp' 'follow-up, not a failure and not a silent success'
+    $s = Get-Settings (Get-Result $c) 'vscode'
+    Assert-Equal "$($s.status)/$($s.restoreOutcome)" 'RequiresInteraction/WaitingForBackup' 'waiting for the backup'
+    Assert-True ($s.message -match 'WindowsDeployment\\backups\\' -and $s.message -match 'RestoreSettings') 'instructions'
+    Assert-Equal (Get-Result $c).settingsBackup.status 'NotFound' 'not found'
+    $incoming = Join-Path $c.dataRoot 'Backup\incoming'
+    New-Item -ItemType Directory -Path $incoming -Force | Out-Null
+    Copy-Item -LiteralPath $b.Path -Destination (Join-Path $incoming $b.FolderName) -Recurse
+    $rr = Invoke-WdaRetry $c -Operations @('settings:vscode', 'settings:git') -RequestedBy 'TEST\Tech'
+    Assert-Equal $rr.Outcome 'Accepted' 'reopened'
+    $o = Invoke-Logons $c
+    Assert-Equal $o[-1] 'Finished:Succeeded' 'restored'
+    Assert-Equal $script:Sim.Packages[0].InstallCalls 1 'the application was not installed again'
+    $re = Invoke-WdaRetry $c -Operations @('settings:vscode')
+    Assert-True ($re.Refused[0].reason -match 'already restored') 'a restored operation is never repeated'
+}
+
+$tests['Phase 6: a backup that does not match the pinned hash is rejected and never restored'] = {
+    Reset-Sim @((New-SimPackage 'Microsoft.VisualStudioCode'))
+    $b = New-Phase6Backup
+    [IO.File]::WriteAllText((Join-Path $b.Path 'data\vscode\settings.json'), '{ "injected": true }')
+    $c = New-AppTestConfig -Packages $script:Sim.Packages -Overrides (Get-Phase6Overrides $b)
+    $o = Invoke-Logons $c
+    Assert-Equal $o[-1] 'Finished:CompletedWithFollowUp' 'follow-up'
+    Assert-Equal (Get-Result $c).settingsBackup.status 'Invalid' 'rejected as invalid'
+    Assert-True (-not (Test-Path (Join-Path $script:Wdb.Env.APPDATA 'Code'))) 'nothing written'
+    Assert-True (-not (Test-Path (Join-Path $c.dataRoot "Backup\$($b.Manifest.backupId)"))) 'not staged'
+}
+
+$tests['Phase 6: an interrupted restore is completed without rewriting what was restored'] = {
+    Reset-Sim @((New-SimPackage 'Microsoft.VisualStudioCode'))
+    $b = New-Phase6Backup
+    $c = New-AppTestConfig -Packages $script:Sim.Packages -Overrides (Get-Phase6Overrides $b)
+    [void] (Invoke-Logons $c)
+    $settings = Join-Path $script:Wdb.Env.APPDATA 'Code\User\settings.json'
+    $stamp = (Get-Item $settings).LastWriteTimeUtc
+    # Simulate a power loss in the middle of the vscode restore: state says Installing, no result yet.
+    $paths = Get-WdaPaths $c
+    $st = Read-WdaState $paths
+    $st.settings['vscode'].status = 'Installing'; $st.final = $null
+    Save-WdaState $st $paths
+    Remove-Item -LiteralPath $paths.Result, $paths.Marker -Force
+    $o = Invoke-Logons $c
+    Assert-Equal $o[-1] 'Finished:Succeeded' 'finished'
+    $s = Get-Settings (Get-Result $c) 'vscode'
+    Assert-Equal $s.restoreOutcome 'ConfigurationRestored' 'restored'
+    Assert-True (@($s.history | Where-Object { $_.result -eq 'Interrupted' }).Count -eq 1) 'interruption recorded'
+    Assert-Equal (Get-Item $settings).LastWriteTimeUtc $stamp 'the restored file was verified, not written again'
+    Assert-Equal $script:Sim.Packages[0].InstallCalls 1 'no reinstall'
+}
+
+$tests['Phase 6: settings wait for an application that needs a restart, and for a running application within bounds'] = {
+    Reset-Sim @((New-SimPackage 'Microsoft.VisualStudioCode' 'reboot-finish'), (New-SimPackage 'Notepad++.Notepad++'))
+    $b = New-Phase6Backup
+    $script:Wdb.Running = @('notepad++')
+    $c = New-AppTestConfig -Packages $script:Sim.Packages -Overrides (Get-Phase6Overrides $b @('vscode', 'notepadpp'))
+    $o = Invoke-Logons $c
+    Assert-True ('Rebooting' -in $o) 'restarted for VS Code'
+    Assert-Equal $o[-1] 'Finished:CompletedWithFollowUp' 'follow-up'
+    $r = Get-Result $c
+    Assert-Equal (Get-Settings $r 'vscode').restoreOutcome 'ConfigurationRestored' 'restored after the restart'
+    $n = Get-Settings $r 'notepadpp'
+    Assert-Equal "$($n.status)/$($n.restoreOutcome)" 'RequiresInteraction/WaitingForUser' 'a running Notepad++ is not overwritten'
+    Assert-Equal $n.totalAttempts 3 'bounded by the attempt limit'
+    Assert-True ($n.message -match 'Close Notepad\+\+') 'tells the user what to do'
+    $script:Wdb.Running = @()
+    Assert-Equal (Invoke-WdaRetry $c -AllFailed).Outcome 'Accepted' 'retry after closing it'
+    Assert-Equal (Invoke-Logons $c)[-1] 'Finished:Succeeded' 'restored'
+}
+
+$tests['Phase 6: a configuration without a restore plan behaves exactly as before'] = {
+    Reset-Sim @((New-SimPackage 'Git.Git'))
+    $c = New-AppTestConfig -Packages $script:Sim.Packages
+    $o = Invoke-Logons $c
+    Assert-Equal $o[-1] 'Finished:Succeeded' 'outcome'
+    $r = Get-Result $c
+    Assert-True (-not ($r.PSObject.Properties.Name -contains 'settings')) 'no settings in the result'
+    Assert-True (-not (Test-Path (Join-Path $c.dataRoot 'Applications\restoration.json'))) 'no restoration file'
 }
 
 foreach ($name in $tests.Keys) {

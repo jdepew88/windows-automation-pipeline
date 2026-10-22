@@ -7,7 +7,11 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { generateOk, profile } from './helpers';
 import { wingetArguments } from '../../src/engine/applications';
-import { ApplicationsResultSchema, WINGET_EXIT_CODES } from '../../src/engine/applications/results';
+import { ApplicationsResultSchema, RestorationResultSchema, WINGET_EXIT_CODES } from '../../src/engine/applications/results';
+import { importInventory } from '../../src/engine/migration/inventory';
+import { importBackupManifest } from '../../src/engine/migration/backup';
+import { matchInventory } from '../../src/engine/migration/matching';
+import { SETTINGS_ADAPTERS } from '../../src/engine/migration/adapters';
 import { writeDeploymentFixture } from '../powershell/deployment-fixture';
 import { writeWifiFixture } from '../powershell/wifi-fixture';
 
@@ -75,8 +79,13 @@ describe.skipIf(!onWindows)('PowerShell (Windows only)', () => {
         throw new Error(`Applications.Tests.ps1 failed:\n${(e as { stdout?: string }).stdout ?? e}`);
       }
       expect(out).toMatch(/\b\d+ passed, 0 failed/);
-      const results = readdirSync(dir);
-      expect(results.sort()).toEqual(['bootstrap-failed.json', 'failures.json', 'followup.json', 'offline.json', 'phase5-backup.json', 'phase5-example-after.json', 'phase5-example-before.json', 'phase5-exhausted.json', 'phase5-recovered.json', 'succeeded.json']);
+      const all = readdirSync(dir);
+      const results = all.filter((f) => !f.startsWith('restoration-'));
+      expect(results.sort()).toEqual(['bootstrap-failed.json', 'failures.json', 'followup.json', 'offline.json', 'phase5-backup.json', 'phase5-example-after.json', 'phase5-example-before.json', 'phase5-exhausted.json', 'phase5-recovered.json', 'phase6-restored.json', 'succeeded.json']);
+      // Phase 6: restoration.json written by the engine matches the published schema.
+      expect(all.filter((f) => f.startsWith('restoration-'))).toEqual(['restoration-phase6.json']);
+      const restoration = RestorationResultSchema.safeParse(JSON.parse(stripBom(readFileSync(join(dir, 'restoration-phase6.json'), 'utf8'))));
+      expect(restoration.success ? [] : restoration.error.issues).toEqual([]);
       for (const f of results) {
         const parsed = ApplicationsResultSchema.safeParse(JSON.parse(stripBom(readFileSync(join(dir, f), 'utf8'))));
         expect(parsed.success ? [] : parsed.error.issues, f).toEqual([]);
@@ -101,6 +110,39 @@ describe.skipIf(!onWindows)('PowerShell (Windows only)', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   }, 240_000);
+
+  it('inventory, backup and restore scenarios pass (Phase 6); the collector output imports into the website', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'wdb-migration-'));
+    try {
+      let out: string;
+      try {
+        out = await psAsync(['-File', script('../powershell/Migration.Tests.ps1'), '-Out', dir]);
+      } catch (e) {
+        throw new Error(`Migration.Tests.ps1 failed:\n${(e as { stdout?: string }).stdout ?? e}`);
+      }
+      expect(out).toMatch(/\b\d+ passed, 0 failed/);
+      // The real collector's files, produced from a synthetic computer, pass the website's strict import.
+      const inv = importInventory(readFileSync(join(dir, 'inventory.json'), 'utf8'));
+      expect(inv.errors).toEqual([]);
+      const items = matchInventory(inv.inventory!);
+      expect(items.find((i) => i.catalog?.id === 'git')).toMatchObject({ confidence: 'exact', recommendation: 'restore' });
+      expect(items.find((i) => i.app.displayName === 'Contoso Field Tool')).toMatchObject({ classification: 'unknown' });
+      const manifestBytes = new Uint8Array(readFileSync(join(dir, 'backup-manifest.json')));
+      const b = importBackupManifest(manifestBytes);
+      expect(b.errors).toEqual([]);
+      expect(inv.inventory!.backup!.manifestSha256).toBe(b.reference!.manifestSha256);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 240_000);
+
+  it('the adapter definitions of WdbMigration.ps1 match the website (ids, modes, applications, item names and kinds)', () => {
+    const lib = script('../../src/engine/migration/scripts/WdbMigration.ps1');
+    const out = ps(['-Command', `. '${lib}' -Mode Library; foreach ($k in $script:WdbAdapters.Keys) { $a = $script:WdbAdapters[$k]; '{0}|{1}|{2}|{3}|{4}' -f $k, $a.restoreMode, $a.requiresApp, ($a.appKeys -join ','), (($a.items | ForEach-Object { "$($_.logical):$($_.kind)" }) -join ',') }`]);
+    const fromPs = out.trim().split(/\r?\n/);
+    const fromTs = SETTINGS_ADAPTERS.map((a) => `${a.id}|${a.restoreMode}|${a.requiresApp ? 'True' : 'False'}|${a.appKeys.join(',')}|${a.items.map((i) => `${i.logical}:${i.kind}`).join(',')}`);
+    expect(fromPs).toEqual(fromTs);
+  }, 60_000);
 
   it('Wi-Fi profile script scenarios pass against the generated Wifi.xml and script (Phase 4.3)', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'wdw-fixture-'));

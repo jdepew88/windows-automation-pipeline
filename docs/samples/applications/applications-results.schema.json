@@ -233,7 +233,7 @@
           },
           "operationId": {
             "type": "string",
-            "pattern": "^(app|additional):"
+            "pattern": "^(app|additional|settings):"
           },
           "lifecycle": {
             "enum": [
@@ -379,7 +379,7 @@
           },
           "operationId": {
             "type": "string",
-            "pattern": "^(app|additional):"
+            "pattern": "^(app|additional|settings):"
           },
           "lifecycle": {
             "enum": [
@@ -608,6 +608,209 @@
         "backup",
         "rebuilt"
       ]
+    },
+    "settings": {
+      "type": "array",
+      "description": "Phase 6 (engine 1.3.0), only when settings are restored: one operation per settings adapter (operationId settings:<adapter>).",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "name",
+          "status",
+          "restoreOutcome",
+          "attempts",
+          "message",
+          "timestampUtc",
+          "items",
+          "followUps",
+          "operationId",
+          "lifecycle",
+          "failureClass",
+          "retryable",
+          "detection",
+          "nextAttemptUtc",
+          "waitingFor",
+          "totalAttempts",
+          "manualRetries",
+          "history"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]{0,31}$"
+          },
+          "name": {
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "Pending",
+              "Installing",
+              "Succeeded",
+              "AlreadyInstalled",
+              "Skipped",
+              "SkippedByUser",
+              "RequiresInteraction",
+              "RequiresRestart",
+              "Failed",
+              "Unavailable"
+            ]
+          },
+          "restoreOutcome": {
+            "enum": [
+              "InstalledSuccessfully",
+              "AlreadyInstalled",
+              "ConfigurationRestored",
+              "ConfigurationPartiallyRestored",
+              "KeptExisting",
+              "ManualActionRequired",
+              "WaitingForUser",
+              "WaitingForBackup",
+              "BlockedByDependency",
+              "Unsupported",
+              "Failed",
+              "SkippedByUser",
+              "Pending"
+            ]
+          },
+          "attempts": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "message": {
+            "type": "string"
+          },
+          "timestampUtc": {
+            "type": "string"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "logical",
+                "action",
+                "detail"
+              ]
+            }
+          },
+          "followUps": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "operationId": {
+            "type": "string",
+            "pattern": "^(app|additional|settings):"
+          },
+          "lifecycle": {
+            "enum": [
+              "Pending",
+              "Running",
+              "Succeeded",
+              "AlreadySatisfied",
+              "FailedRetryable",
+              "FailedPermanent",
+              "WaitingForNetwork",
+              "WaitingForReboot",
+              "ManualActionRequired",
+              "SkippedByUser",
+              "BlockedByDependency"
+            ]
+          },
+          "failureClass": {
+            "enum": [
+              "",
+              "Success",
+              "Restart",
+              "Network",
+              "Transient",
+              "Timeout",
+              "Resource",
+              "Unknown",
+              "Permanent",
+              "Integrity",
+              "Policy",
+              "User",
+              "Manual",
+              "Dependency",
+              "Budget",
+              "Interrupted"
+            ]
+          },
+          "retryable": {
+            "type": "boolean"
+          },
+          "detection": {
+            "enum": [
+              "",
+              "Installed",
+              "InstalledRequiresRestart",
+              "NotInstalled",
+              "Unconfirmed",
+              "Unknown"
+            ]
+          },
+          "nextAttemptUtc": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "waitingFor": {
+            "type": "string"
+          },
+          "totalAttempts": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "manualRetries": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "history": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+              "type": "object",
+              "required": [
+                "trigger",
+                "attempt",
+                "result",
+                "class",
+                "countsTowardLimit",
+                "nextAction",
+                "message"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "settingsBackup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "message"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "NotSearched",
+            "Staged",
+            "NotFound",
+            "Invalid",
+            "LibraryMissing"
+          ]
+        },
+        "message": {
+          "type": "string"
+        }
+      }
     }
   }
 }

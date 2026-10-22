@@ -48,6 +48,7 @@ export const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
       { target: 'app-profiles', page: 'applications', label: 'Application profiles', icon: 'layers' },
       { target: 'app-devices', page: 'applications', label: 'Mobile devices', icon: 'laptop' },
       page('additionalSoftware', 'Additional Software', 'boxPlus'),
+      page('migration', 'Backup & Restore', 'archive'),
     ],
   },
   {
@@ -171,6 +172,20 @@ export const FIELD_GROUPS: Partial<Record<SectionId, FieldGroup[]>> = {
       title: 'Limits',
       paths: ['applications.packageTimeoutMinutes', 'applications.networkWaitMinutes', 'applications.maxRuntimeHours'],
     },
+  ],
+  migration: [
+    {
+      title: '1. Inventory the existing computer',
+      description: 'The collector runs locally on the existing computer. It only reads; nothing is installed, removed or uploaded.',
+      paths: ['migration.source'],
+    },
+    { title: '2. Review and create a profile', paths: ['migration.decisions', 'migration.followUps'] },
+    {
+      title: '3. Settings backup & restore (optional)',
+      description: 'Supported settings are restored after their applications are installed. Passwords, tokens, keys and browser profiles are never part of a backup.',
+      paths: ['migration.backup', 'migration.settings'],
+    },
+    { title: '4. Deployment', paths: ['migration.enabled'] },
   ],
   system: [
     { title: 'Startup & sign-in', paths: ['system.disableFastStartup', 'system.disableAutomaticRestartSignOn', 'system.deleteWindowsOld'] },

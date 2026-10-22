@@ -1584,8 +1584,8 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-$script:EngineVersion = '1.2.0'
-$script:StateVersion = 2
+$script:EngineVersion = '1.3.0'
+$script:StateVersion = 3
 $script:EventSource = 'WindowsDeploymentBuilder'
 $script:LogFile = $null
 $script:StatusFile = $null
@@ -1770,6 +1770,9 @@ function Get-WdaPaths {
         Offline     = Join-Path $root 'offline'
         MarkerDir   = Join-Path $Config.dataRoot 'state'
         Marker      = Join-Path (Join-Path $Config.dataRoot 'state') 'applications.done'
+        # Phase 6: the structured restoration result (for people and the later health check) and the staged settings backup.
+        Restoration = Join-Path $root 'restoration.json'
+        Backup      = Join-Path $Config.dataRoot 'Backup'
     }
 }
 
@@ -1841,6 +1844,9 @@ function New-WdaState {
         bootstrap        = $null
         packages         = @{}
         additional       = @{}
+        # Phase 6: settings restore operations (settings:&lt;adapter&gt;) and the staged backup.
+        settings         = @{}
+        backup           = $null
         final            = $null
         # Phase 5: technician recoveries (Retry mode) and where this state came from.
         recoveries       = @()
@@ -1855,7 +1861,7 @@ $script:PackageStatuses = @('Pending', 'Installing', 'Succeeded', 'AlreadyInstal
 &lt;# Fields every entry has since state version 2; older entries get them without changing status. #&gt;
 function Add-WdaEntryFields {
     param([hashtable] $Entry, [string] $Kind = 'app')
-    $id = $(if ($Kind -eq 'additional') { "additional:$($Entry['id'])" } else { "app:$($Entry['key'])" })
+    $id = $(if ($Kind -eq 'additional') { "additional:$($Entry['id'])" } elseif ($Kind -eq 'settings') { "settings:$($Entry['id'])" } else { "app:$($Entry['key'])" })
     $defaults = @{ operationId = $id; failureClass = ''; retryable = $false; nextAttemptUtc = $null; waitingFor = ''; detection = ''
                    history = @(); networkDeferrals = 0; manualRetries = 0; totalAttempts = [int] $Entry['attempts']; interrupted = $false; restart = ''; restartBoot = '' }
     foreach ($k in @($defaults.Keys)) { if (-not $Entry.ContainsKey($k)) { $Entry[$k] = $defaults[$k] } }
@@ -1872,7 +1878,7 @@ function Test-WdaStateShape {
     param($S)
     if ($S -isnot [hashtable]) { return 'not an object' }
     if (-not $S.ContainsKey('version') -or "$($S.version)" -notmatch '^\d{1,3}$' -or [int] $S.version -lt 1 -or [int] $S.version -gt $script:StateVersion) { return "unsupported state version '$(if ($S.ContainsKey('version')) { $S.version })'" }
-    foreach ($map in 'packages', 'additional') {
+    foreach ($map in 'packages', 'additional', 'settings') {
         if (-not $S.ContainsKey($map) -or $null -eq $S[$map]) { continue }
         if ($S[$map] -isnot [hashtable]) { return "$map is not a map" }
         foreach ($k in @($S[$map].Keys)) {
@@ -1918,9 +1924,11 @@ function Read-WdaState {
     foreach ($k in @($fresh.Keys)) { if (-not $s.ContainsKey($k)) { $s[$k] = $fresh[$k] } }
     if ($null -eq $s.packages) { $s.packages = @{} }
     if ($null -eq $s.additional) { $s.additional = @{} }
+    if ($null -eq $s.settings) { $s.settings = @{} }
     if ($null -eq $s.recoveries) { $s.recoveries = @() }
     foreach ($e in @($s.packages.Values)) { Add-WdaEntryFields $e 'app' }
     foreach ($e in @($s.additional.Values)) { Add-WdaEntryFields $e 'additional' }
+    foreach ($e in @($s.settings.Values)) { Add-WdaEntryFields $e 'settings' }
     $s.version = $script:StateVersion
     return $s
 }
@@ -2514,6 +2522,31 @@ function Initialize-WdaEntries {
         elseif ($new -and $e.status -eq 'RequiresInteraction') { $e.failureClass = 'Manual' }
     }
     foreach ($e in @($State.additional.Values)) { Add-WdaEntryFields $e 'additional' }
+    # Phase 6: one settings restore operation per adapter of the restoration plan.
+    foreach ($a in @(Get-WdaSettingsPlan $Config)) {
+        if ($State.settings.ContainsKey($a.id)) { continue }
+        $State.settings[$a.id] = @{ id = $a.id; name = $a.name; status = 'Pending'; attempts = 0; exitCode = ''; message = ''; updatedUtc = (Get-WdaNow).ToString('o')
+                                    restoreOutcome = 'Pending'; items = @(); followUps = @() }
+    }
+    foreach ($e in @($State.settings.Values)) { Add-WdaEntryFields $e 'settings' }
+}
+
+&lt;#
+    The settings restore plan of the configuration (engine 1.3.0, Phase 6), validated again here:
+    adapter ids, conflict policies and dependency keys must match strict patterns. Returns @() when
+    the configuration has no plan (every earlier configuration).
+#&gt;
+function Get-WdaSettingsPlan {
+    param([hashtable] $Config)
+    $plan = $(if ($Config.ContainsKey('settingsRestore')) { $Config['settingsRestore'] } else { $null })
+    if ($plan -isnot [hashtable] -or [string] $plan['backupId'] -notmatch '^[0-9a-f]{16}$' -or [string] $plan['manifestSha256'] -notmatch '^[0-9A-F]{64}$' -or [string] $plan['folderName'] -notmatch '^[A-Za-z0-9._-]{1,80}$') { return @() }
+    $out = @()
+    foreach ($a in @($plan['adapters'])) {
+        if ($a -isnot [hashtable] -or [string] $a['id'] -cnotmatch '^[a-z0-9][a-z0-9-]{0,31}$' -or [string] $a['conflict'] -notin 'keepExisting', 'restoreBackup', 'skip') { continue }
+        $after = @(@($a['after']) | Where-Object { [string] $_ -cmatch '^(winget|msstore):[a-z0-9][a-z0-9._+-]{0,127}$' })
+        $out += , @{ id = [string] $a['id']; name = $(if ($a['name']) { [string] $a['name'] } else { [string] $a['id'] }); conflict = [string] $a['conflict']; after = $after; installExtensions = [bool] $a['installExtensions'] }
+    }
+    return $out
 }
 
 &lt;#
@@ -2535,6 +2568,14 @@ function Resume-WdaEntries {
             $e.interrupted = $true
             Set-WdaPackage $e 'Pending' 'Checking again after the restart.'
         }
+    }
+    # A settings restore left Running is repeated: each item is compared with the backup first, so
+    # what was already written is not written again.
+    foreach ($e in @($State.settings.Values)) {
+        if ($e.status -ne 'Installing') { continue }
+        $e.interrupted = $true
+        Set-WdaPackage $e 'Pending' 'The previous restore was interrupted; restoring again (items already restored are only verified).'
+        if ($Paths) { Add-WdaAttempt $Paths $e @{ trigger = 'automatic'; attempt = [int] $e.totalAttempts; endUtc = (Get-WdaNow).ToString('o'); result = 'Interrupted'; class = 'Interrupted'; countsTowardLimit = $true; nextAction = 'restore again'; message = 'The engine stopped while restoring these settings.' } }
     }
 }
 
@@ -2592,9 +2633,21 @@ function Complete-Wda {
         foreach ($k in $x.Keys) { $o[$k] = $x[$k] }
         $o
     })
+    $settings = @($State.settings.Values | Sort-Object { $_.id } | ForEach-Object {
+        $o = [ordered]@{ id = $_.id; name = $_.name; status = $_.status; restoreOutcome = [string] $_['restoreOutcome']; attempts = [int] $_.attempts; message = $_.message; timestampUtc = $_.updatedUtc
+                         items = @($_['items'] | Where-Object { $_ }); followUps = @($_['followUps'] | Where-Object { $_ }) }
+        $x = &amp; $resilience $_
+        foreach ($k in $x.Keys) { $o[$k] = $x[$k] }
+        $o
+    })
     $followUp = @()
     $outstanding = @()
-    foreach ($e in $packages + $additional) {
+    foreach ($e in $settings) {
+        if ($e.status -notin 'Succeeded', 'AlreadyInstalled', 'SkippedByUser' -or $e.restoreOutcome -eq 'ConfigurationPartiallyRestored') { $followUp += ('{0} settings [{1}]: {2}' -f $e.name, $e.restoreOutcome, $e.message) }
+        foreach ($f in @($e.followUps)) { $followUp += ('{0} settings: {1}' -f $e.name, $f) }
+    }
+    if ($Config.ContainsKey('migration') -and $Config['migration'] -is [hashtable]) { foreach ($f in @($Config['migration']['followUps'] | Where-Object { $_ } | Select-Object -First 300)) { $followUp += "Migration: $f" } }
+    foreach ($e in $packages + $additional + $settings) {
         if ($e.status -in 'RequiresInteraction', 'RequiresRestart', 'Failed', 'Unavailable', 'Pending', 'Skipped') { $followUp += ('{0} [{1}]: {2}' -f $e.name, $e.status, $e.message) }
         elseif ($e.Contains('key') -and $State.packages.ContainsKey($e.key) -and $State.packages[$e.key].ContainsKey('shortcutFailed') -and $State.packages[$e.key].shortcutFailed) { $followUp += ('{0} [shortcut]: {1}' -f $e.name, $e.message) }
         elseif ($e.status -eq 'Succeeded' -and $e.detection -eq 'Unconfirmed') { $followUp += ('{0} [unconfirmed]: {1}' -f $e.name, $e.message) }
@@ -2627,7 +2680,15 @@ function Complete-Wda {
         recoveries         = @($State.recoveries)
         stateRecoveredFrom = [string] $State.recoveredFrom
     }
+    # Phase 6: only when the deployment restores settings or migrates applications, so earlier results keep their shape.
+    if (@(Get-WdaSettingsPlan $Config).Count) {
+        $result.settings = $settings
+        $result.settingsBackup = [ordered]@{ status = $(if ($State.backup) { [string] $State.backup['status'] } else { 'NotSearched' }); message = $(if ($State.backup) { [string] $State.backup['message'] } else { '' }) }
+    }
     Write-WdaJson $Paths.Result $result
+    if (@(Get-WdaSettingsPlan $Config).Count -or ($Config.ContainsKey('migration') -and $Config['migration'] -is [hashtable])) {
+        try { Write-WdaJson $Paths.Restoration (Get-WdaRestoration $Config $State $Status $packages $settings) } catch { Write-WdaLog "Could not write restoration.json: $($_.Exception.Message)" 'WARN' }
+    }
     $State.final = $Status
     Save-WdaState $State $Paths
     $text = @("Windows Deployment Builder - application setup: $Status", $Reason, '') + @($followUp | ForEach-Object { "- $_" })
@@ -2646,6 +2707,52 @@ function Complete-Wda {
     Set-WdaStatus $Status $Reason $State
     Unregister-WdaTask $Config
     return "Finished:$Status"
+}
+
+&lt;#
+    The structured restoration result (restoration.json, Phase 6): for every application of the
+    migration plan and every settings adapter, one outcome from a fixed vocabulary:
+      InstalledSuccessfully, AlreadyInstalled, ConfigurationRestored, ConfigurationPartiallyRestored,
+      KeptExisting, ManualActionRequired, WaitingForUser, WaitingForBackup, BlockedByDependency,
+      Unsupported, Failed, SkippedByUser, Pending.
+    Read by people (follow-up), the deployment report and the later health verification.
+#&gt;
+function Get-WdaRestoration {
+    param([hashtable] $Config, [hashtable] $State, [string] $Status, [object[]] $Packages, [object[]] $Settings)
+    $appOutcome = @{ Succeeded = 'InstalledSuccessfully'; AlreadyInstalled = 'AlreadyInstalled'; SkippedByUser = 'SkippedByUser'; RequiresInteraction = 'ManualActionRequired'
+                     RequiresRestart = 'ManualActionRequired'; Skipped = 'BlockedByDependency'; Failed = 'Failed'; Unavailable = 'Failed'; Pending = 'Pending'; Installing = 'Pending' }
+    $mig = $(if ($Config.ContainsKey('migration') -and $Config['migration'] -is [hashtable]) { $Config['migration'] } else { @{} })
+    $apps = @()
+    foreach ($m in @($mig['applications'])) {
+        if ($m -isnot [hashtable]) { continue }
+        $key = ([string] $m['key']).ToLowerInvariant()
+        $decision = [string] $m['decision']
+        $o = 'Unsupported'; $detail = ''
+        if ($decision -eq 'exclude') { $o = 'SkippedByUser'; $detail = 'Excluded from this migration.' }
+        elseif ($key -like 'additional:*' -and $State.additional.ContainsKey($key.Substring(11))) { $x = $State.additional[$key.Substring(11)]; $o = $(if ($appOutcome.ContainsKey($x.status)) { $appOutcome[$x.status] } else { 'Pending' }); $detail = [string] $x.message }
+        elseif ($key -and $State.packages.ContainsKey($key)) { $x = $State.packages[$key]; $o = $(if ($appOutcome.ContainsKey($x.status)) { $appOutcome[$x.status] } else { 'Pending' }); $detail = [string] $x.message }
+        elseif ($decision -eq 'optional') { $o = 'SkippedByUser'; $detail = 'Kept as optional and not selected for this deployment.' }
+        elseif ($decision -eq 'manual') { $o = 'ManualActionRequired'; $detail = 'Install it by hand (no unattended installation is available).' }
+        else { $detail = 'No supported installation method.' }
+        $apps += , [ordered]@{ inventoryId = [string] $m['inventoryId']; displayName = [string] $m['displayName']; decision = $decision; key = $key; outcome = $o; detail = $detail }
+    }
+    $set = @($Settings | ForEach-Object { [ordered]@{ adapterId = $_.id; name = $_.name; outcome = $(if ($_.restoreOutcome) { $_.restoreOutcome } else { 'Pending' }); detail = $_.message; items = @($_.items); followUps = @($_.followUps); attempts = $_.totalAttempts } })
+    $counts = [ordered]@{}
+    foreach ($x in @($apps) + @($set)) { $k = [string] $x.outcome; if ($counts.Contains($k)) { $counts[$k]++ } else { $counts[$k] = 1 } }
+    $plan = $(if ($Config.ContainsKey('settingsRestore')) { $Config['settingsRestore'] } else { $null })
+    [ordered]@{
+        format        = 'windows-deployment-builder/restoration-result'
+        formatVersion = 1
+        generatedUtc  = (Get-WdaNow).ToString('o')
+        stageStatus   = $Status
+        inventoryId   = [string] $mig['inventoryId']
+        backupId      = $(if ($plan -is [hashtable]) { [string] $plan['backupId'] } else { '' })
+        backup        = [ordered]@{ status = $(if ($State.backup) { [string] $State.backup['status'] } elseif ($plan) { 'NotSearched' } else { 'None' }); message = $(if ($State.backup) { [string] $State.backup['message'] } else { '' }) }
+        applications  = @($apps)
+        settings      = @($set)
+        followUps     = @(@($mig['followUps']) | Where-Object { $_ } | ForEach-Object { [string] $_ } | Select-Object -First 300)
+        counts        = $counts
+    }
 }
 
 function Request-WdaReboot {
@@ -2685,6 +2792,10 @@ function Get-WdaFinalStatus {
     if ($c.requiresInteraction -gt 0 -or $c.requiresRestart -gt 0) { return 'CompletedWithFollowUp' }
     # Phase 5: a success WinGet reported but winget list cannot confirm is not a silent success.
     if (@($State.packages.Values | Where-Object { $_.status -eq 'Succeeded' -and $_['detection'] -eq 'Unconfirmed' }).Count) { return 'CompletedWithFollowUp' }
+    # Phase 6: settings restore operations (counted on their own; the package counts are unchanged).
+    $settings = @($State.settings.Values)
+    if (@($settings | Where-Object { $_.status -eq 'Failed' }).Count) { return 'CompletedWithFailures' }
+    if (@($settings | Where-Object { $_.status -notin 'Succeeded', 'AlreadyInstalled', 'SkippedByUser' -or $_['restoreOutcome'] -eq 'ConfigurationPartiallyRestored' }).Count) { return 'CompletedWithFollowUp' }
     return 'Succeeded'
 }
 
@@ -2766,6 +2877,145 @@ function Invoke-WdaAdditional {
             Exit-WdbInstallLock $lock
         }
         Write-WdaLog "  additional $($a.name): $($e.status) $($e.message)"
+    }
+    return $null
+}
+
+# ------------------------------------------------------------------------------------------------
+# Phase 6: application settings restore (after the applications they belong to)
+# ------------------------------------------------------------------------------------------------
+
+&lt;# Where a settings backup may be: the drop folder under the data root, then every ready drive. #&gt;
+function Get-WdaBackupCandidates {
+    param([hashtable] $Config, [string] $FolderName)
+    $out = @(Join-Path (Join-Path (Join-Path $Config.dataRoot 'Backup') 'incoming') $FolderName)
+    foreach ($d in [IO.DriveInfo]::GetDrives()) {
+        try { if (-not $d.IsReady -or [string] $d.DriveType -notin 'Removable', 'Fixed', 'Network') { continue } } catch { continue }
+        $out += Join-Path $d.RootDirectory.FullName "WindowsDeployment\backups\$FolderName"
+        $out += Join-Path $d.RootDirectory.FullName $FolderName
+    }
+    return $out
+}
+
+&lt;# The staged backup holds personal settings: SYSTEM, Administrators and this user only. #&gt;
+function Protect-WdaBackupFolder {
+    param([string] $Path)
+    $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    &amp; icacls.exe $Path /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' "*$($sid):(OI)(CI)F" /T /C /Q | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "icacls failed with exit code $LASTEXITCODE on $Path." }
+}
+
+&lt;#
+    Finds the settings backup of the plan, identified only by its folder name and the SHA-256 of its
+    manifest (pinned in the verified configuration), validates every file, copies it to
+    &lt;dataRoot&gt;\Backup\&lt;backupId&gt; and validates the copy. A backup with any other hash, a modified
+    file, a link or an unexpected path is rejected. Returns the validated staged backup or $null.
+#&gt;
+function Invoke-WdaBackupStaging {
+    param([hashtable] $Config, [hashtable] $Paths, [hashtable] $State)
+    $plan = $Config['settingsRestore']
+    if (-not @(Get-WdaSettingsPlan $Config).Count) { return $null }
+    if (-not (Get-Command Test-WdbBackup -CommandType Function -ErrorAction SilentlyContinue)) {
+        $State.backup = @{ status = 'LibraryMissing'; atUtc = (Get-WdaNow).ToString('o'); message = 'WdbMigration.ps1 is not among the engine files; settings cannot be restored.' }
+        return $null
+    }
+    $target = Join-Path $Paths.Backup ([string] $plan['backupId'])
+    if ($State.backup -and $State.backup['status'] -eq 'Staged' -and (Test-Path -LiteralPath $target)) {
+        $v = Test-WdbBackup $target ([string] $plan['manifestSha256'])
+        if ($v.Ok) { return $v }
+        Write-WdaLog "The staged settings backup no longer validates ($($v.Problems -join ' ')); looking for it again." 'WARN'
+    }
+    $rejected = @()
+    foreach ($c in @(Get-WdaBackupCandidates $Config ([string] $plan['folderName']))) {
+        if (-not (Test-Path -LiteralPath (Join-Path $c 'backup-manifest.json'))) { continue }
+        $v = Test-WdbBackup $c ([string] $plan['manifestSha256'])
+        if (-not $v.Ok) { $rejected += $c; Write-WdaLog "Settings backup at $c rejected: $(@($v.Problems)[0])" 'WARN'; continue }
+        try {
+            $staged = Copy-WdbBackup $v $target
+            Protect-WdaBackupFolder $target
+        } catch { $rejected += $c; Write-WdaLog "Settings backup at $c could not be staged: $($_.Exception.Message)" 'WARN'; continue }
+        $State.backup = @{ status = 'Staged'; source = $c; atUtc = (Get-WdaNow).ToString('o'); message = "Staged from $c and verified (manifest SHA-256 $($plan['manifestSha256']))." }
+        Write-WdaLog "Settings backup $($plan['backupId']) staged from $c and verified."
+        return $staged
+    }
+    $searches = $(if ($State.backup -and $State.backup.ContainsKey('searches')) { [int] $State.backup['searches'] + 1 } else { 1 })
+    $State.backup = @{ status = $(if ($rejected.Count) { 'Invalid' } else { 'NotFound' }); atUtc = (Get-WdaNow).ToString('o'); searches = $searches
+                       message = $(if ($rejected.Count) { "A backup named $($plan['folderName']) was found but did not validate (modified, incomplete or a different backup)." } else { "The settings backup $($plan['folderName']) was not found on any drive." }) }
+    return $null
+}
+
+# Outcome of WdbMigration's Invoke-WdbAdapterRestore -&gt; engine status, restoration outcome.
+$script:SettingsOutcomes = @{
+    Restored = @('Succeeded', 'ConfigurationRestored'); AlreadyRestored = @('Succeeded', 'ConfigurationRestored'); PartiallyRestored = @('Succeeded', 'ConfigurationPartiallyRestored')
+    KeptExisting = @('AlreadyInstalled', 'KeptExisting'); SkippedByUser = @('SkippedByUser', 'SkippedByUser'); WaitingForUser = @('RequiresInteraction', 'WaitingForUser')
+    ManualActionRequired = @('RequiresInteraction', 'ManualActionRequired'); Unsupported = @('Unavailable', 'Unsupported'); Failed = @('Failed', 'Failed')
+}
+
+&lt;#
+    Restores the settings of the plan, adapter by adapter, once their applications are installed:
+      - an application that failed, was skipped or needs a person blocks its settings (retryable);
+      - a missing or invalid backup is a manual action with instructions (recovery tool), never a guess;
+      - "close the application" / "not registered yet" is retried a few times with backoff within the
+        run, then becomes WaitingForUser (never retried indefinitely);
+      - a restored operation is never repeated; an interrupted one only re-verifies what it wrote.
+#&gt;
+function Invoke-WdaSettings {
+    param([hashtable] $Config, [hashtable] $Paths, [hashtable] $State)
+    $plan = @(Get-WdaSettingsPlan $Config)
+    if (-not $plan.Count -or -not @($plan | Where-Object { $State.settings[$_.id].status -eq 'Pending' }).Count) { return $null }
+    $policy = Get-WdaRetryPolicy $Config
+    Set-WdaStatus 'RestoringSettings' '' $State
+    $backup = Invoke-WdaBackupStaging $Config $Paths $State
+    Save-WdaState $State $Paths
+    $cfg = $Config['settingsRestore']
+    $where = "the USB drive as WindowsDeployment\backups\$($cfg['folderName']) or to $(Join-Path $Paths.Backup 'incoming')"
+    foreach ($a in $plan) {
+        $e = $State.settings[$a.id]
+        if ($e.status -ne 'Pending') { continue }
+        $blocked = $null; $restart = $null
+        foreach ($k in @($a.after)) {
+            $d = $State.packages[$k]
+            if (-not $d) { continue }
+            if ($d.status -eq 'RequiresRestart') { $restart = $d.name }
+            elseif ($d.status -notin 'Succeeded', 'AlreadyInstalled') { $blocked = $d.name }
+        }
+        if ($blocked -or $restart) {
+            $e.failureClass = 'Dependency'; $e.retryable = $true; $e.restoreOutcome = 'BlockedByDependency'
+            Set-WdaPackage $e 'Skipped' $(if ($blocked) { "Not restored: $blocked was not installed." } else { "Not restored yet: $restart needs a restart to finish." })
+            continue
+        }
+        if (-not $backup) {
+            $e.failureClass = 'User'; $e.retryable = $true; $e.restoreOutcome = $(if ($State.backup -and $State.backup['status'] -eq 'LibraryMissing') { 'Failed' } else { 'WaitingForBackup' })
+            Set-WdaPackage $e 'RequiresInteraction' "$($State.backup['message']) Copy it to $where, then run Deployment recovery and choose Restore application settings (-Action RestoreSettings)."
+            continue
+        }
+        for ($try = 1; ; $try++) {
+            $e.attempts = [int] $e.attempts + 1
+            $e.totalAttempts = [int] $e.totalAttempts + 1
+            Set-WdaPackage $e 'Installing' "Restoring settings ($($a.conflict))."
+            Save-WdaState $State $Paths
+            $started = (Get-WdaNow).ToString('o')
+            try {
+                $r = Invoke-WdbAdapterRestore $backup $a.id $a.conflict -UndoRoot (Join-Path (Join-Path $Paths.Backup ([string] $cfg['backupId'])) 'before-restore') -InstallExtensions:$a.installExtensions
+            } catch {
+                $r = @{ Outcome = 'Failed'; Class = 'Transient'; Message = "Restore error: $($_.Exception.Message)"; Items = @(); FollowUps = @() }
+            }
+            $map = $script:SettingsOutcomes[[string] $r.Outcome]
+            if (-not $map) { $map = @('Failed', 'Failed') }
+            $e.items = @($r.Items); $e.followUps = @($r.FollowUps | Select-Object -First 20)
+            $e.failureClass = $(if ($r.Class) { [string] $r.Class } elseif ($map[0] -eq 'RequiresInteraction') { 'Manual' } else { '' })
+            $e.restoreOutcome = $map[1]
+            $again = ($r.Outcome -eq 'WaitingForUser' -or ($r.Outcome -eq 'Failed' -and $e.failureClass -notin $script:PermanentClasses)) -and $policy.automatic -and $try -lt $policy.maxAttempts
+            $e.retryable = ($map[0] -in 'Failed', 'RequiresInteraction') -and $e.restoreOutcome -ne 'ManualActionRequired' -and $e.failureClass -ne 'Integrity'
+            Set-WdaPackage $e $(if ($again) { 'Pending' } else { $map[0] }) ([string] $r.Message)
+            $wait = $(if ($again) { Get-WdaBackoffSeconds $policy $try } else { 0 })
+            Add-WdaAttempt $Paths $e @{ trigger = 'automatic'; attempt = [int] $e.totalAttempts; startUtc = $started; endUtc = (Get-WdaNow).ToString('o'); result = [string] $r.Outcome; class = [string] $e.failureClass
+                countsTowardLimit = $true; nextAction = $(if ($again) { "retry in $wait s" } elseif ($e.retryable) { 'recovery tool (RetryFailed)' } else { 'none' }); rebootRequired = $false; message = [string] $r.Message }
+            Write-WdaLog "  settings $($a.name): $($r.Outcome). $($r.Message)" $(if ($map[0] -in 'Succeeded', 'AlreadyInstalled', 'SkippedByUser') { 'INFO' } else { 'WARN' })
+            Save-WdaState $State $Paths
+            if (-not $again) { break }
+            Wait-Wda $wait
+        }
     }
     return $null
 }
@@ -3038,6 +3288,17 @@ function Invoke-WdaRetry {
                 if ($life -eq 'FailedPermanent' -and -not $IncludePermanent) { return "permanent failure ($($e.failureClass)): correct the cause, then retry with -IncludePermanent" }
                 return $null
             }
+            if ($Id -cmatch '^settings:[a-z0-9][a-z0-9-]{0,31}$') {
+                $e = $State.settings[$Id.Substring(9)]
+                if (-not $e) { return 'not part of this deployment' }
+                if ($e.status -in 'Succeeded', 'AlreadyInstalled') { return 'already restored (or the existing settings were kept by the conflict policy)' }
+                if ($e.status -eq 'SkippedByUser') { return 'skipped by the conflict policy' }
+                if ($e.status -eq 'Unavailable') { return 'the backup has no settings for it' }
+                if ($e.status -eq 'Installing') { return 'a restore is in progress' }
+                if ($e['restoreOutcome'] -eq 'ManualActionRequired') { return 'needs manual action: review the restored files' }
+                if ($e.failureClass -eq 'Integrity' -and -not $IncludePermanent) { return 'the backup failed verification: supply the correct backup, then retry with -IncludePermanent' }
+                return $null
+            }
             if ($Id -cmatch '^additional:[A-Za-z0-9][A-Za-z0-9._-]{0,63}$') {
                 $k = $Id.Substring(11)
                 $e = $State.additional[$k]
@@ -3058,10 +3319,14 @@ function Invoke-WdaRetry {
                 if ($want -and $byKey.ContainsKey($e.key)) { $targets.Add($e.operationId) }
             }
             if (-not $PendingOnly) { foreach ($e in @($State.additional.Values)) { if ($e.status -in 'Failed', 'Pending' -and $automatic.ContainsKey([string] $e.id)) { $targets.Add($e.operationId) } } }
+            foreach ($e in @($State.settings.Values)) {
+                $want = $(if ($PendingOnly) { $e.status -eq 'Pending' } else { $e.status -in 'Pending', 'Skipped' -or ($e.status -eq 'Failed' -and ($IncludePermanent -or $e.failureClass -ne 'Integrity')) -or ($e.status -eq 'RequiresInteraction' -and $e['restoreOutcome'] -in 'WaitingForUser', 'WaitingForBackup') })
+                if ($want) { $targets.Add($e.operationId) }
+            }
         }
         foreach ($o in @($Operations | Where-Object { $_ })) {
             $id = ([string] $o).Trim()
-            if ($id -notmatch '^(app|additional):') { $id = "app:$id" }
+            if ($id -notmatch '^(app|additional|settings):') { $id = "app:$id" }
             if ($id.StartsWith('app:')) { $id = $id.ToLowerInvariant() }
             if (-not $targets.Contains($id)) { $targets.Add($id) }
         }
@@ -3089,13 +3354,14 @@ function Invoke-WdaRetry {
         }
         $now = (Get-WdaNow).ToString('o')
         foreach ($id in $accepted) {
-            $e = $(if ($id.StartsWith('app:')) { $State.packages[$id.Substring(4)] } else { $State.additional[$id.Substring(11)] })
+            $e = $(if ($id.StartsWith('app:')) { $State.packages[$id.Substring(4)] } elseif ($id.StartsWith('settings:')) { $State.settings[$id.Substring(9)] } else { $State.additional[$id.Substring(11)] })
             $previous = "$($e.status): $($e.message)"
             Add-WdaAttempt $paths $e @{ trigger = 'manual'; attempt = [int] $e.totalAttempts; startUtc = $now; endUtc = $now; result = 'Reopened'; exitCode = [string] $e.exitCode
                 class = [string] $e.failureClass; countsTowardLimit = $false; nextAction = 'retry'; nextAttemptUtc = $null; rebootRequired = $false
                 message = "Retry requested$(if ($RequestedBy) { " by $RequestedBy" }). Previous: $previous" }
             $e.manualRetries = [int] $e.manualRetries + 1
             $e.attempts = 0; $e.networkDeferrals = 0; $e.nextAttemptUtc = $null; $e.waitingFor = ''; $e.interrupted = $false; $e.failureClass = ''; $e.retryable = $false
+            if ($id.StartsWith('settings:')) { $e.restoreOutcome = 'Pending' }
             Set-WdaPackage $e 'Pending' "Retry requested$(if ($RequestedBy) { " by $RequestedBy" }) (previous: $previous)"
         }
         # The stage runs again with a fresh time budget; its previous result is kept in history\.
@@ -3183,6 +3449,8 @@ function Invoke-WdaRun {
         if ($boot.Status -eq 'Healthy') { Invoke-WdaAvailability $Config $Paths $State $queue }
         Save-WdaState $State $Paths
     }
+    # Phase 6: stage the settings backup early, while the installation drive is most likely attached.
+    if (@(Get-WdaSettingsPlan $Config).Count -and -not ($State.backup -and $State.backup['status'] -eq 'Staged')) { [void] (Invoke-WdaBackupStaging $Config $Paths $State); Save-WdaState $State $Paths }
 
     # 2. Gate: Windows Update first.
     $polls = [int] $Config.gatePollMinutes
@@ -3238,6 +3506,11 @@ function Invoke-WdaRun {
         if (Test-WdaCanRestart $Config $State) { return Request-WdaReboot $Config $Paths $State "$($needRestart.Count) package(s) need a restart to finish" }
         foreach ($e in $needRestart) { $e.restart = ''; Set-WdaPackage $e 'RequiresRestart' "$($e.message) Restart the computer to finish (restarts not allowed by policy or limit)." }
     }
+
+    # 6. Phase 6: restore supported application settings, now that their applications are installed.
+    $out = Invoke-WdaSettings $Config $Paths $State
+    if ($out) { Save-WdaState $State $Paths; return $out }
+    Save-WdaState $State $Paths
 
     $final = Get-WdaFinalStatus $State
     $reason = switch ($final) {
@@ -3316,6 +3589,9 @@ if ($MyInvocation.InvocationName -ne '.') {
     $engineMode = $Mode
     $cfg = Get-WdaConfig $ConfigPath
     . (Join-Path $PSScriptRoot 'WinGetBootstrap.ps1')
+    # Phase 6: the settings restore library (present when the deployment restores settings).
+    $migrationLibrary = Join-Path $PSScriptRoot 'WdbMigration.ps1'
+    if (Test-Path -LiteralPath $migrationLibrary) { . $migrationLibrary -Mode Library }
     if ($engineMode -eq 'Retry') {
         $who = [Security.Principal.WindowsIdentity]::GetCurrent().Name
         $r = Invoke-WdaRetry $cfg -Operations $Operation -AllFailed:$AllFailed -PendingOnly:$PendingOnly -IncludePermanent:$IncludePermanent -RequestedBy $who
@@ -3680,7 +3956,9 @@ if (-not $Resume) {
 $source = (Resolve-Path -LiteralPath $PSScriptRoot).Path.TrimEnd('\')
 $target = (Resolve-Path -LiteralPath $installDir).Path.TrimEnd('\')
 if ($source -ne $target) {
-    foreach ($name in 'ApplicationEngine.ps1', 'WinGetBootstrap.ps1', 'applications-config.json', 'winget-packages.json') {
+    # WdbMigration.ps1 (Phase 6) is present only when the deployment restores application settings.
+    $optional = @('WdbMigration.ps1' | Where-Object { Test-Path -LiteralPath (Join-Path $source $_) })
+    foreach ($name in @('ApplicationEngine.ps1', 'WinGetBootstrap.ps1', 'applications-config.json', 'winget-packages.json') + $optional) {
         Copy-Item -LiteralPath (Join-Path $source $name) -Destination (Join-Path $target $name) -Force
         # The task runs the copy, so the copy must be exactly what was verified.
         if ((Get-FileHash -LiteralPath (Join-Path $source $name) -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath (Join-Path $target $name) -Algorithm SHA256).Hash) {
@@ -3737,7 +4015,7 @@ exit 1
 		<File path="C:\Windows\Setup\Scripts\Applications\applications-config.json">
 {
   "schemaVersion": 1,
-  "engineVersion": "1.2.0",
+  "engineVersion": "1.3.0",
   "dataRoot": "C:\\ProgramData\\WindowsDeploymentBuilder",
   "taskPath": "\\WindowsDeploymentBuilder\\",
   "taskName": "Applications",
@@ -5232,6 +5510,16 @@ function New-WddReport {
         resume      = "powershell.exe -ExecutionPolicy Bypass -File `"$tool`" -Action Resume"
         diagnostics = "powershell.exe -ExecutionPolicy Bypass -File `"$tool`" -Action ExportDiagnostics"
     }
+    # Phase 6: the application stage's restoration result (inventory migration and settings restore).
+    $restorationFile = Join-Path $Paths.Root 'Applications\restoration.json'
+    $restoration = Read-WddJson $restorationFile
+    $restorationReport = $null
+    if ($restoration -and $restoration['format'] -eq 'windows-deployment-builder/restoration-result') {
+        $restorationReport = [ordered]@{ file = $restorationFile; inventoryId = [string] $restoration['inventoryId']; backupId = [string] $restoration['backupId']
+                                         backup = $restoration['backup']; counts = $restoration['counts']
+                                         settings = @(@($restoration['settings']) | Where-Object { $_ } | ForEach-Object { [ordered]@{ adapterId = $_['adapterId']; name = $_['name']; outcome = $_['outcome']; detail = $_['detail'] } }) }
+        if (@($restoration['settings']).Count) { $recoveryCommands.restoreSettings = "powershell.exe -ExecutionPolicy Bypass -File `"$tool`" -Action RestoreSettings -BackupPath &lt;backup folder&gt;" }
+    }
     $outcome = Get-WddDeploymentOutcome @{ status = 'Completed'; overall = $Overall; message = $Reason } $null
     [ordered]@{
         format             = 'windows-deployment-builder/deployment-report'
@@ -5261,6 +5549,7 @@ function New-WddReport {
         logs               = [ordered]@{ deployment = $Paths.Log; windowsUpdate = (Join-Path $Paths.Root 'Updates\logs\engine.log'); applications = (Join-Path $Paths.Root 'Applications\logs\engine.log'); attempts = (Join-Path $Paths.Root 'Applications\logs\attempts.jsonl') }
         recovery           = "$(if ($hasTool) { "Recovery tool (as administrator; status, retry, resume, diagnostics): $($recoveryCommands.status). " })Resume only: powershell.exe -ExecutionPolicy Bypass -File `"$(Join-Path $Paths.Package 'scripts\orchestrator\Resume-Deployment.ps1')`""
         recoveryCommands   = $(if ($hasTool) { $recoveryCommands } else { $null })
+        restoration        = $restorationReport
     }
 }
 
@@ -5325,6 +5614,15 @@ function Format-WddReport {
         if (@($Report.outstanding).Count) {
             foreach ($x in $Report.outstanding) { $l.Add(('  {0,-22} {1} [{2}]: {3}' -f $x.lifecycle, $x.name, $x.operationId, $x.action)) }
         } else { $l.Add('  None.') }
+        $l.Add('')
+    }
+    if ($Report.Contains('restoration') -and $Report.restoration) {
+        $x = $Report.restoration
+        $l.Add('Application restoration')
+        if ($x.counts) { $l.Add('  ' + (($x.counts.Keys | Sort-Object | ForEach-Object { "$_ $($x.counts[$_])" }) -join ', ')) }
+        if ($x.backupId) { $l.Add("  Settings backup $($x.backupId): $($x.backup.status). $($x.backup.message)") }
+        foreach ($s in @($x.settings)) { $l.Add(('  {0,-32} {1}: {2}' -f $s.name, $s.outcome, $s.detail)) }
+        $l.Add("  Details: $($x.file)")
         $l.Add('')
     }
     $l.Add('Logs')
@@ -5547,6 +5845,11 @@ function Step-WddUpdatePolicy {
       -Action Resume             continues interrupted provisioning: unfinished operations, a
                                  missing task or monitor, a damaged deployment state (rebuilt from
                                  the manifest and the engines' own files)
+      -Action RestoreSettings -BackupPath &lt;folder or .zip&gt;
+                                 Phase 6: stages the application settings backup this deployment
+                                 expects (identified by the SHA-256 pinned in its configuration;
+                                 any other or modified backup is refused) and restores the settings
+                                 that are still outstanding; restored settings are never repeated
       -Action ExportDiagnostics [-OutputPath &lt;zip&gt;]
                                  logs, states, results and the report as one ZIP, with passwords
                                  and Wi-Fi keys removed; answer files and Wi-Fi profiles are never
@@ -5563,8 +5866,9 @@ function Step-WddUpdatePolicy {
 #&gt;
 [CmdletBinding()]
 param(
-    [ValidateSet('Menu', 'Status', 'PendingActions', 'RetryFailed', 'Retry', 'Resume', 'ExportDiagnostics')]
+    [ValidateSet('Menu', 'Status', 'PendingActions', 'RetryFailed', 'Retry', 'Resume', 'RestoreSettings', 'ExportDiagnostics')]
     [string] $Action = 'Menu',
+    [string] $BackupPath = '',
     [string[]] $Operation = @(),
     [switch] $IncludePermanent,
     [switch] $Json,
@@ -5574,7 +5878,7 @@ param(
 
 $script:RecoveryMain = $MyInvocation.InvocationName -ne '.'
 # Captured first: the scripts dot-sourced below bind their own parameters in this scope.
-$script:RecoveryArgs = @{ Action = $Action; Operation = @($Operation); IncludePermanent = [bool] $IncludePermanent; Json = [bool] $Json; OutputPath = $OutputPath; Elevate = [bool] $Elevate }
+$script:RecoveryArgs = @{ Action = $Action; BackupPath = $BackupPath; Operation = @($Operation); IncludePermanent = [bool] $IncludePermanent; Json = [bool] $Json; OutputPath = $OutputPath; Elevate = [bool] $Elevate }
 . (Join-Path $PSScriptRoot '..\common\DeploymentCommon.ps1')
 . (Join-Path $PSScriptRoot '..\bootstrap\Initialize-Deployment.ps1')
 . (Join-Path $PSScriptRoot '..\orchestrator\Show-DeploymentStatus.ps1')
@@ -5621,11 +5925,11 @@ function Get-WdrOperations {
     foreach ($f in 'state.json', 'state.json.bak') { $s = Read-WddJson (Join-Path $app $f); if ($s -and $s.ContainsKey('packages')) { break } }
     $ops = @()
     if (-not $s) { return @() }
-    foreach ($map in 'packages', 'additional') {
+    foreach ($map in 'packages', 'additional', 'settings') {
         if (-not $s.ContainsKey($map) -or $s[$map] -isnot [hashtable]) { continue }
         foreach ($e in @($s[$map].Values)) {
             if ($e -isnot [hashtable]) { continue }
-            $id = $(if ($e.ContainsKey('operationId') -and $e.operationId) { [string] $e.operationId } elseif ($map -eq 'packages') { "app:$($e['key'])" } else { "additional:$($e['id'])" })
+            $id = $(if ($e.ContainsKey('operationId') -and $e.operationId) { [string] $e.operationId } elseif ($map -eq 'packages') { "app:$($e['key'])" } elseif ($map -eq 'settings') { "settings:$($e['id'])" } else { "additional:$($e['id'])" })
             $life = $(if (Get-Command Get-WdaLifecycle -ErrorAction SilentlyContinue) { Get-WdaLifecycle $e } else { [string] $e.status })
             $ops += [ordered]@{ operationId = $id; name = [string] $e['name']; status = [string] $e['status']; lifecycle = $life; failureClass = [string] $e['failureClass']
                                 retryable = [bool] $e['retryable']; attempts = [int] $e['attempts']; totalAttempts = [int] $e['totalAttempts']; detection = [string] $e['detection']; message = [string] $e['message'] }
@@ -5811,8 +6115,17 @@ function Invoke-WdrRecovery {
 
         $reopen = ($accepted.Count -gt 0) -or ($Mode -eq 'Resume')
         if ($reopen) {
+            $stamp = (Get-WddNow).ToString('yyyyMMddHHmmss')
             if ($state.status -in 'Completed', 'IntegrityFailed' -and (Test-Path -LiteralPath $Paths.Marker)) {
-                Move-Item -LiteralPath $Paths.Marker -Destination "$($Paths.Marker).$((Get-WddNow).ToString('yyyyMMddHHmmss')).bak" -Force
+                Move-Item -LiteralPath $Paths.Marker -Destination "$($Paths.Marker).$stamp.bak" -Force
+            }
+            # The previous report is kept (reports\history\); the monitor writes a new one at the end.
+            foreach ($r in $Paths.ReportJson, $Paths.ReportText) {
+                if (Test-Path -LiteralPath $r) {
+                    $hist = Join-Path $Paths.Reports 'history'
+                    if (-not (Test-Path -LiteralPath $hist)) { New-Item -ItemType Directory -Path $hist -Force | Out-Null }
+                    Move-Item -LiteralPath $r -Destination (Join-Path $hist ("{0}-{1}{2}" -f [IO.Path]::GetFileNameWithoutExtension($r), $stamp, [IO.Path]::GetExtension($r))) -Force
+                }
             }
             $state.status = 'InProgress'
             $state.message = "Recovery ($Mode) by $($identity.Name)."
@@ -5832,6 +6145,41 @@ function Invoke-WdrRecovery {
     } finally {
         Exit-WddMutex $mutex
     }
+}
+
+&lt;#
+    Phase 6: makes the settings backup this deployment expects available and restores what is still
+    outstanding. The backup is identified only by the manifest SHA-256 pinned in the verified
+    application configuration; it is validated (every file, path and hash) by the restore library
+    of the staged package, copied to &lt;dataRoot&gt;\Backup\incoming\&lt;folder&gt; and validated again by the
+    engine before anything is restored. Then the outstanding settings operations are reopened
+    through the engine's own Retry logic (RetryFailed rules: restored ones are never repeated).
+#&gt;
+function Invoke-WdrRestoreSettings {
+    param([hashtable] $Manifest, [hashtable] $Paths, [string] $BackupPath)
+    Initialize-WddLogging $Paths
+    $identity = Get-WddIdentity
+    if (-not $identity.IsAdmin) { return @{ Outcome = 'NotElevated'; Message = 'Run the recovery tool as administrator.'; Accepted = @(); Refused = @() } }
+    $cfg = Get-WdrAppConfig $Paths
+    $plan = $(if ($cfg -and $cfg.ContainsKey('settingsRestore')) { $cfg['settingsRestore'] } else { $null })
+    if ($plan -isnot [hashtable] -or -not @(Get-WdaSettingsPlan $cfg).Count) { return @{ Outcome = 'NothingToDo'; Message = 'This deployment does not restore application settings.'; Accepted = @(); Refused = @() } }
+    if (-not $BackupPath) { return @{ Outcome = 'Refused'; Message = "Name the backup folder or ZIP with -BackupPath (expected: $($plan['folderName']))."; Accepted = @(); Refused = @() } }
+    $lib = Join-Path $Paths.Package 'scripts\applications\WdbMigration.ps1'
+    if (-not (Test-Path -LiteralPath $lib)) { return @{ Outcome = 'IntegrityFailed'; Message = 'The restore library is not part of the staged package.'; Accepted = @(); Refused = @() } }
+    if (-not (Get-Command Open-WdbBackup -CommandType Function -ErrorAction SilentlyContinue)) { . $lib -Mode Library }
+    $work = Join-Path $Paths.Root 'Backup\work'
+    if (-not (Test-Path -LiteralPath $work)) { New-Item -ItemType Directory -Path $work -Force | Out-Null }
+    try { $v = Open-WdbBackup $BackupPath $work ([string] $plan['manifestSha256']) } catch { return @{ Outcome = 'Refused'; Message = "The backup could not be opened: $($_.Exception.Message)"; Accepted = @(); Refused = @() } }
+    if (-not $v.Ok) {
+        Write-WddLog "RestoreSettings refused $BackupPath`: $(@($v.Problems) -join ' ')" 'WARN'
+        return @{ Outcome = 'IntegrityFailed'; Message = "The backup is not the one this deployment expects, or it is damaged: $(@($v.Problems) -join ' ') Nothing was restored."; Accepted = @(); Refused = @() }
+    }
+    $incoming = Join-Path (Join-Path $Paths.Root 'Backup\incoming') ([string] $plan['folderName'])
+    [void] (Copy-WdbBackup $v $incoming)
+    Write-WddLog "RestoreSettings: backup $($plan['backupId']) validated from $BackupPath and placed in $incoming."
+    $ops = @(Get-WdrOperations $Paths | Where-Object { $_.operationId -like 'settings:*' -and $_.status -notin 'Succeeded', 'AlreadyInstalled', 'SkippedByUser', 'Unavailable' } | ForEach-Object { $_.operationId })
+    if (-not $ops.Count) { return @{ Outcome = 'NothingToDo'; Message = 'The backup was validated and staged; no settings are outstanding.'; Accepted = @(); Refused = @() } }
+    return Invoke-WdrRecovery $Manifest $Paths 'Retry' -Operations $ops -IncludePermanent
 }
 
 # ------------------------------------------------------------------------------------------------
@@ -5858,7 +6206,7 @@ function Protect-WdrText {
 $script:DiagnosticFiles = @(
     'Deployment\status.json', 'Deployment\logs\*.log', 'Deployment\logs\*.log.1',
     'state\*.json', 'state\*.done', 'state\*.bak', 'state\*.corrupt*',
-    'reports\deployment-report.json', 'reports\deployment-report.txt',
+    'reports\deployment-report.json', 'reports\deployment-report.txt', 'reports\history\*.json',
     'Applications\state.json', 'Applications\state.json.bak', 'Applications\state.json.corrupt', 'Applications\status.json', 'Applications\result.json', 'Applications\follow-up.txt',
     'Applications\logs\*.log', 'Applications\logs\*.log.1', 'Applications\logs\attempts.jsonl', 'Applications\logs\packages\*.log', 'Applications\history\*.json',
     'Updates\state.json', 'Updates\status.json', 'Updates\result.json', 'Updates\policy-result.json', 'Updates\logs\*.log',
@@ -5926,8 +6274,13 @@ function Export-WdrDiagnostics {
 # ------------------------------------------------------------------------------------------------
 
 function Invoke-WdrAction {
-    param([hashtable] $Manifest, [hashtable] $Paths, [string] $Action, [string[]] $Operation = @(), [switch] $IncludePermanent, [switch] $Json, [string] $OutputPath = '')
+    param([hashtable] $Manifest, [hashtable] $Paths, [string] $Action, [string[]] $Operation = @(), [switch] $IncludePermanent, [switch] $Json, [string] $OutputPath = '', [string] $BackupPath = '')
     switch ($Action) {
+        'RestoreSettings' {
+            $r = Invoke-WdrRestoreSettings $Manifest $Paths $BackupPath
+            $text = $(if ($Json) { [pscustomobject]$r | ConvertTo-Json -Depth 6 } else { "RestoreSettings: $($r.Outcome). $($r.Message)" })
+            return @{ Text = $text; Exit = [int] $script:RecoveryExit[$r.Outcome] }
+        }
         'Status' {
             $st = Get-WdrStatus $Manifest $Paths
             return @{ Text = $(if ($Json) { $st | ConvertTo-Json -Depth 8 } else { Format-WdrStatus $st }); Exit = [int] $st.exitCode }
@@ -5959,6 +6312,7 @@ function Show-WdrMenu {
         Write-Output '  1  Refresh status            4  Retry one application'
         Write-Output '  2  Retry failed operations   5  Resume interrupted provisioning'
         Write-Output '  3  View pending actions      6  Export diagnostic report'
+        Write-Output '  7  Restore application settings from a backup folder'
         Write-Output '  0  Exit'
         $c = Read-Host 'Choose'
         $r = switch ($c) {
@@ -5972,8 +6326,9 @@ function Show-WdrMenu {
             }
             '5' { Invoke-WdrAction $Manifest $Paths 'Resume' }
             '6' { Invoke-WdrAction $Manifest $Paths 'ExportDiagnostics' }
+            '7' { Invoke-WdrAction $Manifest $Paths 'RestoreSettings' -BackupPath (Read-Host 'Backup folder or .zip (for example E:\WindowsDeployment\backups\WDB-AppBackup-...)') }
             '0' { return }
-            default { @{ Text = 'Choose 0-6.'; Exit = 0 } }
+            default { @{ Text = 'Choose 0-7.'; Exit = 0 } }
         }
         if ($r) { Write-Output ''; Write-Output $r.Text }
     }
@@ -5995,7 +6350,7 @@ if ($script:RecoveryMain) {
         Show-WdrMenu $manifest $paths
         exit 0
     }
-    $r = Invoke-WdrAction $manifest $paths $a.Action -Operation $a.Operation -IncludePermanent:$a.IncludePermanent -Json:$a.Json -OutputPath $a.OutputPath
+    $r = Invoke-WdrAction $manifest $paths $a.Action -Operation $a.Operation -IncludePermanent:$a.IncludePermanent -Json:$a.Json -OutputPath $a.OutputPath -BackupPath $a.BackupPath
     Write-Output $r.Text
     exit $r.Exit
 }
@@ -6086,13 +6441,13 @@ if ($script:RecoveryMain) {
   "format": "windows-deployment-builder/deployment-manifest",
   "manifestVersion": 1,
   "packageVersion": "1.1.0",
-  "packageId": "86199CAA2A656058",
+  "packageId": "58A977661694E12E",
   "scope": "answerFile",
   "generator": {
     "name": "Windows Deployment Builder",
     "orchestrator": "1.1.0",
     "windowsUpdateEngine": "1.1.0",
-    "applicationEngine": "1.2.0"
+    "applicationEngine": "1.3.0"
   },
   "dataRoot": "C:\\ProgramData\\WindowsDeploymentBuilder",
   "packageFolder": "WindowsDeployment",
@@ -6496,9 +6851,9 @@ if ($script:RecoveryMain) {
     {
       "path": "scripts/finalization/Complete-Deployment.ps1",
       "role": "orchestrator",
-      "size": 19342,
-      "sha256": "01EF6102DEB735677F0565E6650EFC66FFC47B5256108FBF5D85CB4C672C7A96",
-      "textSha256": "920B19FB3FF550EB85E862896704660F3D018F80D01067F28B81BE2F918FCEE9",
+      "size": 21041,
+      "sha256": "33589C480DA6167D887A4CD2D64F0AE23D1D1A9B6AEA2DA0F9222137E9E78F55",
+      "textSha256": "F35F806C7412DDCB5DAC2DE2AE4A387BE85F5942C4C92FCBA9368400CB94E6D2",
       "embedded": "Deployment\\scripts\\finalization\\Complete-Deployment.ps1"
     },
     {
@@ -6512,9 +6867,9 @@ if ($script:RecoveryMain) {
     {
       "path": "scripts/recovery/DeploymentRecovery.ps1",
       "role": "orchestrator",
-      "size": 32824,
-      "sha256": "EFB746D7F1EE2796614453AEC5F3B5F86CA3541B5AD681AAE750067D1C15A67A",
-      "textSha256": "F2CEA3B9FF3A4622A8E0614DFD71BA0915DA1E82B2E658AE1E3B3AC9A459F5FA",
+      "size": 38102,
+      "sha256": "3E73F02F46FD6ABD5FDA19F4627FCD0F7747404CF1DCDDD7F016A27239BDF5F5",
+      "textSha256": "A2C325935C4FB29A708B0C508D6992BD3BE10FC806C0E7B4983176B5A17C3304",
       "embedded": "Deployment\\scripts\\recovery\\DeploymentRecovery.ps1"
     },
     {
@@ -6544,9 +6899,9 @@ if ($script:RecoveryMain) {
     {
       "path": "scripts/applications/ApplicationEngine.ps1",
       "role": "engine",
-      "size": 109348,
-      "sha256": "34E2CE680F0AA61F1BB7A6AAACFB92A7B0FC26C8766F9121B06C3E88C3949CDA",
-      "textSha256": "328295E8336E83C9C39D6AE89E43AF8B3A13DBA4F1BAC5F54DC0E857D4BDAD44",
+      "size": 131123,
+      "sha256": "503DDB47B0B08147E36D7D7655368B53CCC813365092CD8A0E84908539E9D231",
+      "textSha256": "7931BE32D77CFAB4ABA85CC14834D9687F2ED1F61807A2933201F9F404C7C4E0",
       "embedded": "Applications\\ApplicationEngine.ps1"
     },
     {
@@ -6560,17 +6915,17 @@ if ($script:RecoveryMain) {
     {
       "path": "scripts/applications/Install-ApplicationEngine.ps1",
       "role": "engine",
-      "size": 7901,
-      "sha256": "832D20E2ADDC67D93CA16DCCC18EA0EC66BC02A4683ED3750EB4B2D9BDC486EC",
-      "textSha256": "10F3B042D86E815271305C7F679291313285DE23F7B5D2EF2267D6096D5C9E15",
+      "size": 8121,
+      "sha256": "2C76DA9A86E59BEE539A274B8B90A93CACC6B74F493D89DB4F96550552C8D0E2",
+      "textSha256": "AB94EB38B01A87DE172C241557C59987B461DBC95D0AD2572417E535A0100610",
       "embedded": "Applications\\Install-ApplicationEngine.ps1"
     },
     {
       "path": "scripts/applications/applications-config.json",
       "role": "configuration",
       "size": 3754,
-      "sha256": "E6677E947A0C63BCBEA2F52A380AEBF2527B1AB283BECBA3C21A9AD92697B9F0",
-      "textSha256": "FCF80F5476F7D029F628595778FA505FB72C6AD6DCF2DBDE18A9FA5A614D53C5",
+      "sha256": "05D422AFBBED4FB1380463EF78AF1188A01F8263B59B2A04455E02B9655AE5FB",
+      "textSha256": "3FA89285CC261B91D91EF5B7ADD3A052C506D435FCB7D6F5747F5A02A716051E",
       "embedded": "Applications\\applications-config.json"
     },
     {

@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { AdditionalSoftwareSchema, ApplicationsSchema } from './applications';
+import { MigrationSchema } from './migration';
 
 /**
  * The typed deployment profile. One flat object per section; "mode" fields choose between
@@ -163,6 +164,9 @@ export const ProfileSchema = z
 
     /** Phase 3: installers that WinGet does not cover (data model; manual follow-up by default). */
     additionalSoftware: AdditionalSoftwareSchema,
+
+    /** Phase 6: application inventory review, migration profile and settings restore plan. */
+    migration: MigrationSchema,
 
     system: z
       .object({
