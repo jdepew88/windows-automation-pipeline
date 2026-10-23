@@ -17,6 +17,8 @@ interface IconInfo {
 }
 
 const MAP = (ICONS as { icons: Record<string, IconInfo> }).icons;
+/** Logos whose file failed to load in this session: drawn as initials on later renders. */
+const FAILED = new Set<string>();
 
 export const hasLogo = (id: string | undefined) => !!id && id in MAP;
 export const logoInfo = (id: string): IconInfo | undefined => MAP[id];
@@ -43,10 +45,17 @@ function fallback(name: string, category: string | undefined, size: string): HTM
  */
 export function appLogo(id: string | undefined, name: string, category?: string, size: 'sm' | 'md' | 'lg' = 'md'): HTMLElement {
   const info = id ? MAP[id] : undefined;
-  if (!info) return fallback(name, category, size);
+  if (!info || FAILED.has(id!)) return fallback(name, category, size);
   const wrap = h('span', { class: `app-logo ${size}${info.file.endsWith('.png') || id === 'sabnzbd' ? ' plain' : ''}`, 'data-logo': id, 'aria-hidden': 'true' });
   const img = h('img', { src: `${import.meta.env.BASE_URL}${info.file}`, alt: '', loading: 'lazy', decoding: 'async', draggable: 'false' });
-  img.addEventListener('error', () => wrap.replaceWith(fallback(name, category, size)), { once: true });
+  img.addEventListener(
+    'error',
+    () => {
+      FAILED.add(id!);
+      wrap.replaceWith(fallback(name, category, size));
+    },
+    { once: true },
+  );
   wrap.append(img);
   return wrap;
 }

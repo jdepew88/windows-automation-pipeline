@@ -36,7 +36,7 @@ import {
 } from '../engine/applications/profiles';
 import { exportWinGetJson } from '../engine/applications/winget-json';
 import { planPreview, wingetArguments } from '../engine/applications';
-import { clear, download, h, uid } from './dom';
+import { clear, download, h, patchChildren, render as patch, uid } from './dom';
 import { appLogo } from './app-icon';
 import { loadCatalogView, renderTile, saveCatalogView, viewSwitcher, type CatalogView, type ItemModel } from './catalog-view';
 import { customShell, type CustomRenderer } from './form';
@@ -305,7 +305,6 @@ export function createApplicationsEditor(def: Parameters<CustomRenderer>[0], sto
   const deviceNote = h('div', { class: 'device-note', 'data-testid': 'app-device-note', 'aria-live': 'polite' });
   const setDevices = (fn: (d: Devices) => void) => mutate((s) => fn(s.devices));
   function renderDevices(sel: ApplicationsSelection, r: SelectionResult): void {
-    clear(devicesBox);
     const phoneName = uid('ph');
     const radio = (value: Devices['phone'], label: string) => {
       const id = uid('ph');
@@ -325,20 +324,21 @@ export function createApplicationsEditor(def: Parameters<CustomRenderer>[0], sto
         label,
       );
     };
-    devicesBox.append(
+    patchChildren(devicesBox, [
       h('fieldset', { class: 'device-group' }, h('legend', {}, 'What type of smartphone does the customer use?'), h('div', { class: 'device-row' }, radio('iphone', 'iPhone'), radio('android', 'Android'), radio('none', 'Other / none'))),
       h('fieldset', { class: 'device-group' }, h('legend', {}, 'Other devices (tick all that apply)'), h('div', { class: 'device-row' }, check('ipad', 'iPad'), check('extraIphone', 'Additional iPhone'), check('androidTablet', 'Android tablet'))),
-    );
-    clear(deviceNote);
+    ]);
     const eff = effectiveDevices(sel);
     const savedOnly = JSON.stringify(eff) !== JSON.stringify(sel.devices);
-    if (r.deviceProfiles.length === 0) deviceNote.append(h('p', { class: 'desc' }, 'No device recommendations. Only the kind of device is recorded: no names, serial numbers or accounts.'));
-    for (const id of r.deviceProfiles) {
-      const p = BUILTIN_PROFILES.find((x) => x.id === id);
-      if (!p) continue;
-      deviceNote.append(h('p', { class: 'info', 'data-device-profile': id }, icon('info'), h('span', {}, h('strong', {}, `${p.name}: `), p.description)));
-    }
-    if (savedOnly) deviceNote.append(h('p', { class: 'desc' }, 'A ticked saved profile adds its own device answers too.'));
+    patch(deviceNote, (into) => {
+      if (r.deviceProfiles.length === 0) into.append(h('p', { class: 'desc' }, 'No device recommendations. Only the kind of device is recorded: no names, serial numbers or accounts.'));
+      for (const id of r.deviceProfiles) {
+        const p = BUILTIN_PROFILES.find((x) => x.id === id);
+        if (!p) continue;
+        into.append(h('p', { class: 'info', 'data-device-profile': id }, icon('info'), h('span', {}, h('strong', {}, `${p.name}: `), p.description)));
+      }
+      if (savedOnly) into.append(h('p', { class: 'desc' }, 'A ticked saved profile adds its own device answers too.'));
+    });
   }
 
   // Applications list ---------------------------------------------------------------------------
@@ -373,16 +373,15 @@ export function createApplicationsEditor(def: Parameters<CustomRenderer>[0], sto
   const filterChips = h('div', { class: 'chips', role: 'group', 'aria-label': 'Show', 'data-testid': 'app-filter' });
   const viewBox = h('div', { class: 'view-box' });
   const renderViewSwitch = () => {
-    clear(viewBox);
-    viewBox.append(
+    patchChildren(viewBox, [
       viewSwitcher(view, (v) => {
         view = v;
         saveCatalogView(v);
         renderViewSwitch();
         renderList();
-        viewBox.querySelector<HTMLElement>(`[data-view-mode="${v}"]`)?.focus();
+        viewBox.querySelector<HTMLElement>(`[data-view-mode="${v}"]`)?.focus({ preventScroll: true });
       }),
-    );
+    ]);
   };
   const list = h('div', { class: 'app-list', 'data-testid': 'app-catalog' });
 
@@ -624,9 +623,9 @@ export function createApplicationsEditor(def: Parameters<CustomRenderer>[0], sto
   function renderList(): void {
     const sel = current!;
     const r = result!;
-    clear(filterChips);
+    const chips: HTMLElement[] = [];
     for (const [value, label] of FILTERS) {
-      filterChips.append(
+      chips.push(
         h(
           'button',
           {
@@ -643,7 +642,14 @@ export function createApplicationsEditor(def: Parameters<CustomRenderer>[0], sto
         ),
       );
     }
-    clear(list);
+    patchChildren(filterChips, chips);
+    list.dataset.view = view;
+    // Built detached, then patched into the list: the tiles already shown are updated in place, never
+    // re-created (re-creating them removed the browser's scroll anchor and made the page jump).
+    patch(list, (out) => fillList(out, sel, r));
+  }
+
+  function fillList(list: HTMLElement, sel: ApplicationsSelection, r: SelectionResult): void {
     if (filter === 'excluded') {
       list.append(h('p', { class: 'desc' }, 'Deliberately left out of the curated catalog. If a customer really needs one, add it with its exact WinGet ID below; it is then installed like any other package.'));
       for (const x of CATALOG_EXCLUDED) list.append(h('div', { class: 'app-item excluded', 'data-excluded': x.name }, avatar(x.name), h('div', { class: 'app-main' }, h('div', { class: 'row-title' }, h('strong', {}, x.name), badge('not offered', 'muted')), h('span', { class: 'choice-desc' }, x.reason))));
@@ -678,15 +684,14 @@ export function createApplicationsEditor(def: Parameters<CustomRenderer>[0], sto
     const entries = searchCatalog(query, category).filter(show);
     const groups = new Map<CatalogCategory, CatalogEntry[]>();
     for (const e of entries) groups.set(e.category, [...(groups.get(e.category) ?? []), e]);
-    list.dataset.view = view;
     for (const [cat, items] of [...groups].sort((a, b) => Object.keys(CATALOG_CATEGORIES).indexOf(a[0]) - Object.keys(CATALOG_CATEGORIES).indexOf(b[0]))) {
       const drawn = view === 'detailed' ? items.map((e) => appRow(e, sel, r)) : items.map((e) => renderTile(view as Exclude<CatalogView, 'detailed'>, itemModel(e, sel, r), (on) => setApp(e, on)));
-      list.append(h('h5', { class: 'app-group' }, CATALOG_CATEGORIES[cat], h('span', { class: 'chip-count' }, String(items.length))), h('div', { class: `app-items view-${view}` }, drawn));
+      list.append(h('h5', { class: 'app-group', 'data-key': `group-${cat}` }, CATALOG_CATEGORIES[cat], h('span', { class: 'chip-count' }, String(items.length))), h('div', { class: `app-items view-${view}`, 'data-key': `items-${cat}` }, drawn));
     }
     // Packages added by custom ID (not in the catalog).
     if (!query && !category && filter !== 'recommended' && filter !== 'manual' && filter !== 'defaults') {
       const custom = [...(filter === 'deselected' ? [] : r.packages.filter((p) => !p.catalog)), ...(filter === 'selected' ? [] : r.removed.filter((p) => !p.catalog))];
-      if (custom.length) list.append(h('h5', { class: 'app-group' }, 'Added by ID', h('span', { class: 'chip-count' }, String(custom.length))), ...custom.map((x) => customRow(x, sel, r, !!x.removedBy)));
+      if (custom.length) list.append(h('h5', { class: 'app-group', 'data-key': 'group-custom' }, 'Added by ID', h('span', { class: 'chip-count' }, String(custom.length))), ...custom.map((x) => customRow(x, sel, r, !!x.removedBy)));
     }
     if (!list.childElementCount) {
       list.append(h('div', { class: 'empty-state' }, icon('package'), h('p', { class: 'empty' }, filter === 'relevant' ? 'Nothing selected or recommended yet. Tick a profile, or choose "All apps".' : 'No application matches. Try "All apps", another category, or add a package by ID below.')));
@@ -699,12 +704,11 @@ export function createApplicationsEditor(def: Parameters<CustomRenderer>[0], sto
     const unresolved = r.packages.filter((p) => p.resolution === 'unresolved');
     count.textContent = `${queue.length} to install${manual.length ? `, ${manual.length} manual` : ''}${unresolved.length ? `, ${unresolved.length} unresolved` : ''}`;
 
-    clear(stats);
     const stat = (n: number, label: string, tone = '', testid = '') => h('div', { class: `stat${tone ? ` ${tone}` : ''}`, 'data-testid': testid || undefined }, h('strong', {}, String(n)), h('span', {}, label));
     const deps = r.packages.filter((x) => x.origins.length === 1 && x.origins[0] === REQUIRED).length;
     const chosen = r.packages.length - deps;
     const warningCount = r.groupConflicts.length + r.conflicts.length + r.notices.filter((n) => n.kind !== 'info').length + unresolved.length;
-    stats.append(
+    patchChildren(stats, [
       stat(CATALOG.length, 'in the catalog', '', 'app-catalog-size'),
       stat(chosen, deps ? `selected (+${deps} required)` : 'selected', chosen ? 'ok' : '', 'app-selected'),
       stat(queue.length, 'to install', queue.length ? 'ok' : '', 'app-total'),
@@ -712,19 +716,20 @@ export function createApplicationsEditor(def: Parameters<CustomRenderer>[0], sto
       stat(warningCount, warningCount === 1 ? 'warning or conflict' : 'warnings or conflicts', r.groupConflicts.length ? 'err' : warningCount ? 'warn' : '', 'app-warning-count'),
       stat(r.removed.length, 'unticked by you'),
       stat(r.activeProfiles.length, `profile${r.activeProfiles.length === 1 ? '' : 's'} active`),
-    );
+    ]);
 
-    clear(warnings);
-    for (const g of r.groupConflicts) warnings.append(h('p', { class: 'error', 'data-kind': 'conflict-group' }, g.message));
-    for (const x of unresolved) warnings.append(h('p', { class: 'error', 'data-kind': 'unresolved' }, `${x.displayName}: ${x.reason}`));
-    for (const n of r.notices) warnings.append(h('p', { class: n.kind === 'info' ? 'info' : n.kind, 'data-kind': 'notice' }, n.message));
-    for (const c of r.conflicts) warnings.append(h('p', { class: 'warning', 'data-kind': 'conflict' }, c.message));
-    for (const id of r.missingProfiles) warnings.append(h('p', { class: 'error', 'data-kind': 'missing' }, `Selected profile "${id}" does not exist.`));
+    patch(warnings, (into) => {
+      for (const g of r.groupConflicts) into.append(h('p', { class: 'error', 'data-kind': 'conflict-group' }, g.message));
+      for (const x of unresolved) into.append(h('p', { class: 'error', 'data-kind': 'unresolved' }, `${x.displayName}: ${x.reason}`));
+      for (const n of r.notices) into.append(h('p', { class: n.kind === 'info' ? 'info' : n.kind, 'data-kind': 'notice' }, n.message));
+      for (const c of r.conflicts) into.append(h('p', { class: 'warning', 'data-kind': 'conflict' }, c.message));
+      for (const id of r.missingProfiles) into.append(h('p', { class: 'error', 'data-kind': 'missing' }, `Selected profile "${id}" does not exist.`));
+    });
 
-    clear(order);
-    if (queue.length === 0) order.append(h('li', { class: 'empty' }, 'Nothing to install.'));
+    const rows: HTMLElement[] = [];
+    if (queue.length === 0) rows.push(h('li', { class: 'empty' }, 'Nothing to install.'));
     for (const x of queue) {
-      order.append(
+      rows.push(
         h(
           'li',
           { 'data-package': x.key },
@@ -737,6 +742,7 @@ export function createApplicationsEditor(def: Parameters<CustomRenderer>[0], sto
         ),
       );
     }
+    patchChildren(order, rows);
 
     clear(manualBox);
     if (manual.length) {
@@ -772,11 +778,8 @@ export function createApplicationsEditor(def: Parameters<CustomRenderer>[0], sto
     renderViewSwitch();
     const r = result;
 
-    clear(builtinGrid);
-    for (const p of BUILTIN_PROFILES.filter((x) => isSelectableProfile(x.id))) builtinGrid.append(profileCard(p, selection, r));
-    clear(customGrid);
-    for (const p of selection.profiles) customGrid.append(profileCard(p, selection, r));
-    if (!selection.profiles.length) customGrid.append(h('p', { class: 'empty' }, 'No saved profiles yet. Set up the selection, then "Save as new profile…".'));
+    patchChildren(builtinGrid, BUILTIN_PROFILES.filter((x) => isSelectableProfile(x.id)).map((p) => profileCard(p, selection, r)));
+    patchChildren(customGrid, selection.profiles.length ? selection.profiles.map((p) => profileCard(p, selection, r)) : [h('p', { class: 'empty' }, 'No saved profiles yet. Set up the selection, then "Save as new profile…".')]);
     storageNote.textContent = profileLibrary.available
       ? 'Saved profiles are kept in this browser only (local storage). That is not a backup: clearing site data removes them, and other browsers or computers do not see them. Use Export for a portable copy.'
       : 'This browser does not allow local storage here, so saved profiles last only until the page is closed. Use Export to keep them.';

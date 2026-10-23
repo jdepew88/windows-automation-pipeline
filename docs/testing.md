@@ -37,6 +37,10 @@ Unit test coverage by acceptance criterion:
   - busy installer, already finished, pending restart, corrupt state;
   - single instance (mutex across processes), log content, config defaults.
 
+- **Quick Deployment application review and Advanced selection fix**: `app-preview.test.ts` (summary and
+  profile previews equal the generated configuration) and `app-review.spec.ts` (previews, Final Review
+  summary, and the Advanced catalog scroll regression in all four layouts); see
+  [phase-8-ui-review-and-app-selection-fixes](phase-8-ui-review-and-app-selection-fixes/implementation-report.md).
 - **Phase 8 (hardware-aware drivers)**: `drivers.test.ts`, `Drivers.Tests.ps1` (the engine of the
   real generated package against simulated hardware: fixtures A-H, selection, Windows Update,
   restarts, recovery, orchestrator and recovery-tool integration), driver scenarios in

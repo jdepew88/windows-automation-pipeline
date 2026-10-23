@@ -6,6 +6,7 @@ import { EDITIONS } from '../data';
 import { resolveIdentity, MAX_COMPUTER_NAME, MAX_USERNAME } from '../engine/naming';
 import { BUILTIN_PROFILES } from '../engine/applications/builtin';
 import { resolveSelection } from '../engine/applications/selection';
+import { effectiveApps, profilePreview } from '../engine/applications/preview';
 import { SETTINGS_BY_PATH } from '../features';
 import {
   CUSTOMER_TYPES,
@@ -34,8 +35,9 @@ import {
   type StepStatus,
 } from '../engine/quick';
 import { createApplicationsEditor } from './app-selection';
+import { effectiveAppsView, profilePreviewView, selectedAppsSummary } from './app-summary';
 import { currentPackage, downloadPackage } from './deployment';
-import { clear, h, uid } from './dom';
+import { clear, h, patchChildren, render as patch, uid } from './dom';
 import { icon, type IconName } from './icons';
 import type { Store } from './store';
 
@@ -279,6 +281,10 @@ export function renderWizard(ctx: WizardContext): WizardHandle {
   const deviceBox = h('div', { class: 'devices wiz-devices', 'data-testid': 'wiz-devices' });
   const deviceNote = h('div', { class: 'device-note', 'aria-live': 'polite', 'data-testid': 'wiz-device-note' });
   const locationBox = h('div', { 'data-testid': 'wiz-location' });
+  const combinedBox = h('div', { class: 'combined-box', 'data-testid': 'wiz-combined-box' });
+  // Which profile previews are open (view state of this session only, never part of the profile).
+  const openPreviews = new Set<string>();
+  let combinedOpen = false;
   panels.set(
     'type',
     h(
@@ -286,6 +292,7 @@ export function renderWizard(ctx: WizardContext): WizardHandle {
       { class: 'wiz-panel', 'data-step': 'type' },
       h('p', { class: 'wiz-lead' }, 'Tick everything that fits. Each type adds its default applications; you can still untick or add single apps in the next steps. Built-in profiles are never changed.'),
       typeGrid,
+      combinedBox,
       locationBox,
       h('h3', { class: 'wiz-sub' }, icon('laptop'), 'Phones and tablets'),
       h('p', { class: 'desc' }, 'Apple and Android can be combined. Only the kind of device is recorded.'),
@@ -296,33 +303,92 @@ export function renderWizard(ctx: WizardContext): WizardHandle {
 
   function renderType(p: Profile): void {
     const focusKey = (document.activeElement as HTMLElement | null)?.dataset?.wizKey;
-    clear(typeGrid);
+    const sel = p.applications.selection;
+    const r = resolveSelection(sel);
     const core = BUILTIN_PROFILES.find((x) => x.id === 'core')!;
+    // Selecting (the checkbox) and viewing (the button) are separate controls: viewing a profile's
+    // applications never ticks or unticks it.
     const card = (profile: string, label: string, hint: string, ico: IconName) => {
       const id = uid('wt');
       const on = isTypeSelected(p, profile);
+      const pv = profilePreview(sel, profile, r);
+      const open = !!pv && openPreviews.has(profile);
+      const regionId = `wiz-preview-${profile}`;
       return h(
-        'label',
-        { class: `type-card${on ? ' on' : ''}`, for: id, 'data-type': profile },
-        h('input', { type: 'checkbox', id, checked: on, 'data-wiz-key': `type-${profile}`, onchange: (e: Event) => mutate((q) => setCustomerType(q, profile, (e.target as HTMLInputElement).checked)) }),
-        h('span', { class: 'type-icon' }, icon(ico)),
-        h('span', { class: 'type-text' }, h('strong', {}, label), h('span', { class: 'choice-desc' }, hint)),
-        h('span', { class: 'tile-mark', 'aria-hidden': 'true' }, icon('check')),
+        'div',
+        { class: `type-item${on ? ' on' : ''}${open ? ' open' : ''}`, 'data-key': `type-item-${profile}` },
+        h(
+          'label',
+          { class: `type-card${on ? ' on' : ''}`, for: id, 'data-type': profile },
+          h('input', { type: 'checkbox', id, checked: on, 'data-wiz-key': `type-${profile}`, onchange: (e: Event) => mutate((q) => setCustomerType(q, profile, (e.target as HTMLInputElement).checked)) }),
+          h('span', { class: 'type-icon' }, icon(ico)),
+          h('span', { class: 'type-text' }, h('strong', {}, label), h('span', { class: 'choice-desc' }, hint)),
+          h('span', { class: 'tile-mark', 'aria-hidden': 'true' }, icon('check')),
+        ),
+        pv
+          ? h(
+              'button',
+              {
+                type: 'button',
+                class: 'linkish type-view',
+                'data-action': 'view-apps',
+                'data-view-apps': profile,
+                'data-wiz-key': `view-${profile}`,
+                'aria-expanded': String(open),
+                'aria-controls': open ? regionId : undefined,
+                'aria-label': `${open ? 'Hide' : 'View'} the applications of ${label} (${pv.count})`,
+                onclick: () => {
+                  if (openPreviews.has(profile)) openPreviews.delete(profile);
+                  else openPreviews.add(profile);
+                  renderType(store.get());
+                },
+              },
+              icon(open ? 'chevronUp' : 'chevronDown'),
+              open ? 'Hide applications' : `View applications (${pv.count})`,
+            )
+          : null,
+        open && pv ? profilePreviewView(pv, regionId) : null,
       );
     };
-    typeGrid.append(card('core', 'Core Essentials (every computer)', `${core.packages.map((x) => x.displayName.replace(/ \(.*\)$/, '')).filter((v, i, a) => a.indexOf(v) === i).slice(0, 6).join(', ')} and the Visual C++ runtimes`, 'star'));
-    for (const t of CUSTOMER_TYPES) typeGrid.append(card(t.profile, t.label, t.hint, TYPE_ICON[t.profile] ?? 'layers'));
+    const cards: HTMLElement[] = [];
+    cards.push(card('core', 'Core Essentials (every computer)', `${core.packages.map((x) => x.displayName.replace(/ \(.*\)$/, '')).filter((v, i, a) => a.indexOf(v) === i).slice(0, 6).join(', ')} and the Visual C++ runtimes`, 'star'));
+    for (const t of CUSTOMER_TYPES) cards.push(card(t.profile, t.label, t.hint, TYPE_ICON[t.profile] ?? 'layers'));
     // Saved profiles (this browser's library or imported) are offered next to the built-in types.
-    const saved = p.applications.selection.profiles;
+    const saved = sel.profiles;
     if (saved.length) {
-      typeGrid.append(h('h3', { class: 'wiz-sub span-all' }, icon('folder'), 'Saved profiles'));
-      for (const c of saved) typeGrid.append(card(c.id, c.name, c.description || `Saved profile · ${c.packages.length} app${c.packages.length === 1 ? '' : 's'}`, 'folder'));
+      cards.push(h('h3', { class: 'wiz-sub span-all', 'data-key': 'saved-head' }, icon('folder'), 'Saved profiles'));
+      for (const c of saved) cards.push(card(c.id, c.name, c.description || `Saved profile · ${c.packages.length} app${c.packages.length === 1 ? '' : 's'}`, 'folder'));
     }
+    // Patched, not rebuilt: the cards stay the same elements, so the page keeps its scroll position.
+    patchChildren(typeGrid, cards);
 
-    clear(locationBox);
+    // The combined selection after every ticked profile, device answer and individual change.
+    const apps = effectiveApps(sel, p.applications.enabled, r);
+    patchChildren(combinedBox, [
+      h(
+        'button',
+        {
+          type: 'button',
+          class: 'btn sm',
+          'data-action': 'view-combined',
+          'data-wiz-key': 'view-combined',
+          'aria-expanded': String(combinedOpen),
+          'aria-controls': combinedOpen ? 'wiz-combined' : undefined,
+          onclick: () => {
+            combinedOpen = !combinedOpen;
+            renderType(store.get());
+          },
+        },
+        icon(combinedOpen ? 'chevronUp' : 'layers'),
+        combinedOpen ? 'Hide the combined selection' : `View the combined selection (${apps.total} app${apps.total === 1 ? '' : 's'})`,
+      ),
+      combinedOpen ? h('div', { id: 'wiz-combined', role: 'region', 'aria-label': 'Combined application selection', class: 'combined-panel' }, h('p', { class: 'desc' }, 'Every ticked profile, the device answers and your individual changes together; an app selected by several profiles is installed once.'), effectiveAppsView(apps, { testid: 'wiz-combined', origins: true })) : null,
+    ]);
+
     const laptop = isTypeSelected(p, LAPTOP_PROFILE);
+    const loc: HTMLElement[] = [];
     if (laptop) {
-      locationBox.append(
+      loc.push(
         h(
           'label',
           { class: 'check-row callout' },
@@ -331,10 +397,10 @@ export function renderWizard(ctx: WizardContext): WizardHandle {
         ),
       );
     } else if (locationAllowed(p)) {
-      locationBox.append(customizedNote('Location services are allowed.', 'privacy.disableLocation', ctx));
+      loc.push(customizedNote('Location services are allowed.', 'privacy.disableLocation', ctx));
     }
+    patchChildren(locationBox, loc);
 
-    clear(deviceBox);
     const d = p.applications.selection.devices;
     const setDev = (fn: (x: Devices) => void) => mutate((q) => fn(q.applications.selection.devices));
     const phone = (value: Devices['phone'], label: string) => {
@@ -345,17 +411,17 @@ export function renderWizard(ctx: WizardContext): WizardHandle {
       const id = uid('wd');
       return h('label', { class: 'device-choice', for: id }, h('input', { type: 'checkbox', id, 'data-device': key, 'data-wiz-key': key, checked: d[key], onchange: (e: Event) => setDev((x) => (x[key] = (e.target as HTMLInputElement).checked)) }), label);
     };
-    deviceBox.append(
+    patchChildren(deviceBox, [
       h('fieldset', { class: 'device-group' }, h('legend', {}, 'Smartphone'), h('div', { class: 'device-row' }, phone('iphone', 'iPhone'), phone('android', 'Android phone'), phone('none', 'Other / none'))),
       h('fieldset', { class: 'device-group' }, h('legend', {}, 'Other devices'), h('div', { class: 'device-row' }, extra('ipad', 'iPad'), extra('extraIphone', 'Additional iPhone'), extra('androidTablet', 'Android tablet'))),
-    );
-    clear(deviceNote);
-    const r = resolveSelection(p.applications.selection);
-    if (r.deviceProfiles.length === 0) deviceNote.append(h('p', { class: 'desc' }, 'No device recommendations.'));
-    for (const id of r.deviceProfiles) {
-      const dp = BUILTIN_PROFILES.find((x) => x.id === id);
-      if (dp) deviceNote.append(h('p', { class: 'info', 'data-device-profile': id }, icon('info'), h('span', {}, h('strong', {}, `${dp.name}: `), dp.description)));
-    }
+    ]);
+    patch(deviceNote, (into) => {
+      if (r.deviceProfiles.length === 0) into.append(h('p', { class: 'desc' }, 'No device recommendations.'));
+      for (const id of r.deviceProfiles) {
+        const dp = BUILTIN_PROFILES.find((x) => x.id === id);
+        if (dp) into.append(h('p', { class: 'info', 'data-device-profile': id }, icon('info'), h('span', {}, h('strong', {}, `${dp.name}: `), dp.description)));
+      }
+    });
     if (focusKey) el.querySelector<HTMLElement>(`[data-wiz-key="${CSS.escape(focusKey)}"]`)?.focus({ preventScroll: true });
   }
 
@@ -549,7 +615,6 @@ export function renderWizard(ctx: WizardContext): WizardHandle {
     const cons = considerations(p, sel);
     const errors = issues.filter((i) => i.severity === 'error');
     const pendingAcks = cons.filter((c) => c.ack && !ctx.acks.has(ackKey(p, c.id)));
-    clear(reviewEl);
     const pkg = result.ok && errors.length === 0 ? currentPackage(p, result) : null;
     const ready = !!pkg && pendingAcks.length === 0;
     const status = h(
@@ -577,7 +642,7 @@ export function renderWizard(ctx: WizardContext): WizardHandle {
     const a = s.applications;
     const consList = cons.length ? h('ul', { class: 'considerations', 'data-testid': 'considerations' }, cons.map((x) => considerationEl(x, p))) : h('p', { class: 'desc' }, 'Nothing to consider for this configuration.');
     const files = pkg ? pkg.entries.length : 0;
-    reviewEl.append(
+    patchChildren(reviewEl, [
       status,
       h('div', { class: 'review-cols' },
         h('div', { class: 'review-col' },
@@ -629,7 +694,7 @@ export function renderWizard(ctx: WizardContext): WizardHandle {
             ['Your changes', `${a.added} added · ${a.unticked} unticked`],
             ['If something fails', a.enabled ? a.recovery : null],
             ['Conflicts', a.conflicts.length ? h('span', { class: 'err-text' }, a.conflicts.join(' ')) : null],
-          ], [], 'review-apps'),
+          ], [selectedAppsSummary(p.applications.selection, p.applications.enabled, sel)], 'review-apps'),
           section('Deployment package', 'usb', { label: 'Advanced', run: () => ctx.openAdvanced('section-deployment') }, [
             ['Installation media', s.package.media],
             ['Answer file', `${s.package.answerFile} at the root of the USB drive`],
@@ -647,7 +712,7 @@ export function renderWizard(ctx: WizardContext): WizardHandle {
         h('button', { type: 'button', class: 'btn primary hero', 'data-action': 'wiz-generate', disabled: !ready, onclick: () => generate() }, icon('archive'), h('span', { class: 'btn-stack' }, h('span', { class: 'btn-label' }, 'Generate Deployment ZIP'), h('span', { class: 'btn-sub' }, pkg ? `${pkg.fileName} · ${files} files` : 'Fix the problems above first'))),
         h('p', { class: 'desc' }, 'Built in this browser; nothing is uploaded. Extract it to the root of a Windows 11 installation USB drive. Downloading it does not install Windows or write to any drive.'),
       ),
-    );
+    ]);
     generateBottom.disabled = !ready;
   }
 
