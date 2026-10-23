@@ -19,7 +19,8 @@ describe('owner-default profile', () => {
     expect(p.accounts).toMatchObject({ accountMode: 'unattendedLocal', accountGroup: 'Administrators', password: '', autoLogon: 'persistent', computerNameMode: 'derived', usernameMode: 'derived', lockoutMode: 'default', passwordExpirationMode: 'default' });
     expect(p.security).toMatchObject({ uacLevel: 'noDim', disableSmartScreen: false, disableSmartAppControl: false, systemRestore: 'enable', preventDeviceEncryption: false, enableRemoteDesktop: false, processAudit: 'disabled', disableInsiderBuilds: true, appLockerMode: 'none' });
     expect(p.privacy.expressSettings).toBe('disableAll');
-    expect(p.updates).toEqual({ mode: 'notifyInstall', excludeDrivers: true, preventAutomaticReboot: false });
+    // Phase 9: Windows Update may supply compatible drivers to new deployments (the driver stage waits for it).
+    expect(p.updates).toEqual({ mode: 'notifyInstall', excludeDrivers: false, preventAutomaticReboot: false });
     expect(p.system).toMatchObject({ disableFastStartup: true, disableErrorReporting: true, powerShellExecutionPolicy: 'remoteSigned', hardenSystemDriveAcl: false, enableLongPaths: false, deleteJunctions: false, disableLastAccess: false, turnOffSystemSounds: false, deleteWindowsOld: false, disableAutomaticRestartSignOn: false, disableWpbt: false, preventDeviceApps: true, disablePointerPrecision: true, hideEdgeFirstRun: true, disableEdgeStartupBoost: true, makeEdgeUninstallable: false });
     expect(p.explorer).toMatchObject({ showFileExtensions: true, hiddenFiles: 'hideAll', launchToThisPC: true, classicContextMenu: false, removeShortcutArrows: true });
     expect(p.taskbar).toMatchObject({ leftAlign: true, search: 'icon', hideTaskView: false, disableWidgets: true });

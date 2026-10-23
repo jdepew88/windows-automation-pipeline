@@ -92,7 +92,7 @@ describe('driver policy and engine configuration', () => {
     expect(p.schemaVersion).toBe(SCHEMA_VERSION);
     expect(p.drivers).toMatchObject({ enabled: true, useWindowsUpdate: true, resolveMissing: true, includeOfflinePackages: true, optionalReplacements: 'never', reportUnresolved: true, networkBootstrap: true, bundle: null, verifiedPackages: [], approvals: [] });
     const c = driversConfig(p);
-    expect(c).toMatchObject({ schemaVersion: 1, engineVersion: DRIVER_ENGINE_VERSION, taskName: 'Drivers', policy: { optionalReplacements: 'never' }, windowsUpdate: { enabled: true, drivers: 'exclude' }, bundle: null, approvals: [] });
+    expect(c).toMatchObject({ schemaVersion: 1, engineVersion: DRIVER_ENGINE_VERSION, taskName: 'Drivers', policy: { optionalReplacements: 'never' }, windowsUpdate: { enabled: true, drivers: 'include' }, bundle: null, approvals: [] });
     expect(c.waitForUpdatesHours).toBe(p.windowsUpdate.maxRuntimeHours + 2);
     expect(c.maxRuntimeHours).toBeGreaterThan(c.waitForUpdatesHours);
     expect(c.sources.downloadHosts.length).toBeGreaterThan(5);
@@ -154,7 +154,7 @@ describe('deployment package integration', () => {
     const { manifest } = buildManifest(p);
     const st = manifest.stages.find((s) => s.id === 'drivers') as Record<string, unknown>;
     expect(st).toMatchObject({ enabled: true, implemented: true, context: 'SYSTEM', launcher: 'scripts/drivers/Install-DriverEngine.ps1', task: { path: '\\WindowsDeploymentBuilder\\', name: 'Drivers' }, waitsFor: ['windowsUpdate'] });
-    expect(manifest.drivers).toMatchObject({ implemented: true, enabled: true, policy: { windowsUpdateDrivers: 'exclude' } });
+    expect(manifest.drivers).toMatchObject({ implemented: true, enabled: true, policy: { windowsUpdateDrivers: 'include' } });
     expect(manifest.files.some((f) => f.path === 'scripts/drivers/DriverEngine.ps1' && f.embedded === 'Drivers\\DriverEngine.ps1')).toBe(true);
     expect(applicationsConfig(p).coordination.drivers).toMatchObject({ enabled: true, taskName: 'Drivers' });
     expect(orchestrationContract(p).stages.find((s) => s.id === 'applications')!.waitsFor).toEqual(['windowsUpdate', 'drivers']);

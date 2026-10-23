@@ -24,6 +24,8 @@ describe('Milestone 1 output is preserved', () => {
     const r = generate(profile((p) => {
       p.windowsUpdate.enabled = false;
       noApps(p);
+      // Milestone 1's owner default withheld drivers from quality updates; Phase 9 changed the default.
+      p.updates.excludeDrivers = true;
     }));
     expect(r.ok).toBe(true);
     expect(r.xml).toBe(M1_XML);
@@ -111,7 +113,7 @@ describe('engine configuration', () => {
     expect(engineConfig(profile())).toMatchObject({
       engineVersion: ENGINE_VERSION,
       dataRoot: 'C:\\ProgramData\\WindowsDeploymentBuilder',
-      drivers: 'exclude',
+      drivers: 'include',
       featureUpdates: 'skip',
       optionalUpdates: 'skip',
       microsoftUpdate: false,
@@ -163,7 +165,10 @@ describe('engine configuration', () => {
 
 describe('validation', () => {
   it('rejects including drivers while the driver policy withholds them', () => {
-    expect(errorsOf(profile((p) => (p.windowsUpdate.drivers = 'include')))).toEqual([
+    expect(errorsOf(profile((p) => {
+      p.windowsUpdate.drivers = 'include';
+      p.updates.excludeDrivers = true;
+    }))).toEqual([
       expect.objectContaining({ path: 'windowsUpdate.drivers', message: expect.stringMatching(/conflicts/) }),
     ]);
     expect(generate(profile((p) => {

@@ -11,6 +11,7 @@ import * as applications from './applications';
 import * as additionalSoftware from './additional-software';
 import * as migration from './migration';
 import * as drivers from './drivers';
+import * as health from './health';
 import * as system from './system';
 import * as explorer from './explorer';
 import * as taskbar from './taskbar';
@@ -56,6 +57,12 @@ export const SECTIONS: SectionDef[] = [
     intro:
       'Hardware is detected on the installed computer, not here. The deployment keeps every working driver, lets Windows Update go first, and installs a verified driver only where one is missing or not working; anything else is reported with what to do. BIOS and firmware are never updated.',
   },
+  {
+    id: 'health',
+    title: 'Deployment Verification & Health',
+    intro:
+      'At the end of the deployment the installed computer checks itself against Windows: what was requested, what was attempted and what actually works. A script that exited without an error is never taken as proof. Verification is read-only; repairs stay in the Deployment recovery tool.',
+  },
   { id: 'system', title: 'System tweaks' },
   { id: 'explorer', title: 'File Explorer' },
   { id: 'taskbar', title: 'Taskbar' },
@@ -82,6 +89,7 @@ export const ALL_SETTINGS: SettingDef[] = [
   ...additionalSoftware.settings,
   ...migration.settings,
   ...drivers.settings,
+  ...health.settings,
   ...system.settings,
   ...explorer.settings,
   ...taskbar.settings,
@@ -109,6 +117,7 @@ export const VALIDATORS: ((p: Profile, issues: Issue[]) => void)[] = [
   additionalSoftware.validate,
   migration.validate,
   drivers.validate,
+  health.validate,
   desktop.validate,
   start.validate,
   bloatware.validate,
@@ -117,4 +126,4 @@ export const VALIDATORS: ((p: Profile, issues: Issue[]) => void)[] = [
   advancedXml.validate,
 ];
 
-export { setup, accounts, security, privacy, updates, windowsUpdate, applications, additionalSoftware, migration, drivers, system, explorer, taskbar, desktop, start, personalization, bloatware, virtualization, wifi, scripts, advancedXml, output };
+export { setup, accounts, security, privacy, updates, windowsUpdate, applications, additionalSoftware, migration, drivers, health, system, explorer, taskbar, desktop, start, personalization, bloatware, virtualization, wifi, scripts, advancedXml, output };

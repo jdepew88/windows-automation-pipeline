@@ -26,6 +26,7 @@ import { isEffective, PHASES } from '../../features/scripts';
 import { sha256, utf8 } from './sha256';
 import { createZip } from './zip';
 import { mediaBlock } from '../media';
+import { EMBEDDED_HEALTH_FILES, HEALTH_DIR, HEALTH_ENGINE_VERSION, HEALTH_REPORT_DIR, HEALTH_REPORT_FILE, HEALTH_SHORTCUT, HEALTH_TOOL, healthActive, healthAssets } from '../health';
 
 /**
  * Phase 4: the USB deployment package and the first-boot orchestrator.
@@ -181,6 +182,17 @@ export function packageFiles(p: Profile): PackageFile[] {
       embedded: EMBEDDED_DRIVER_FILES.includes(a.name) ? `Drivers\\${a.name}` : null,
     });
   }
+  // Phase 9: the health engine, its plan and its report template (the README and schema ship in the package only).
+  for (const a of healthAssets(p)) {
+    const path = `${HEALTH_DIR}/${a.name}`;
+    files.push({
+      path,
+      content: a.content,
+      role: a.name.endsWith('.ps1') ? 'engine' : a.name.endsWith('.json') ? 'configuration' : 'documentation',
+      description: a.description,
+      embedded: EMBEDDED_HEALTH_FILES.includes(a.name) ? embeddedDeploymentPath(path) : null,
+    });
+  }
   for (const a of applicationAssets(p)) {
     if (a.name === APP_PROFILE_FILE) continue;
     files.push({
@@ -254,7 +266,7 @@ export function buildManifest(p: Profile) {
     packageId,
     /** package: the ZIP's manifest (every file); answerFile: the copy embedded in the answer file (embedded files only). */
     scope: 'package' as 'package' | 'answerFile',
-    generator: { name: 'Windows Deployment Builder', orchestrator: DEPLOYMENT_VERSION, windowsUpdateEngine: ENGINE_VERSION, applicationEngine: APP_ENGINE_VERSION, ...(drv ? { driverEngine: DRIVER_ENGINE_VERSION } : {}) },
+    generator: { name: 'Windows Deployment Builder', orchestrator: DEPLOYMENT_VERSION, windowsUpdateEngine: ENGINE_VERSION, applicationEngine: APP_ENGINE_VERSION, ...(drv ? { driverEngine: DRIVER_ENGINE_VERSION } : {}), ...(healthActive(p) ? { healthEngine: HEALTH_ENGINE_VERSION } : {}) },
     dataRoot: DATA_ROOT,
     packageFolder: PACKAGE_DIR,
     answerFile: {
@@ -433,8 +445,22 @@ export function buildManifest(p: Profile) {
           neverAutomated: ['BIOS and firmware updates', 'vendor EXE installers', 'removing or rolling back drivers', 'replacing a working driver without approval'],
         }
       : { implemented: true, enabled: false, note: 'Hardware-aware driver provisioning is off for this deployment; nothing installs or changes drivers.' },
+    // Phase 9: only when the deployment verifies itself, so other manifests keep their Phase 8 shape.
+    ...(healthActive(p)
+      ? {
+          verification: {
+            enabled: true,
+            tool: `${HEALTH_DIR}/DeploymentHealth.ps1`,
+            runsAt: 'end of the deployment (monitor, SYSTEM), again after a pending restart, and on demand',
+            readOnly: true,
+            reports: { directory: HEALTH_REPORT_DIR, json: HEALTH_REPORT_FILE, technician: p.health.technicianReport, customer: p.health.customerReport, history: true },
+            shortcut: HEALTH_SHORTCUT,
+            states: ['Ready', 'ReadyWithWarnings', 'NeedsAttention', 'Incomplete', 'Unverifiable', 'Failed'],
+          },
+        }
+      : {}),
     customScripts: { managedBy: 'answer file', ...Object.fromEntries(PHASES.map((ph) => [ph.phase, p.scripts[ph.phase].filter(isEffective).length])) },
-    paths: { package: PACKAGE_ROOT, state: DEPLOYMENT_STATE, status: DEPLOYMENT_STATUS, marker: DEPLOYMENT_MARKER, report: DEPLOYMENT_REPORT, monitorTask: `${MONITOR_TASK.path}${MONITOR_TASK.name}`, recoveryTool: recoveryToolIncluded(p) ? RECOVERY_TOOL : null },
+    paths: { package: PACKAGE_ROOT, state: DEPLOYMENT_STATE, status: DEPLOYMENT_STATUS, marker: DEPLOYMENT_MARKER, report: DEPLOYMENT_REPORT, monitorTask: `${MONITOR_TASK.path}${MONITOR_TASK.name}`, recoveryTool: recoveryToolIncluded(p) ? RECOVERY_TOOL : null, ...(healthActive(p) ? { healthTool: HEALTH_TOOL, healthReport: HEALTH_REPORT_FILE } : {}) },
     files: entries,
   };
   const runtime = { ...manifest, scope: 'answerFile' as const, files: entries.filter((e) => e.embedded) };
@@ -534,6 +560,7 @@ function stageLines(p: Profile): string {
       ? `  3. Hardware & drivers   on   (SYSTEM; inspects the hardware, waits for Windows Update, installs verified drivers only where needed${applicationsActive(p) ? '; applications start after it' : ''})`
       : '  3. Hardware & drivers   off  (nothing installs or changes drivers)',
     '  4. Report               C:\\ProgramData\\WindowsDeploymentBuilder\\reports\\deployment-report.txt',
+    ...(healthActive(p) ? [`  5. Verification         read-only health check of Windows itself; "${HEALTH_SHORTCUT}" on the desktop`] : []),
   ].join('\n');
 }
 

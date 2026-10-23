@@ -11,6 +11,10 @@
     -Watch refreshes every 15 seconds until the deployment has finished. The window that opens
     after the first sign-in runs this with -Watch; it can be closed at any time without affecting
     the deployment.
+
+    Phase 9: when the deployment verifies itself and its configuration asks for it, the watching
+    window opens the technician health report once, when verification has written it (never at a
+    later sign-in).
 #>
 [CmdletBinding()]
 param(
@@ -63,6 +67,17 @@ function Format-WddStatus {
     [pscustomobject]@{ Text = ($l -join "`r`n"); Done = [bool] ($State -and $State.status -in 'Completed', 'StagingFailed', 'IntegrityFailed') }
 }
 
+<# Phase 9: the technician report, once it has been written for the finished deployment. #>
+function Get-WddHealthReportToOpen {
+    param([hashtable] $Paths, $State)
+    $cfg = Read-WddJson (Join-Path $Paths.Package 'scripts\health\health-config.json')
+    if (-not $cfg -or -not ($cfg['options'] -is [hashtable]) -or -not $cfg['options']['openReportAfterDeployment'] -or -not $cfg['options']['technicianReport']) { return '' }
+    $html = Join-Path (Join-Path $Paths.Root ([string] $cfg['reportDir'])) 'technician-report.html'
+    $done = ConvertTo-WddDate $(if ($State) { $State['completedUtc'] } else { $null })
+    if ((Test-Path -LiteralPath $html) -and (-not $done -or (Get-Item -LiteralPath $html).LastWriteTimeUtc -ge $done.AddSeconds(-5))) { return $html }
+    return ''
+}
+
 if ($script:ShowMain) {
     $package = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
     $manifest = Read-WddManifest (Join-Path $package 'deployment-manifest.json')
@@ -77,6 +92,16 @@ if ($script:ShowMain) {
         Write-Output "Refreshing every $($script:ShowArgs.Interval) s. You can close this window; the deployment continues."
         Start-Sleep -Seconds $script:ShowArgs.Interval
     } while ($true)
+    if ($script:ShowArgs.Watch -and $state -and $state.status -eq 'Completed') {
+        # Verification runs right after completion: wait for its report (at most 5 minutes), open it once.
+        $html = ''
+        for ($i = 0; $i -lt 20 -and -not $html; $i++) { $html = Get-WddHealthReportToOpen $paths $state; if (-not $html) { Start-Sleep -Seconds 15; $state = (Read-WddDeploymentState $paths).State } }
+        if ($html) {
+            Write-Output ''
+            Write-Output "Health report: $html"
+            try { Start-Process -FilePath (Join-Path $env:SystemRoot 'explorer.exe') -ArgumentList "`"$html`"" } catch { Write-Output "Open it by hand: $($_.Exception.Message)" }
+        }
+    }
     if ($script:ShowArgs.Watch) { Write-Output ''; Read-Host 'Press Enter to close' | Out-Null }
     exit 0
 }

@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Windows Deployment Health Report</title>
+<!--
+  Windows Deployment Builder - deployment health report template (Phase 9).
+  DeploymentHealth.ps1 replaces the data placeholder below with the verified results and writes
+  technician-report.html and customer-handoff.html. Works offline from the local disk: no external
+  files, fonts or scripts. Every value is inserted as text, never as HTML.
+-->
+<style>
+:root {
+  --bg: #f6f7f9; --surface: #ffffff; --text: #1d2330; --muted: #5b6475; --line: #d9dde5;
+  --ok: #1f7a3f; --ok-bg: #e6f4ea; --warn: #8a5a00; --warn-bg: #fff4d6; --bad: #b42318; --bad-bg: #fde8e7;
+  --wait: #1f4fa8; --wait-bg: #e5eefc; --unk: #5a3e9e; --unk-bg: #efe9fb; --na: #5b6475; --na-bg: #eef0f3;
+  --accent: #1f4fa8; --code: #f0f2f5;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #12151b; --surface: #1b2029; --text: #e6e9ef; --muted: #a2abbb; --line: #313847;
+    --ok: #6fd391; --ok-bg: #173523; --warn: #f2c35b; --warn-bg: #3a2e12; --bad: #ff8a80; --bad-bg: #42201e;
+    --wait: #8fb4ff; --wait-bg: #1c2a46; --unk: #c3a8ff; --unk-bg: #2c2346; --na: #a2abbb; --na-bg: #262c37;
+    --accent: #8fb4ff; --code: #232a35;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 "Segoe UI", system-ui, -apple-system, sans-serif; }
+main { max-width: 1100px; margin: 0 auto; padding: 24px 16px 48px; }
+h1 { font-size: 26px; margin: 0 0 4px; }
+h2 { font-size: 19px; margin: 28px 0 10px; }
+h3 { font-size: 16px; margin: 0; }
+p { margin: 6px 0; }
+a { color: var(--accent); }
+.muted { color: var(--muted); }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
+.sample { background: var(--warn-bg); color: var(--warn); border: 2px dashed var(--warn); border-radius: 10px; padding: 10px 14px; font-weight: 600; margin-bottom: 16px; }
+.overall { display: flex; gap: 16px; align-items: flex-start; border-left: 8px solid var(--na); }
+.overall .badge { font-size: 13px; }
+.overall h2 { margin: 2px 0 6px; font-size: 22px; }
+.st-Ready, .st-Verified, .st-Pass, .st-done { --c: var(--ok); --cb: var(--ok-bg); }
+.st-ReadyWithWarnings, .st-Warning { --c: var(--warn); --cb: var(--warn-bg); }
+.st-NeedsAttention, .st-Fail, .st-Failed, .st-notDone { --c: var(--bad); --cb: var(--bad-bg); }
+.st-Incomplete, .st-Pending, .st-pending { --c: var(--wait); --cb: var(--wait-bg); }
+.st-Unverifiable, .st-Deferred, .st-confirm { --c: var(--unk); --cb: var(--unk-bg); }
+.st-NotApplicable, .st-Info, .st-notApplicable { --c: var(--na); --cb: var(--na-bg); }
+.overall[class*="st-"] { border-left-color: var(--c); }
+.badge { display: inline-block; padding: 2px 10px; border-radius: 999px; font-weight: 600; font-size: 12px; color: var(--c, var(--na)); background: var(--cb, var(--na-bg)); border: 1px solid var(--c, var(--line)); white-space: nowrap; }
+.grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); }
+.cat { display: block; text-decoration: none; color: inherit; border-top: 4px solid var(--c, var(--line)); }
+.cat:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+.cat .row { display: flex; justify-content: space-between; gap: 8px; align-items: center; }
+.list { list-style: none; margin: 0; padding: 0; }
+.list li { padding: 10px 0; border-top: 1px solid var(--line); display: flex; gap: 10px; align-items: flex-start; }
+.list li:first-child { border-top: 0; }
+.list .body { flex: 1; min-width: 0; }
+.next { margin-top: 4px; }
+.next strong { font-weight: 600; }
+.table-wrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 14px; }
+th, td { text-align: left; vertical-align: top; padding: 8px 10px; border-top: 1px solid var(--line); }
+th { color: var(--muted); font-weight: 600; font-size: 13px; }
+details { margin-top: 10px; }
+summary { cursor: pointer; font-weight: 600; padding: 6px 0; }
+code, .cmd { font-family: Consolas, "Cascadia Mono", monospace; font-size: 13px; background: var(--code); padding: 2px 6px; border-radius: 4px; overflow-wrap: anywhere; }
+.cmdrow { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 4px 0; }
+button { font: inherit; padding: 4px 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--surface); color: var(--text); cursor: pointer; }
+.tools { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
+input[type="search"], select, textarea { font: inherit; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--surface); color: var(--text); }
+input[type="search"] { min-width: 220px; flex: 1; }
+textarea { width: 100%; min-height: 70px; }
+.check { display: flex; gap: 10px; align-items: flex-start; padding: 8px 0; border-top: 1px solid var(--line); }
+.check:first-child { border-top: 0; }
+.kv { display: grid; grid-template-columns: minmax(130px, 220px) 1fr; gap: 4px 14px; }
+.kv dt { color: var(--muted); }
+.kv dd { margin: 0; overflow-wrap: anywhere; }
+.cols { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+.big { font-size: 20px; font-weight: 600; }
+footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
+@media (max-width: 600px) { .overall { flex-direction: column; } .kv { grid-template-columns: 1fr; } h1 { font-size: 22px; } }
+@media print {
+  body { background: #fff; color: #000; font-size: 12px; }
+  main { max-width: none; padding: 0; }
+  .card { break-inside: avoid; border-color: #999; }
+  .tools, button, .noprint { display: none !important; }
+  details { display: block; }
+  details > summary { list-style: none; }
+  a { color: #000; }
+}
+</style>
+</head>
+<body>
+<main id="app" aria-live="polite"><noscript><p>This report needs JavaScript to display. The same results are in deployment-health.json next to this file.</p></noscript></main>
+<script id="wdb-data" type="application/json">__WDB_HEALTH_DATA__</script>
+<script>
+(function () {
+  'use strict';
+  var app = document.getElementById('app');
+  var raw = document.getElementById('wdb-data').textContent;
+  var data;
+  try { data = JSON.parse(raw); } catch (e) { data = null; }
+  function el(tag, attrs) {
+    var n = document.createElement(tag);
+    if (attrs) { for (var k in attrs) { if (Object.prototype.hasOwnProperty.call(attrs, k) && attrs[k] !== null && attrs[k] !== undefined) { if (k === 'text') { n.textContent = attrs[k]; } else { n.setAttribute(k, attrs[k]); } } } }
+    for (var i = 2; i < arguments.length; i++) { add(n, arguments[i]); }
+    return n;
+  }
+  function add(n, c) {
+    if (c === null || c === undefined || c === false) { return; }
+    if (Array.isArray(c)) { for (var j = 0; j < c.length; j++) { add(n, c[j]); } return; }
+    n.appendChild(typeof c === 'string' || typeof c === 'number' ? document.createTextNode(String(c)) : c);
+  }
+  function badge(status, label) { return el('span', { 'class': 'badge st-' + status }, label || words(status)); }
+  var WORDS = { Ready: 'Ready for delivery', ReadyWithWarnings: 'Ready with warnings', NeedsAttention: 'Needs attention', Incomplete: 'Still completing', Unverifiable: 'Cannot be verified', Failed: 'Failed',
+    Verified: 'Verified', Warning: 'Warning', NotApplicable: 'Not part of this deployment', Pass: 'Verified', Info: 'Information', Fail: 'Failed check', Pending: 'Pending', Deferred: 'Deferred',
+    done: 'Done', notDone: 'Not done', pending: 'Pending', confirm: 'Confirm by hand', notApplicable: 'Not applicable' };
+  function words(s) { return WORDS[s] || s; }
+  function local(utc) { if (!utc) { return ''; } var d = new Date(utc); return isNaN(d.getTime()) ? utc : d.toLocaleString(); }
+  function copyButton(text) {
+    var b = el('button', { type: 'button', 'class': 'noprint' }, 'Copy');
+    b.addEventListener('click', function () {
+      function done() { b.textContent = 'Copied'; setTimeout(function () { b.textContent = 'Copy'; }, 1500); }
+      if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(text).then(done, function () {}); }
+      else { var t = el('textarea'); t.value = text; document.body.appendChild(t); t.select(); try { document.execCommand('copy'); done(); } catch (e) { /* ignore */ } document.body.removeChild(t); }
+    });
+    return b;
+  }
+  var RANK = { Pass: 0, Info: 0, NotApplicable: 0, Warning: 1, Deferred: 2, Pending: 2, Unverifiable: 3, Fail: 4 };
+  var SEV = { Critical: 3, Error: 2, Warning: 1, Informational: 0 };
+  function problem(f) { return f.status !== 'Pass' && f.status !== 'Info' && f.status !== 'NotApplicable'; }
+
+  function sampleBanner() { return data && data.sample ? el('div', { 'class': 'sample', role: 'note' }, 'SAMPLE DATA \u2014 this preview shows what the report looks like. It does not describe any real computer; the real report is created on the installed computer after verification.') : null; }
+
+  function technician(r) {
+    document.title = 'Deployment health report \u2014 ' + (r.os.computerName || '');
+    var o = r.overall;
+    var cats = r.categories || [];
+    var findings = r.findings || [];
+    var out = [sampleBanner()];
+    out.push(el('h1', {}, 'Deployment health report'));
+    out.push(el('p', { 'class': 'muted' }, (r.os.computerName ? r.os.computerName + ' \u00b7 ' : '') + (r.os.caption || 'Windows') + (r.os.displayVersion ? ' ' + r.os.displayVersion : '') + (r.os.build ? ' (build ' + r.os.build + ')' : '') + ' \u00b7 verified ' + local(r.generatedUtc)));
+    out.push(el('section', { 'class': 'card overall st-' + o.status, 'aria-labelledby': 'overall-title', 'data-testid': 'overall' },
+      el('div', {}, badge(o.status)),
+      el('div', {},
+        el('h2', { id: 'overall-title' }, o.title),
+        el('p', {}, o.summary),
+        el('p', { 'class': 'muted' }, o.readyForDelivery ? 'This computer can be handed to the customer.' : 'Do not hand this computer to the customer yet.'),
+        el('p', { 'class': 'muted' }, 'Deployment ' + (r.deploymentId || 'unknown') + ' \u00b7 checked by ' + r.context.runAs + ' (' + r.trigger + ') \u00b7 verification ' + r.verificationId + ' \u00b7 read-only'))));
+    if (r.comparison) {
+      var c = r.comparison;
+      out.push(el('section', { 'class': 'card', 'aria-labelledby': 'cmp-title' },
+        el('h2', { id: 'cmp-title' }, 'Since the previous check'),
+        el('p', {}, 'Previous: ', badge(c.previousStatus), ' (' + local(c.previousUtc) + ')  \u2192  now: ', badge(o.status)),
+        el('p', {}, c.resolved.length + ' resolved, ' + c.new.length + ' new, ' + c.remaining.length + ' remaining.'),
+        c.resolved.length ? el('details', {}, el('summary', {}, 'Resolved (' + c.resolved.length + ')'), el('ul', {}, c.resolved.map(function (x) { return el('li', {}, el('code', {}, x)); }))) : null,
+        c.new.length ? el('details', { open: '' }, el('summary', {}, 'New (' + c.new.length + ')'), el('ul', {}, c.new.map(function (x) { return el('li', {}, el('code', {}, x)); }))) : null));
+    }
+    out.push(el('h2', {}, 'Categories'));
+    out.push(el('div', { 'class': 'grid' }, cats.map(function (k) {
+      return el('a', { 'class': 'card cat st-' + k.status, href: '#cat-' + k.id, 'data-testid': 'cat-' + k.id },
+        el('div', { 'class': 'row' }, el('h3', {}, k.name), badge(k.status)),
+        el('p', { 'class': 'muted' }, k.summary));
+    })));
+    var todo = findings.filter(problem).sort(function (a, b) { return (RANK[b.status] - RANK[a.status]) || (SEV[b.severity] - SEV[a.severity]); });
+    out.push(el('h2', {}, 'What needs attention'));
+    out.push(todo.length ? el('ul', { 'class': 'list card', 'data-testid': 'attention' }, todo.map(function (f) {
+      return el('li', {}, badge(f.status),
+        el('div', { 'class': 'body' }, el('strong', {}, f.title), el('div', { 'class': 'muted' }, f.observed),
+          f.nextAction ? el('div', { 'class': 'next' }, el('strong', {}, 'Next: '), f.nextAction) : null));
+    })) : el('p', { 'class': 'card' }, 'Nothing: every check passed.'));
+
+    out.push(el('h2', {}, 'Delivery checklist'));
+    out.push(el('div', { 'class': 'card', 'data-testid': 'checklist' },
+      el('p', { 'class': 'muted' }, 'Ticks come from the verification. Items marked "Confirm by hand" cannot be measured on this computer; tick them yourself before printing.'),
+      (r.checklist || []).map(function (x) {
+        var box = el('input', { type: 'checkbox', 'aria-label': x.label });
+        box.checked = x.state === 'done';
+        if (x.state !== 'confirm') { box.disabled = true; }
+        return el('div', { 'class': 'check' }, box, el('div', { 'class': 'body' }, el('div', {}, x.label, ' ', badge(x.state)), x.note ? el('div', { 'class': 'muted' }, x.note) : null));
+      }),
+      el('label', { 'for': 'tech-notes' }, el('strong', {}, 'Technician notes')),
+      el('textarea', { id: 'tech-notes', placeholder: 'Notes to print with this report (not saved).' })));
+
+    // Applications: only what this deployment selected.
+    var apps = r.applications || [];
+    var search = el('input', { type: 'search', placeholder: 'Search applications', 'aria-label': 'Search applications', 'data-testid': 'app-search' });
+    var filter = el('select', { 'aria-label': 'Show' }, el('option', { value: 'all' }, 'All'), el('option', { value: 'attention' }, 'Needs attention'), el('option', { value: 'automatic' }, 'Installed automatically'), el('option', { value: 'manual' }, 'Manual follow-up'));
+    var tbody = el('tbody');
+    function drawApps() {
+      while (tbody.firstChild) { tbody.removeChild(tbody.firstChild); }
+      var q = search.value.toLowerCase();
+      var shown = apps.filter(function (a) {
+        var f = findings.filter(function (x) { return x.id === a.findingId; })[0];
+        if (q && (a.name + ' ' + a.packageIdentifier + ' ' + a.key).toLowerCase().indexOf(q) < 0) { return false; }
+        if (filter.value === 'attention') { return f ? problem(f) : false; }
+        if (filter.value === 'automatic') { return a.kind !== 'manual'; }
+        if (filter.value === 'manual') { return a.kind === 'manual'; }
+        return true;
+      });
+      shown.forEach(function (a) {
+        var f = findings.filter(function (x) { return x.id === a.findingId; })[0];
+        tbody.appendChild(el('tr', {},
+          el('td', {}, el('strong', {}, a.name), el('div', { 'class': 'muted' }, a.packageIdentifier ? a.source + ': ' + a.packageIdentifier : a.source)),
+          el('td', {}, f ? badge(f.status) : '', el('div', {}, a.result)),
+          el('td', {}, a.kind === 'manual' ? 'Manual follow-up' : a.kind === 'additional' ? 'Additional Software' : 'Automatic', el('div', { 'class': 'muted' }, a.required ? 'Required' : 'Optional')),
+          el('td', {}, a.independent + (a.foundIn ? ' (' + a.foundIn + ')' : ''), a.version ? el('div', { 'class': 'muted' }, a.version) : null),
+          el('td', {}, a.engineStatus || '\u2014', el('div', { 'class': 'muted' }, a.attempts ? a.attempts + ' attempt(s)' : ''))));
+      });
+      if (!shown.length) { tbody.appendChild(el('tr', {}, el('td', { colspan: '5' }, apps.length ? 'No application matches.' : 'This deployment selected no applications.'))); }
+    }
+    search.addEventListener('input', drawApps);
+    filter.addEventListener('change', drawApps);
+    out.push(el('h2', { id: 'apps' }, 'Applications (' + apps.length + ')'));
+    out.push(el('section', { 'class': 'card', 'data-testid': 'apps' },
+      el('p', { 'class': 'muted' }, 'Only the applications this deployment selected, plus its Additional Software. "Found" means Windows itself lists the application (uninstall records, Store packages or the portable shortcut); the installation engine\u2019s own result is shown separately.'),
+      el('div', { 'class': 'tools' }, search, filter),
+      el('div', { 'class': 'table-wrap' }, el('table', {}, el('thead', {}, el('tr', {}, el('th', { scope: 'col' }, 'Application'), el('th', { scope: 'col' }, 'Result'), el('th', { scope: 'col' }, 'Type'), el('th', { scope: 'col' }, 'On this computer'), el('th', { scope: 'col' }, 'Engine'))), tbody))));
+    drawApps();
+
+    out.push(el('h2', {}, 'Details by category'));
+    cats.forEach(function (k) {
+      var fs = findings.filter(function (x) { return x.category === k.id; });
+      out.push(el('section', { 'class': 'card', id: 'cat-' + k.id, style: 'margin-bottom:12px' },
+        el('div', { 'class': 'row', style: 'display:flex;justify-content:space-between;gap:8px;align-items:center' }, el('h3', {}, k.name), badge(k.status)),
+        el('p', { 'class': 'muted' }, k.summary),
+        fs.length ? el('details', { open: fs.some(problem) ? '' : null }, el('summary', {}, fs.length + ' check(s)'),
+          el('div', { 'class': 'table-wrap' }, el('table', {},
+            el('thead', {}, el('tr', {}, el('th', { scope: 'col' }, 'Check'), el('th', { scope: 'col' }, 'Expected'), el('th', { scope: 'col' }, 'Observed'), el('th', { scope: 'col' }, 'How it was verified'))),
+            el('tbody', {}, fs.map(function (f) {
+              return el('tr', {}, el('td', {}, badge(f.status), el('div', {}, el('strong', {}, f.title)), el('div', { 'class': 'muted' }, f.severity + (f.required ? ', required' : ', optional')), el('code', {}, f.id)),
+                el('td', {}, f.expected), el('td', {}, f.observed, f.nextAction ? el('div', { 'class': 'next' }, el('strong', {}, 'Next: '), f.nextAction) : null),
+                el('td', {}, f.method, el('div', { 'class': 'muted' }, f.evidence)));
+            }))))) : el('p', { 'class': 'muted' }, 'No check in this category.')));
+    });
+
+    out.push(el('h2', {}, 'Recovery and outstanding work'));
+    var rec = r.recovery || { actions: [] };
+    out.push(el('section', { 'class': 'card' },
+      (r.outstanding || []).length ? el('div', {}, el('h3', {}, 'Outstanding operations'), el('ul', {}, r.outstanding.map(function (x) { return el('li', {}, el('strong', {}, x.name), ' \u2014 ' + x.lifecycle + ': ' + x.action, ' ', el('code', {}, x.operationId)); }))) : el('p', {}, 'No operation is outstanding.'),
+      (r.manualActions || []).length ? el('div', {}, el('h3', {}, 'Manual actions'), el('ul', {}, r.manualActions.map(function (x) { return el('li', {}, x.text); }))) : null,
+      el('h3', { style: 'margin-top:12px' }, 'Actions (run as administrator)'),
+      el('p', { 'class': 'muted' }, rec.toolAvailable ? 'Repairs are done by the "Deployment recovery" tool on the desktop. Verification itself never changes anything; actions marked "changes the computer" ask before they do.' : 'The recovery tool is not part of this package.'),
+      rec.actions.map(function (a) { return el('div', { 'class': 'cmdrow' }, el('strong', {}, a.label), a.sideEffects ? el('span', { 'class': 'badge st-Warning' }, 'changes the computer') : el('span', { 'class': 'badge st-Info' }, 'read-only'), el('span', { 'class': 'cmd' }, a.command), copyButton(a.command)); })));
+    if (r.backups && r.backups.retained) {
+      out.push(el('section', { 'class': 'card', style: 'margin-top:12px' }, el('h3', {}, 'Retained settings backup'),
+        el('p', {}, r.backups.retained + ' staged backup folder(s) remain under ' + r.backups.location + (r.backups.requiredForOutstanding ? '. They are still needed for outstanding restoration.' : '. They may contain personal application settings.')),
+        r.backups.cleanup ? el('div', { 'class': 'cmdrow' }, el('span', { 'class': 'cmd' }, r.backups.cleanup), copyButton(r.backups.cleanup)) : null));
+    }
+    out.push(el('details', {}, el('summary', {}, 'Evidence sources and limitations'),
+      el('div', { 'class': 'table-wrap card' }, el('table', {}, el('thead', {}, el('tr', {}, el('th', { scope: 'col' }, 'Source'), el('th', { scope: 'col' }, 'State'), el('th', { scope: 'col' }, 'Format'), el('th', { scope: 'col' }, 'Written'))),
+        el('tbody', {}, (r.sources || []).map(function (s) { return el('tr', {}, el('td', {}, el('code', {}, s.file)), el('td', {}, s.state), el('td', {}, s.format + (s.version ? ' v' + s.version : '')), el('td', {}, local(s.generatedUtc))); })))),
+      el('ul', {}, (r.limitations || []).map(function (x) { return el('li', {}, x); })),
+      (r.history || []).length ? el('p', { 'class': 'muted' }, 'Earlier reports: ' + r.history.map(function (h) { return local(h.generatedUtc) + ' ' + words(h.status); }).join(' \u00b7 ')) : null));
+    out.push(el('footer', {}, 'Windows Deployment Builder \u00b7 health engine ' + r.engineVersion + '. Print or save as PDF with Ctrl+P. The machine-readable report is deployment-health.json in the same folder.'));
+    add(app, out);
+  }
+
+  function customer(h) {
+    document.title = 'Your computer \u2014 ' + (h.computerName || '');
+    var ok = h.status === 'Ready' || h.status === 'ReadyWithWarnings';
+    add(app, [
+      sampleBanner(),
+      el('h1', {}, 'Your computer'),
+      el('p', { 'class': 'muted' }, 'Prepared ' + local(h.generatedUtc)),
+      el('section', { 'class': 'card overall st-' + h.status, 'data-testid': 'customer-status' },
+        el('div', {}, el('span', { 'class': 'badge st-' + h.status }, ok ? 'Ready' : 'Not finished')),
+        el('div', {}, el('p', { 'class': 'big' }, h.headline), el('p', {}, h.statusText))),
+      el('div', { 'class': 'cols', style: 'margin-top:16px' },
+        el('section', { 'class': 'card' }, el('h2', { style: 'margin-top:0' }, 'This computer'),
+          el('dl', { 'class': 'kv' }, el('dt', {}, 'Computer name'), el('dd', {}, h.computerName || '\u2014'), el('dt', {}, 'Windows'), el('dd', {}, h.windows), h.account ? el('dt', {}, 'Sign in as') : null, h.account ? el('dd', {}, h.account) : null, el('dt', {}, 'Updates'), el('dd', {}, h.updates))),
+        el('section', { 'class': 'card' }, el('h2', { style: 'margin-top:0' }, 'Protection'),
+          el('dl', { 'class': 'kv' }, h.security.map(function (s) { return [el('dt', {}, s.label), el('dd', {}, s.state)]; })))),
+      el('section', { 'class': 'card', style: 'margin-top:16px' }, el('h2', { style: 'margin-top:0' }, 'Installed for you (' + h.applications.installed.length + ')'),
+        h.applications.installed.length ? el('ul', {}, h.applications.installed.map(function (n) { return el('li', {}, n); })) : el('p', {}, 'No applications were installed by the setup.'),
+        h.applications.notYet.length ? el('p', {}, el('strong', {}, 'Not installed yet (your technician will finish these): '), h.applications.notYet.join(', ')) : null),
+      el('section', { 'class': 'card', style: 'margin-top:16px' }, el('h2', { style: 'margin-top:0' }, 'What you still need to do'),
+        h.actions.length ? el('ol', {}, h.actions.map(function (n) { return el('li', {}, n); })) : el('p', {}, 'Nothing.'),
+        h.applications.toDoYourself.length ? el('div', {}, el('h3', {}, 'Applications to install yourself'), el('ul', {}, h.applications.toDoYourself.map(function (a) { return el('li', {}, el('strong', {}, a.name), ': ' + a.how); }))) : null),
+      h.notes ? el('section', { 'class': 'card', style: 'margin-top:16px' }, el('h2', { style: 'margin-top:0' }, 'Notes from your technician'), el('p', { style: 'white-space:pre-wrap' }, h.notes)) : null,
+      el('footer', {}, 'This summary was created from checks made on this computer. It contains no passwords or keys. Keep your passwords and your recovery key somewhere safe.')
+    ]);
+  }
+
+  if (!data) { add(app, el('p', {}, 'The report data could not be read. See deployment-health.json in the same folder.')); return; }
+  if (data.mode === 'customer') { customer(data.handoff); } else { technician(data.report); }
+}());
+</script>
+</body>
+</html>

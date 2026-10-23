@@ -615,6 +615,8 @@ describe('legacy profiles (Phase 4 / schema v3 exports)', () => {
     const r = generate(profile((x) => {
       x.windowsUpdate.enabled = false;
       noApps(x);
+      // Milestone 1's owner default withheld drivers from quality updates; Phase 9 changed the default.
+      x.updates.excludeDrivers = true;
     }));
     expect(r.xml).toBe(M1_XML);
   });

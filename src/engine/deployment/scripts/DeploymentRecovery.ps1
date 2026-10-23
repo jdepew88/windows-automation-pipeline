@@ -36,8 +36,15 @@
                                  it again for the devices that are still unresolved
       -Action ExportDiagnostics [-OutputPath <zip>]
                                  logs, states, results and the report as one ZIP, with passwords
-                                 and Wi-Fi keys removed; answer files and Wi-Fi profiles are never
-                                 included
+                                 and Wi-Fi keys removed; answer files, Wi-Fi profiles and settings
+                                 backups are never included (every entry is checked afterwards)
+      -Action Verify             Phase 9: verifies the deployment against Windows itself
+                                 (DeploymentHealth.ps1, read-only) and writes the health reports
+
+    Per-user applications belong to the account the application stage ran as (Phase 5 deployment
+    user). Run from another administrator account, RetryFailed, Retry, Resume and RestoreSettings
+    refuse to move them; -RetargetUser installs the remaining ones into the current account instead,
+    deliberately and recorded in the recovery history.
 
     Only operations of this deployment's verified configuration can be retried. Deselected apps,
     manual catalog entries, unresolved identifiers and anything already installed are refused. No
@@ -50,12 +57,13 @@
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('Menu', 'Status', 'PendingActions', 'RetryFailed', 'Retry', 'Resume', 'RestoreSettings', 'AddDrivers', 'ExportDiagnostics')]
+    [ValidateSet('Menu', 'Status', 'PendingActions', 'RetryFailed', 'Retry', 'Resume', 'RestoreSettings', 'AddDrivers', 'ExportDiagnostics', 'Verify')]
     [string] $Action = 'Menu',
     [string] $BackupPath = '',
     [string] $DriverPath = '',
     [string[]] $Operation = @(),
     [switch] $IncludePermanent,
+    [switch] $RetargetUser,
     [switch] $Json,
     [string] $OutputPath = '',
     [switch] $Elevate
@@ -63,7 +71,7 @@ param(
 
 $script:RecoveryMain = $MyInvocation.InvocationName -ne '.'
 # Captured first: the scripts dot-sourced below bind their own parameters in this scope.
-$script:RecoveryArgs = @{ Action = $Action; BackupPath = $BackupPath; DriverPath = $DriverPath; Operation = @($Operation); IncludePermanent = [bool] $IncludePermanent; Json = [bool] $Json; OutputPath = $OutputPath; Elevate = [bool] $Elevate }
+$script:RecoveryArgs = @{ Action = $Action; BackupPath = $BackupPath; DriverPath = $DriverPath; Operation = @($Operation); IncludePermanent = [bool] $IncludePermanent; RetargetUser = [bool] $RetargetUser; Json = [bool] $Json; OutputPath = $OutputPath; Elevate = [bool] $Elevate }
 . (Join-Path $PSScriptRoot '..\common\DeploymentCommon.ps1')
 . (Join-Path $PSScriptRoot '..\bootstrap\Initialize-Deployment.ps1')
 . (Join-Path $PSScriptRoot '..\orchestrator\Show-DeploymentStatus.ps1')
@@ -73,9 +81,24 @@ if (Test-Path -LiteralPath $script:AppEngineScript) { . $script:AppEngineScript 
 # Phase 8: the driver engine's own functions (Retry, technician packages), when the stage is part of the package.
 $script:DriverEngineScript = Join-Path $PSScriptRoot '..\drivers\DriverEngine.ps1'
 if (Test-Path -LiteralPath $script:DriverEngineScript) { . $script:DriverEngineScript -Mode Library }
+# Phase 9: the health engine (read-only verification), when the deployment verifies itself.
+$script:HealthEngineScript = Join-Path $PSScriptRoot '..\health\DeploymentHealth.ps1'
+if (Test-Path -LiteralPath $script:HealthEngineScript) { . $script:HealthEngineScript -Mode Library }
 Set-StrictMode -Version 2.0
 
 $script:RecoveryExit = @{ Done = 0; Refused = 1; NothingToDo = 1; Busy = 2; IntegrityFailed = 3; NotElevated = 4; NoState = 1; UnknownStage = 1 }
+
+<#
+    The account the application stage belongs to (Phase 5 deployment user): its launch record, else
+    the user the engine's result names. Empty when unknown.
+#>
+function Get-WdrDeploymentUser {
+    param([hashtable] $Paths, [hashtable] $State)
+    if ($State -and $State['stages'] -is [hashtable] -and $State['stages'].ContainsKey('applications') -and $State['stages']['applications'] -is [hashtable] -and $State['stages']['applications']['user']) { return [string] $State['stages']['applications']['user'] }
+    $r = Read-WddJson (Join-Path $Paths.Root 'Applications\result.json')
+    if ($r -and $r['user']) { return [string] $r['user'] }
+    return ''
+}
 
 # ------------------------------------------------------------------------------------------------
 # Adapters (replaced by the scenario tests)
@@ -238,11 +261,12 @@ function Repair-WddDeploymentState {
     $state = New-WddState $Manifest 'Embedded' $Identity
     $state.status = 'InProgress'
     $state.message = 'Rebuilt by the recovery tool after the deployment state was damaged.'
+    $appUser = Get-WdrDeploymentUser $Paths $null
     $state.stagedFiles = @(@($Manifest.files) | Where-Object { $_.embedded -and (Test-Path -LiteralPath (Join-Path $Paths.Package ($_.path -replace '/', '\'))) } | ForEach-Object { $_.path })
     foreach ($s in Get-WddEngineStages $Manifest) {
         $seen = (Test-Path -LiteralPath (Join-Path $Paths.Root $s.result)) -or (Test-Path -LiteralPath (Join-Path $Paths.Root $s.status)) -or (Get-WddTask $s.task.path $s.task.name)
         $state.stages[$s.id] = @{ launchResult = $(if ($seen) { 'Launched' } else { '' }); attempts = 0; launchedUtc = $(if ($seen) { (Get-WddNow).ToString('o') } else { $null }); exitCode = $null
-                                  message = $(if ($seen) { 'Found running or finished while rebuilding the state.' } else { 'Not launched before the state was lost.' }); user = $(if ($s.context -eq 'user') { [string] $Identity.Name } else { 'SYSTEM' }) }
+                                  message = $(if ($seen) { 'Found running or finished while rebuilding the state.' } else { 'Not launched before the state was lost.' }); user = $(if ($s.context -ne 'user') { 'SYSTEM' } elseif ($appUser) { $appUser } else { [string] $Identity.Name }) }
     }
     Save-WddState $Paths $state
     Write-WddLog "Deployment state rebuilt from the manifest (stages: $(($state.stages.Keys | ForEach-Object { "$_=$($state.stages[$_].launchResult)" }) -join ', '))." 'WARN'
@@ -256,7 +280,7 @@ function Repair-WddDeploymentState {
     failures, or for Resume when its task is gone), then the deployment is reopened for the monitor.
 #>
 function Invoke-WdrRecovery {
-    param([hashtable] $Manifest, [hashtable] $Paths, [ValidateSet('RetryFailed', 'Retry', 'Resume')] [string] $Mode, [string[]] $Operations = @(), [switch] $IncludePermanent)
+    param([hashtable] $Manifest, [hashtable] $Paths, [ValidateSet('RetryFailed', 'Retry', 'Resume')] [string] $Mode, [string[]] $Operations = @(), [switch] $IncludePermanent, [switch] $RetargetUser)
     Initialize-WddLogging $Paths
     $identity = Get-WddIdentity
     if (-not $identity.IsAdmin) { return @{ Outcome = 'NotElevated'; Message = 'Run the recovery tool as administrator.'; Accepted = @(); Refused = @() } }
@@ -290,9 +314,16 @@ function Invoke-WdrRecovery {
             $cfg = Get-WdrAppConfig $Paths
             if (-not $cfg) { $notes += 'The application engine is not part of the staged package.' }
             elseif ($Mode -ne 'Retry' -or $appOps.Count) {
+                # Phase 9: never silently move per-user installations into another administrator's profile.
+                $intended = Get-WdrDeploymentUser $Paths $state
+                $otherUser = $intended -and ($intended -ine [string] $identity.Name)
                 if ($identity.IsSystem) {
                     $refused += @{ operationId = 'stage:applications'; reason = 'the application stage runs as the signed-in user (WinGet is not supported as SYSTEM); run the recovery tool as that user' }
+                } elseif ($otherUser -and -not $RetargetUser) {
+                    $refused += @{ operationId = 'stage:applications'; reason = "the application stage belongs to $intended (per-user applications and settings go into that account's profile). Sign in as $intended and run the recovery tool there, or run it with -RetargetUser to install the remaining ones into $($identity.Name) instead" }
+                    Write-WddLog "Recovery ($Mode) by $($identity.Name) refused for the application stage: it belongs to $intended." 'WARN'
                 } else {
+                    if ($otherUser) { $notes += "Application stage moved from $intended to $($identity.Name) (-RetargetUser)."; Write-WddLog "Application stage retargeted from $intended to $($identity.Name) by an explicit -RetargetUser." 'WARN' }
                     $r = switch ($Mode) {
                         'RetryFailed' { Invoke-WdaRetry $cfg -AllFailed -IncludePermanent:$IncludePermanent -RequestedBy $identity.Name }
                         'Retry' { Invoke-WdaRetry $cfg -Operations $appOps -IncludePermanent:$IncludePermanent -RequestedBy $identity.Name }
@@ -383,7 +414,7 @@ function Invoke-WdrRecovery {
             $state.message = "Recovery ($Mode) by $($identity.Name)."
             $state.deadlineUtc = (Get-WddNow).AddHours([double] $Manifest.failureHandling.orchestrator.deadlineHours).ToString('o')
         }
-        $state.recoveries = @(@($state.recoveries) + @(@{ atUtc = (Get-WddNow).ToString('o'); by = $identity.Name; action = $Mode; accepted = @($accepted); refused = @($refused | ForEach-Object { $_.operationId }) }))
+        $state.recoveries = @(@($state.recoveries) + @(@{ atUtc = (Get-WddNow).ToString('o'); by = $identity.Name; action = $Mode; accepted = @($accepted); refused = @($refused | ForEach-Object { $_.operationId }); retargetUser = [bool] $RetargetUser }))
         Save-WddState $Paths $state
         if ($reopen) {
             Register-WddMonitorTask $Paths $Manifest
@@ -437,7 +468,7 @@ function Invoke-WdrAddDrivers {
     through the engine's own Retry logic (RetryFailed rules: restored ones are never repeated).
 #>
 function Invoke-WdrRestoreSettings {
-    param([hashtable] $Manifest, [hashtable] $Paths, [string] $BackupPath)
+    param([hashtable] $Manifest, [hashtable] $Paths, [string] $BackupPath, [switch] $RetargetUser)
     Initialize-WddLogging $Paths
     $identity = Get-WddIdentity
     if (-not $identity.IsAdmin) { return @{ Outcome = 'NotElevated'; Message = 'Run the recovery tool as administrator.'; Accepted = @(); Refused = @() } }
@@ -460,7 +491,7 @@ function Invoke-WdrRestoreSettings {
     Write-WddLog "RestoreSettings: backup $($plan['backupId']) validated from $BackupPath and placed in $incoming."
     $ops = @(Get-WdrOperations $Paths | Where-Object { $_.operationId -like 'settings:*' -and $_.status -notin 'Succeeded', 'AlreadyInstalled', 'SkippedByUser', 'Unavailable' } | ForEach-Object { $_.operationId })
     if (-not $ops.Count) { return @{ Outcome = 'NothingToDo'; Message = 'The backup was validated and staged; no settings are outstanding.'; Accepted = @(); Refused = @() } }
-    return Invoke-WdrRecovery $Manifest $Paths 'Retry' -Operations $ops -IncludePermanent
+    return Invoke-WdrRecovery $Manifest $Paths 'Retry' -Operations $ops -IncludePermanent -RetargetUser:$RetargetUser
 }
 
 # ------------------------------------------------------------------------------------------------
@@ -493,6 +524,8 @@ $script:DiagnosticFiles = @(
     'Updates\state.json', 'Updates\status.json', 'Updates\result.json', 'Updates\policy-result.json', 'Updates\logs\*.log',
     'Network\wifi-result.json', 'Network\*.log',
     'Drivers\state.json', 'Drivers\state.json.bak', 'Drivers\status.json', 'Drivers\result.json', 'Drivers\inventory-*.json', 'Drivers\logs\*.log', 'Drivers\logs\attempts.jsonl', 'reports\drivers.json',
+    'reports\health\deployment-health.json', 'reports\health\customer-handoff.json', 'reports\health\recheck.json', 'reports\health\history\*.json',
+    'Applications\restoration.json',
     'Package\scripts\drivers\drivers-config.json',
     'Package\deployment-manifest.json', 'Package\config\orchestration.json', 'Package\scripts\applications\applications-config.json', 'Package\scripts\windows-update\config.json'
 )
@@ -546,10 +579,31 @@ function Export-WdrDiagnostics {
         if (Test-Path -LiteralPath $OutputPath) { Remove-Item -LiteralPath $OutputPath -Force }
         Add-Type -AssemblyName System.IO.Compression.FileSystem
         [IO.Compression.ZipFile]::CreateFromDirectory($staging, $OutputPath)
+        # Phase 9: every entry is checked again; an archive with anything unexpected is not kept.
+        $bad = @(Test-WdrDiagnosticArchive $OutputPath)
+        if ($bad.Count) { Remove-Item -LiteralPath $OutputPath -Force; throw "The diagnostics archive contained entries that must not be shared ($($bad -join ', ')); it was deleted." }
         return @{ Outcome = 'Done'; Path = $OutputPath; Files = $index.Count; Redacted = $redacted }
     } finally {
         Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue
     }
+}
+
+<#
+    Entries a diagnostics ZIP may contain: relative paths of known text types; never a settings
+    backup, an answer file, a Wi-Fi profile or an executable.
+#>
+function Test-WdrDiagnosticArchive {
+    param([string] $Path)
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $z = [IO.Compression.ZipFile]::OpenRead($Path)
+    try {
+        return @(@($z.Entries) | Where-Object {
+            $n = $_.FullName.Replace('\', '/')
+            $unsafe = -not $n -or $n.StartsWith('/') -or $n -match '(^|/)\.\.(/|$)' -or $n -match ':' -or $n -match '(?i)(^|/)backups?(/|$)' -or $n -match '(?i)\.(xml|wim|exe|msi|zip|reg|pfx|key|cab|inf|sys)$'
+            $known = $n -match '(?i)\.(json|jsonl|txt|log|1|done|bak)$' -or $n -match '(?i)\.corrupt(-\d+)?$' -or $n -match '(?i)\.json\.(bak|corrupt)'
+            $unsafe -or -not $known
+        } | ForEach-Object { $_.FullName })
+    } finally { $z.Dispose() }
 }
 
 # ------------------------------------------------------------------------------------------------
@@ -557,15 +611,22 @@ function Export-WdrDiagnostics {
 # ------------------------------------------------------------------------------------------------
 
 function Invoke-WdrAction {
-    param([hashtable] $Manifest, [hashtable] $Paths, [string] $Action, [string[]] $Operation = @(), [switch] $IncludePermanent, [switch] $Json, [string] $OutputPath = '', [string] $BackupPath = '', [string] $DriverPath = '')
+    param([hashtable] $Manifest, [hashtable] $Paths, [string] $Action, [string[]] $Operation = @(), [switch] $IncludePermanent, [switch] $Json, [string] $OutputPath = '', [string] $BackupPath = '', [string] $DriverPath = '', [switch] $RetargetUser)
     switch ($Action) {
+        'Verify' {
+            $cfg = Read-WddJson (Join-Path $Paths.Package 'scripts\health\health-config.json')
+            if (-not (Get-Command Invoke-WdhVerify -ErrorAction SilentlyContinue) -or -not $cfg) { return @{ Text = 'Verification is not part of this deployment package.'; Exit = 1 } }
+            $v = Invoke-WdhVerify $Manifest $Paths $cfg 'Recovery'
+            $text = $(if ($Json) { $v.Report | ConvertTo-Json -Depth 12 } else { "Deployment health: $($v.Status). $($v.Report.overall.summary)`r`nReport: $(Join-Path $v.Directory 'technician-report.html')" })
+            return @{ Text = $text; Exit = [int] $v.ExitCode }
+        }
         'AddDrivers' {
             $r = Invoke-WdrAddDrivers $Manifest $Paths $DriverPath
             $text = $(if ($Json) { [pscustomobject]$r | ConvertTo-Json -Depth 6 } else { "AddDrivers: $($r.Outcome). $($r.Message)" })
             return @{ Text = $text; Exit = [int] $script:RecoveryExit[$r.Outcome] }
         }
         'RestoreSettings' {
-            $r = Invoke-WdrRestoreSettings $Manifest $Paths $BackupPath
+            $r = Invoke-WdrRestoreSettings $Manifest $Paths $BackupPath -RetargetUser:$RetargetUser
             $text = $(if ($Json) { [pscustomobject]$r | ConvertTo-Json -Depth 6 } else { "RestoreSettings: $($r.Outcome). $($r.Message)" })
             return @{ Text = $text; Exit = [int] $script:RecoveryExit[$r.Outcome] }
         }
@@ -583,7 +644,7 @@ function Invoke-WdrAction {
             return @{ Text = "Diagnostics: $($r.Path) ($($r.Files) file(s), $($r.Redacted) with values redacted)."; Exit = 0 }
         }
         default {
-            $r = Invoke-WdrRecovery $Manifest $Paths $Action -Operations $Operation -IncludePermanent:$IncludePermanent
+            $r = Invoke-WdrRecovery $Manifest $Paths $Action -Operations $Operation -IncludePermanent:$IncludePermanent -RetargetUser:$RetargetUser
             $text = $(if ($Json) { [pscustomobject]$r | ConvertTo-Json -Depth 6 } else { "$($Action): $($r.Outcome). $($r.Message)" })
             return @{ Text = $text; Exit = [int] $script:RecoveryExit[$r.Outcome] }
         }
@@ -602,6 +663,7 @@ function Show-WdrMenu {
         Write-Output '  3  View pending actions      6  Export diagnostic report'
         Write-Output '  7  Restore application settings from a backup folder'
         Write-Output '  8  Add driver packages from a folder (for example a network driver)'
+        Write-Output '  9  Verify the deployment (health report; read-only)'
         Write-Output '  0  Exit'
         $c = Read-Host 'Choose'
         $r = switch ($c) {
@@ -617,8 +679,9 @@ function Show-WdrMenu {
             '6' { Invoke-WdrAction $Manifest $Paths 'ExportDiagnostics' }
             '7' { Invoke-WdrAction $Manifest $Paths 'RestoreSettings' -BackupPath (Read-Host 'Backup folder or .zip (for example E:\WindowsDeployment\backups\WDB-AppBackup-...)') }
             '8' { Invoke-WdrAction $Manifest $Paths 'AddDrivers' -DriverPath (Read-Host 'Folder with INF driver packages (for example E:\Drivers\Network)') }
+            '9' { Invoke-WdrAction $Manifest $Paths 'Verify' }
             '0' { return }
-            default { @{ Text = 'Choose 0-8.'; Exit = 0 } }
+            default { @{ Text = 'Choose 0-9.'; Exit = 0 } }
         }
         if ($r) { Write-Output ''; Write-Output $r.Text }
     }
@@ -640,7 +703,7 @@ if ($script:RecoveryMain) {
         Show-WdrMenu $manifest $paths
         exit 0
     }
-    $r = Invoke-WdrAction $manifest $paths $a.Action -Operation $a.Operation -IncludePermanent:$a.IncludePermanent -Json:$a.Json -OutputPath $a.OutputPath -BackupPath $a.BackupPath -DriverPath $a.DriverPath
+    $r = Invoke-WdrAction $manifest $paths $a.Action -Operation $a.Operation -IncludePermanent:$a.IncludePermanent -Json:$a.Json -OutputPath $a.OutputPath -BackupPath $a.BackupPath -DriverPath $a.DriverPath -RetargetUser:$a.RetargetUser
     Write-Output $r.Text
     exit $r.Exit
 }

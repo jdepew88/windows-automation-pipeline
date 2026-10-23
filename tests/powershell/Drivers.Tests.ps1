@@ -239,7 +239,7 @@ $tests['config: the generated configuration loads; downloads only from official 
     Assert-Equal $c.bundle.folderName $script:BundleFolder 'the bundle is pinned'
     Assert-True ($c.policy.useWindowsUpdate -and $c.policy.resolveMissing -and $c.policy.offlinePackages) 'safe defaults on'
     Assert-Equal $c.policy.optionalReplacements 'never' 'working drivers are never replaced by default'
-    Assert-Equal $c.windowsUpdate.drivers 'exclude' 'the owner default keeps drivers out of Windows Update'
+    Assert-Equal $c.windowsUpdate.drivers 'include' 'the owner default (Phase 9) lets Windows Update offer drivers'
     foreach ($bad in 'http://download.microsoft.com/x.cab', 'https://downloads.example.com/x.cab', 'https://user:pw@dl.dell.com/x.cab', 'https://dl.dell.com:8443/x.cab') {
         $threw = $false
         try { [void] (New-SimConfig { param($x) $x.verifiedPackages[0].url = $bad }) } catch { $threw = $true }
@@ -287,7 +287,8 @@ $tests['A. Intel desktop + NVIDIA: only the GPU on the basic display driver gets
 
 $tests['A2. without a usable package the GPU is a manual action with the official page; Windows Update policy is named'] = {
     Reset-Sim; Add-IntelDesktopWithNvidia
-    $c = New-SimConfig { param($x) $x.bundle = $null }
+    # A deployment (an older profile or an organization) that withholds drivers from Windows Update.
+    $c = New-SimConfig { param($x) $x.bundle = $null; $x.windowsUpdate.drivers = 'exclude' }
     Set-WuFinished
     $runs = Invoke-SimRuns $c
     Assert-Equal $runs[-1] 'Finished:CompletedWithFollowUp' 'follow-up'
@@ -299,6 +300,12 @@ $tests['A2. without a usable package the GPU is a manual action with the officia
     Assert-Match @($m.text) 'PCI\\VEN_10DE&DEV_2484&SUBSYS_146B10DE&REV_A1' 'the hardware ID is given'
     Assert-Match @($m.text) 'Game Ready and Studio' 'the documented branch policy, not a guess'
     Assert-Match @($m.text) 'Windows Update was not allowed to install drivers' 'says why Windows Update did not resolve it'
+    # Phase 9 default: Windows Update may install drivers, so the message is not given.
+    Reset-Sim; Add-IntelDesktopWithNvidia
+    $c = New-SimConfig { param($x) $x.bundle = $null }
+    Set-WuFinished
+    Invoke-SimRuns $c | Out-Null
+    Assert-Equal (@(@((Get-SimReport $c).manualActions) | Where-Object { $_.text -match 'not allowed to install drivers' }).Count) 0 'no such claim when Windows Update may install drivers'
 }
 
 $tests['B. AMD desktop, all healthy: no download, no installation, newer package only reported'] = {

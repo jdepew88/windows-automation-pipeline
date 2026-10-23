@@ -59,6 +59,7 @@ export const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
       page('advancedXml', 'XML components', 'code'),
       page('output', 'Output', 'file'),
       page('deferred', 'Later milestones', 'clock'),
+      page('health', 'Verification & Health', 'shieldCheck'),
       page('deployment', 'Deployment package', 'usb'),
       { target: 'usb-prep', page: 'deployment', label: 'Prepare Installation USB', icon: 'usb' },
       { target: 'deployment-assets', page: 'review', label: 'Deployment assets', icon: 'archive' },
@@ -203,6 +204,15 @@ export const FIELD_GROUPS: Partial<Record<SectionId, FieldGroup[]>> = {
       paths: ['drivers.includeOfflinePackages', 'drivers.bundle'],
     },
     { title: 'Verified packages & approvals', paths: ['drivers.verifiedPackages', 'drivers.approvals'] },
+  ],
+  health: [
+    {
+      title: 'Final verification',
+      description: 'Read-only. The integrity of the results and the security checks (antivirus, firewall, account rights) always run and cannot be turned off.',
+      paths: ['health.enabled', 'health.openReportAfterDeployment', 'health.networkRequirement', 'health.keepHistory', 'health.storageObservations'],
+    },
+    { title: 'Reports', paths: ['health.technicianReport', 'health.customerReport', 'health.customerNotes'] },
+    { title: 'What may be missing at delivery', paths: ['health.optionalApps'] },
   ],
   system: [
     { title: 'Startup & sign-in', paths: ['system.disableFastStartup', 'system.disableAutomaticRestartSignOn', 'system.deleteWindowsOld'] },

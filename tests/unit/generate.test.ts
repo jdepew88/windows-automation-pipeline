@@ -103,7 +103,8 @@ describe('owner-default answer file', () => {
     // update stage by the deployment monitor (see 'ongoing update policy' below), not here.
     expect(sp).not.toContain('/v "AUOptions"');
     expect(files.get('Set-UpdatePolicy.ps1')).toContain('function Step-WddUpdatePolicy');
-    expect(sp).toContain('ExcludeWUDriversInQualityUpdate');
+    // Phase 9: new deployments let Windows Update offer compatible drivers (the driver stage waits for it).
+    expect(sp).not.toContain('ExcludeWUDriversInQualityUpdate');
     expect(sp).not.toMatch(/SmartScreenEnabled|VerifiedAndReputablePolicyState|PreventDeviceEncryption|fDenyTSConnections|EnableVirtualizationBasedSecurity/);
     const du = files.get('DefaultUser.ps1')!;
     expect(du).toContain('/v "HideFileExt" /t REG_DWORD /d 0');

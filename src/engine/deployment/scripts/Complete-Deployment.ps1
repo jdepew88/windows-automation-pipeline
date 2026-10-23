@@ -12,6 +12,11 @@
     <dataRoot>\state\deployment.done (with the overall status; a marker is never proof of success
     on its own), an Application event, and a "Deployment report" shortcut on the public desktop.
     It removes only the monitor task. Logs, state and the engines' results are kept.
+
+    Phase 9: when the package carries DeploymentHealth.ps1, the deployment is then verified against
+    Windows itself (read-only), the result is added to the report, and the "Windows Deployment -
+    Health Report" shortcut opens the technician dashboard. A pending restart registers a startup
+    re-check that removes itself.
 #>
 [CmdletBinding()]
 param(
@@ -25,6 +30,10 @@ $script:CompleteArgs = @{ Preview = [bool] $Preview; Finish = [bool] $Finish }
 # Phase 4.3: present only when the ongoing update policy is applied after the initial updates.
 $script:PolicyScript = Join-Path $PSScriptRoot 'Set-UpdatePolicy.ps1'
 if (Test-Path -LiteralPath $script:PolicyScript) { . $script:PolicyScript }
+# Phase 9: present when the deployment verifies itself (functions only).
+$script:HealthScript = Join-Path $PSScriptRoot '..\health\DeploymentHealth.ps1'
+if (Test-Path -LiteralPath $script:HealthScript) { . $script:HealthScript -Mode Library }
+$script:HealthShortcut = "Windows Deployment $([char] 0x2014) Health Report"
 
 function Get-WddSystemInfo {
     $os = Get-CimInstance -ClassName Win32_OperatingSystem
@@ -270,6 +279,12 @@ function Format-WddReport {
         } else { $l.Add('  None.') }
         $l.Add('')
     }
+    if ($Report.Contains('health') -and $Report.health) {
+        $l.Add('Deployment verification (Phase 9, read-only)')
+        $l.Add("  $($Report.health.status): $($Report.health.summary)")
+        $l.Add("  Dashboard: $($Report.health.technicianReport)")
+        $l.Add('')
+    }
     if ($Report.Contains('restoration') -and $Report.restoration) {
         $x = $Report.restoration
         $l.Add('Application restoration')
@@ -318,9 +333,23 @@ function Complete-WddDeployment {
     Write-WddLog "FINISHED: $overall. $reason Report: $($Paths.ReportText)" $(if ($overall -eq 'Succeeded') { 'INFO' } else { 'WARN' })
     $eventId = switch ($overall) { 'Succeeded' { 3100 } 'CompletedWithFollowUp' { 3101 } 'CompletedWithFailures' { 3102 } 'Failed' { 3103 } default { 3104 } }
     Write-WddEvent $eventId "Deployment $($Manifest.packageId) finished: $overall. $reason Report: $($Paths.ReportText)" $(if ($overall -eq 'Succeeded') { 'Information' } elseif ($overall -eq 'Failed') { 'Error' } else { 'Warning' })
+    # Phase 9: verify what the stages reported against Windows itself, now that the state says Completed.
+    $health = $null
+    if (Get-Command Invoke-WdhAfterDeployment -ErrorAction SilentlyContinue) {
+        try { $health = Invoke-WdhAfterDeployment $Manifest $Paths } catch { Write-WddLog "Deployment verification could not run: $($_.Exception.Message)" 'WARN' }
+        if ($health) {
+            $report.health = [ordered]@{ status = $health.Status; summary = [string] $health.Report.overall.summary; readyForDelivery = [bool] $health.Report.overall.readyForDelivery; verificationId = [string] $health.Report.verificationId
+                                         report = $health.Path; technicianReport = (Join-Path $health.Directory 'technician-report.html'); customerReport = (Join-Path $health.Directory 'customer-handoff.html') }
+            Write-WddReport $report $Paths
+        }
+    }
     try {
         Remove-WddShortcut 'Deployment progress'
         New-WddShortcut 'Deployment report' (Join-Path $env:SystemRoot 'System32\notepad.exe') "`"$($Paths.ReportText)`"" 'Windows Deployment Builder: deployment report'
+        if ($health) {
+            $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+            New-WddShortcut $script:HealthShortcut $ps "-NoProfile -ExecutionPolicy Bypass -File `"$([IO.Path]::GetFullPath($script:HealthScript))`" -Mode Dashboard -Elevate" 'Windows Deployment Builder: verify the deployment (read-only) and open the health report'
+        }
     } catch { Write-WddLog "Could not update the desktop shortcuts: $($_.Exception.Message)" 'WARN' }
     try { Unregister-WddTask '\WindowsDeploymentBuilder\' 'Deployment' } catch { Write-WddLog "Could not remove the monitor task: $($_.Exception.Message)" 'WARN' }
     return $overall

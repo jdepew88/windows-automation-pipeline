@@ -1,6 +1,7 @@
 import type { Architecture, BloatwareAction, ComponentEntry, Pass, Profile, Script, ScriptPhase, ScriptType } from '../engine/schema/profile';
 import { migrationBackupEditor, migrationFollowUpsEditor, migrationReviewEditor, migrationSettingsEditor, migrationSourceEditor } from './migration';
 import { driversApprovalsEditor, driversBundleEditor, driversHardwareEditor, driversVerifiedEditor } from './drivers';
+import { healthNotesEditor, healthOptionalAppsEditor } from './health';
 import { BLOATWARE, BLOATWARE_GROUP_LABELS, appliesToWindows11, type BloatwareGroup } from '../features/bloatware/catalog';
 import { PHASES } from '../features/scripts';
 import { COMPONENTS } from '../data';
@@ -254,4 +255,6 @@ export const CUSTOM_RENDERERS: Record<string, CustomRenderer> = {
   'drivers.bundle': driversBundleEditor,
   'drivers.verifiedPackages': driversVerifiedEditor,
   'drivers.approvals': driversApprovalsEditor,
+  'health.optionalApps': healthOptionalAppsEditor,
+  'health.customerNotes': healthNotesEditor,
 };

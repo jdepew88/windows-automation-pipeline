@@ -4306,3 +4306,57 @@ details.drv-tr.attention {
     display: none;
   }
 }
+
+/* Phase 9: Deployment Verification & Health (Advanced) */
+.health-app-list {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 4px 16px;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+}
+.health-app-list .check {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+}
+.health-app-list .check span {
+  overflow-wrap: anywhere;
+}
+.health-preview-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 10px 0;
+}
+.health-preview {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  padding: 10px;
+}
+.health-sample-note {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  background: var(--accent-soft);
+  font-size: 13px;
+}
+.health-preview iframe {
+  display: block;
+  width: 100%;
+  height: 640px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+@media (max-width: 720px) {
+  .health-preview iframe {
+    height: 520px;
+  }
+}

@@ -58,6 +58,14 @@ export const settings: SettingDef[] = [
 ];
 
 export function validate(p: Profile, issues: Issue[]): void {
+  // Phase 9 audit: the driver stage lets Windows Update go first; this policy hides drivers from it.
+  if (p.updates.excludeDrivers && p.drivers.enabled && p.drivers.useWindowsUpdate && p.windowsUpdate.enabled && p.windowsUpdate.drivers === 'followPolicy') {
+    issues.push({
+      severity: 'warning',
+      path: 'updates.excludeDrivers',
+      message: '"Do not include drivers with Windows quality updates" is on, so Windows Update will not offer compatible drivers while the driver stage waits for it. Missing drivers then come only from the driver store, offline packages or the technician. Turn it off unless an organization requires it.',
+    });
+  }
   if (p.updates.preventAutomaticReboot && p.updates.mode !== 'windowsDefault') {
     issues.push({
       severity: 'error',

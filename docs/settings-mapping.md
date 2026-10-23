@@ -86,7 +86,7 @@ Validation rules live next to each setting in `src/features/<section>/index.ts` 
 | Setting | Path | Owner default | View | Stage | Mapping | Applies to | Caveat | Status |
 |---|---|---|---|---|---|---|---|---|
 | Windows Update installation | `updates.mode` | notifyInstall | Basic | specialize, firstLogon | HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU\NoAutoUpdate = 0, AUOptions = 3 (notify install) or 2 (notify download). With Windows Update automation on, the deployment monitor applies it (Set-UpdatePolicy.ps1) only after the initial update stage is final; skipped on Home and never written over domain, MDM or WSUS management. Otherwise during specialize. | Windows 10/11 Pro and higher. Microsoft may still enforce installation of some quality updates. | Manual install modes delay security fixes if nobody acts on the notifications. | documented |
-| Do not include drivers with Windows quality updates | `updates.excludeDrivers` | true | Basic | specialize | HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\ExcludeWUDriversInQualityUpdate = 1 | Windows 10/11 Pro and higher |  | documented |
+| Do not include drivers with Windows quality updates | `updates.excludeDrivers` | false | Basic | specialize | HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\ExcludeWUDriversInQualityUpdate = 1 | Windows 10/11 Pro and higher |  | documented |
 | Prevent Windows Update from rebooting while a user is signed in | `updates.preventAutomaticReboot` | false | Advanced | specialize | HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU\AUOptions = 4, NoAutoRebootWithLoggedOnUsers = 1; scheduled task MoveActiveHours | Windows 10/11 | Relies on a recurring scheduled task. Can only be combined with fully automatic updates. | upstream-tested |
 
 ## Windows Update automation
@@ -161,6 +161,20 @@ Validation rules live next to each setting in `src/features/<section>/index.ts` 
 | Offline driver bundle | `drivers.bundle` | null | Basic | firstLogon | drivers-config.json › bundle; on the USB drive WindowsDeployment\drivers\<folder>, Setup-critical packages in $WinPEDriver$\<folder> | Bundle tool: Windows 10/11; export needs administrator rights |  | unverified |
 | Verified driver packages (download) | `drivers.verifiedPackages` | (empty) | Advanced | firstLogon | drivers-config.json › verifiedPackages | Windows 10/11 (Windows PowerShell 5.1, Plug and Play, pnputil.exe) |  | unverified |
 | Approved replacements of working drivers | `drivers.approvals` | (empty) | Advanced | firstLogon | drivers-config.json › approvals | Windows 10/11 (Windows PowerShell 5.1, Plug and Play, pnputil.exe) |  | unverified |
+
+## Deployment Verification & Health
+
+| Setting | Path | Owner default | View | Stage | Mapping | Applies to | Caveat | Status |
+|---|---|---|---|---|---|---|---|---|
+| Verify the deployment automatically when it finishes | `health.enabled` | true | Basic | firstLogon | Embeds DeploymentHealth.ps1, health-config.json and the report template. Complete-Deployment.ps1 runs it once the deployment is complete (again after a pending restart); reports in C:\ProgramData\WindowsDeploymentBuilder\reports\health; desktop shortcut "Windows Deployment — Health Report". | Windows 11 (Windows PowerShell 5.1); runs as SYSTEM at the end of the deployment and on demand as administrator | Tested with simulated computers only; validate on a spare computer before relying on it. | unverified |
+| Generate the technician report | `health.technicianReport` | true | Basic | firstLogon | C:\ProgramData\WindowsDeploymentBuilder\reports\health\technician-report.html | Windows 11 (Windows PowerShell 5.1); runs as SYSTEM at the end of the deployment and on demand as administrator |  | unverified |
+| Generate the customer handoff report | `health.customerReport` | true | Basic | firstLogon | C:\ProgramData\WindowsDeploymentBuilder\reports\health\customer-handoff.html | Windows 11 (Windows PowerShell 5.1); runs as SYSTEM at the end of the deployment and on demand as administrator |  | unverified |
+| Open the technician report when the deployment finishes | `health.openReportAfterDeployment` | true | Basic | firstLogon | Show-DeploymentStatus.ps1 -Watch opens technician-report.html once | Windows 11 (Windows PowerShell 5.1); runs as SYSTEM at the end of the deployment and on demand as administrator |  | unverified |
+| Keep the history of earlier reports | `health.keepHistory` | true | Advanced | firstLogon | C:\ProgramData\WindowsDeploymentBuilder\reports\health\history (up to 50 reports, or the first and the previous one) | Windows 11 (Windows PowerShell 5.1); runs as SYSTEM at the end of the deployment and on demand as administrator |  | unverified |
+| Include drive health observations | `health.storageObservations` | true | Advanced | firstLogon | Get-PhysicalDisk, Get-StorageReliabilityCounter | Windows 11 (Windows PowerShell 5.1); runs as SYSTEM at the end of the deployment and on demand as administrator |  | unverified |
+| Internet during verification | `health.networkRequirement` | auto | Advanced | firstLogon | health-config.json › network.requirement | Windows 11 (Windows PowerShell 5.1); runs as SYSTEM at the end of the deployment and on demand as administrator |  | unverified |
+| Applications that may be missing without blocking delivery | `health.optionalApps` | (empty) | Basic | firstLogon | health-config.json › applications.items[].required | Windows 11 (Windows PowerShell 5.1); runs as SYSTEM at the end of the deployment and on demand as administrator |  | unverified |
+| Technician notes for the customer report | `health.customerNotes` | (empty) | Basic | firstLogon | health-config.json › customerNotes | Windows 11 (Windows PowerShell 5.1); runs as SYSTEM at the end of the deployment and on demand as administrator |  | unverified |
 
 ## System tweaks
 

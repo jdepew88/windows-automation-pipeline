@@ -58,6 +58,17 @@ Unit test coverage by acceptance criterion:
   in `Applications.Tests.ps1` (fault injection on the engine) and `Deployment.Tests.ps1` (the full
   lifecycle: real package, real engine, monitor and recovery tool), and the Reliability & recovery
   browser test; see [phase-5-resilient-provisioning/testing.md](phase-5-resilient-provisioning/testing.md).
+- **Phase 9 (deployment verification and health)**:
+  - `health.test.ts`;
+  - `Health.Tests.ps1`: scenarios A-L, fault injection and the full lifecycle under StrictMode, also
+    run by `npm run test:ps`;
+  - `health.spec.ts`;
+  - the shared simulations `ProvisioningSim.ps1`, `HealthSim.ps1` and `MigrationSim.ps1`;
+  - opt-in, read-only on this computer: `HealthLiveProbe.ps1`;
+  - opt-in: the Firefox scroll regression (`E2E_FIREFOX=1 npx playwright test --project=desktop-firefox`,
+    after `npx playwright install firefox`).
+
+  See [phase-9-deployment-verification-health/testing.md](phase-9-deployment-verification-health/testing.md).
 - **Phase 4.3 (Quick Deployment, update policy timing, Wi-Fi provisioning, catalog layouts)**:
   `quick.test.ts`, `quick.spec.ts`, the new `Deployment.Tests.ps1` scenarios and `Wifi.Tests.ps1`
   (also run by `npm run test:ps`); see

@@ -1,8 +1,9 @@
-import type { ApplicationsSelection } from '../schema/applications';
+import type { AdditionalItem, ApplicationsSelection } from '../schema/applications';
 import type { CatalogCategory, InstallMethod } from './catalog';
 import { UNIVERSAL_PROFILES } from './builtin';
 import { packageKey } from './ids';
 import { ADDED, REQUIRED, allProfiles, expandProfile, installable, manualItems, resolveSelection, type PlannedPackage, type SelectionResult } from './selection';
+import { isReviewed } from './index';
 
 /**
  * Read-only views of the application selection for Quick Deployment: what one profile contributes
@@ -55,17 +56,32 @@ export interface EffectiveApps {
   manual: AppSummaryItem[];
   /** Selected but impossible to install (invalid identifier); generation reports them. */
   unresolved: AppSummaryItem[];
-  /** Distinct selected applications (each counted once, however many profiles select it). */
+  /** Phase 9: Additional Software entries (installers WinGet does not cover), manual unless reviewed. */
+  additional: AppSummaryItem[];
+  /** Distinct selected applications (each counted once, however many profiles select it), plus Additional Software. */
   total: number;
 }
 
+/** An Additional Software entry as the application engine treats it (see applicationsConfig). */
+const additionalItem = (i: AdditionalItem): AppSummaryItem => {
+  const automatic = i.execution === 'automatic' && isReviewed(i);
+  return {
+    key: `additional:${i.id.toLowerCase()}`,
+    displayName: i.name || i.fileName || 'Unnamed installer',
+    kind: automatic ? 'automatic' : 'manual',
+    method: automatic ? 'vendor' : 'manual',
+    origin: automatic ? `Additional Software: ${i.fileName}, checksum and signature checked` : `Additional Software: manual follow-up${i.publisher ? ` (${i.publisher})` : ''}`,
+  };
+};
+
 /** The applications this deployment installs or lists for follow-up, after every profile, addition and removal. */
-export function effectiveApps(sel: ApplicationsSelection, enabled = true, r: SelectionResult = resolveSelection(sel)): EffectiveApps {
-  if (!enabled) return { enabled, automatic: [], manual: [], unresolved: [], total: 0 };
+export function effectiveApps(sel: ApplicationsSelection, enabled = true, r: SelectionResult = resolveSelection(sel), additionalSoftware: readonly AdditionalItem[] = []): EffectiveApps {
+  if (!enabled) return { enabled, automatic: [], manual: [], unresolved: [], additional: [], total: 0 };
   const automatic = installable(r).map((x) => item(sel, x, r));
   const manual = manualItems(r).map((x) => item(sel, x, r));
   const unresolved = r.packages.filter((x) => x.resolution === 'unresolved').map((x) => item(sel, x, r));
-  return { enabled, automatic, manual, unresolved, total: r.packages.length };
+  const additional = additionalSoftware.map(additionalItem);
+  return { enabled, automatic, manual, unresolved, additional, total: r.packages.length + additional.length };
 }
 
 /** How one app of a profile preview relates to this deployment. */

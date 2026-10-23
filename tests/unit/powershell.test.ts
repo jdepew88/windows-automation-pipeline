@@ -14,6 +14,7 @@ import { matchInventory } from '../../src/engine/migration/matching';
 import { SETTINGS_ADAPTERS } from '../../src/engine/migration/adapters';
 import { writeDeploymentFixture } from '../powershell/deployment-fixture';
 import { writeWifiFixture } from '../powershell/wifi-fixture';
+import { CustomerHandoffSchema, HealthReportSchema, HEALTH_STATES } from '../../src/engine/health';
 
 /**
  * Runs Windows PowerShell 5.1 against the generated scripts. Only possible on Windows; skipped
@@ -175,6 +176,43 @@ describe.skipIf(!onWindows)('PowerShell (Windows only)', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   }, 300_000);
+
+  it('deployment verification and health scenarios pass (Phase 9); every report matches the published schema', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'wdh-fixture-'));
+    const out = join(dir, 'out');
+    try {
+      writeDeploymentFixture(dir);
+      let text: string;
+      try {
+        text = await psAsync(['-File', script('../powershell/Health.Tests.ps1'), '-Fixture', dir, '-Out', out]);
+      } catch (e) {
+        throw new Error(`Health.Tests.ps1 failed:\n${(e as { stdout?: string }).stdout ?? e}`);
+      }
+      expect(text).toMatch(/\b\d+ passed, 0 failed/);
+      const files = readdirSync(out);
+      // Scenarios A (Ready), B (ReadyWithWarnings), E (Incomplete), F (NeedsAttention, restoration) and K (after recovery).
+      expect(files.filter((f) => f.endsWith('-deployment-health.json')).sort()).toEqual(['A-deployment-health.json', 'B-deployment-health.json', 'E-deployment-health.json', 'F-deployment-health.json', 'K-deployment-health.json']);
+      const seen = new Set<string>();
+      for (const f of files.filter((x) => x.endsWith('-deployment-health.json'))) {
+        const parsed = HealthReportSchema.safeParse(JSON.parse(stripBom(readFileSync(join(out, f), 'utf8'))));
+        expect(parsed.success ? [] : parsed.error.issues.slice(0, 5), f).toEqual([]);
+        if (parsed.success) seen.add(parsed.data.overall.status);
+      }
+      expect([...seen].sort()).toEqual(['Incomplete', 'NeedsAttention', 'Ready', 'ReadyWithWarnings']);
+      for (const f of files.filter((x) => x.endsWith('-customer-handoff.json'))) {
+        const parsed = CustomerHandoffSchema.safeParse(JSON.parse(stripBom(readFileSync(join(out, f), 'utf8'))));
+        expect(parsed.success ? [] : parsed.error.issues.slice(0, 5), f).toEqual([]);
+      }
+      for (const f of files.filter((x) => x.endsWith('.html'))) {
+        const html = readFileSync(join(out, f), 'utf8');
+        expect(html, f).not.toContain('__WDB_HEALTH_DATA__');
+        expect(html.match(/<\/script>/g)?.length, f).toBe(2);
+      }
+      expect(HEALTH_STATES).toEqual(['Ready', 'ReadyWithWarnings', 'NeedsAttention', 'Incomplete', 'Unverifiable', 'Failed']);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 600_000);
 
   it('Wi-Fi profile script scenarios pass against the generated Wifi.xml and script (Phase 4.3)', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'wdw-fixture-'));

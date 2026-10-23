@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { AdditionalSoftwareSchema, ApplicationsSchema } from './applications';
 import { MigrationSchema } from './migration';
 import { DriversSchema } from './drivers';
+import { HealthSchema } from './health';
 
 /**
  * The typed deployment profile. One flat object per section; "mode" fields choose between
@@ -10,7 +11,7 @@ import { DriversSchema } from './drivers';
  *
  * Bump {@link SCHEMA_VERSION} and add a migration in `migrations.ts` for any breaking change.
  */
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 
 export const ScriptTypeSchema = z.enum(['ps1', 'cmd', 'reg', 'vbs']);
 export type ScriptType = z.infer<typeof ScriptTypeSchema>;
@@ -171,6 +172,9 @@ export const ProfileSchema = z
 
     /** Phase 8: hardware-aware driver policy (detection happens on the installed computer). */
     drivers: DriversSchema,
+
+    /** Phase 9: independent end-of-deployment verification, health reports and customer handoff. */
+    health: HealthSchema,
 
     system: z
       .object({

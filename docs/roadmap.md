@@ -83,9 +83,34 @@ USB assistant, recovery-tool integration, `reports\drivers.json` for Phase 9. Ha
 optional applications. Tested with simulated hardware only.
 Report: `phase-8-hardware-aware-drivers/implementation-report.md`.
 
-The remaining roadmap: Phase 9
-deployment verification and health (it can read `attempts.jsonl`, `status.json` outcomes, report v2
-and `restoration.json`). The first real installation is one combined bare-metal test of all phases.
+## Phase 9: deployment verification and health (branch `feature/phase-9-deployment-verification-health`)
+
+A read-only health engine (`DeploymentHealth.ps1`) checks what the deployment was meant to achieve
+against Windows itself:
+
+- edition, account, computer name;
+- Windows Update, the selected applications and restored settings;
+- devices, security, network, storage;
+- the settings of earlier phases.
+
+The engines' results are evidence, not proof. It runs at the end of the deployment, again after a
+pending restart, and from the desktop shortcut and the recovery tool. It writes:
+
+- six explicit health states;
+- a technician dashboard and a customer handoff;
+- `deployment-health.json` with history and comparison.
+
+The Advanced section and Final Review cover it; Final Review now lists Additional Software.
+Corrections:
+
+- new deployments let Windows Update offer drivers;
+- recovery no longer retargets per-user installations silently;
+- a StrictMode error in `Initialize-Deployment.ps1` that would have stopped the first sign-in.
+
+Tested with simulated computers only. Report: `phase-9-deployment-verification-health/implementation-report.md`.
+
+The first real installation is one combined bare-metal test of all phases:
+`phase-9-deployment-verification-health/bare-metal-checklist.md`.
 
 ## Milestone 2: validation and hardening
 
@@ -117,10 +142,14 @@ and `restoration.json`). The first real installation is one combined bare-metal 
   inventory, export bundle, `$WinPEDriver$` storage driver, NVIDIA on the basic display driver, a
   computer without a network driver, a driver that needs a restart.
 
-## Next: deployment verification and health (Phase 9)
+- Run the combined Phase 1-9 checklist (`phase-9-deployment-verification-health/bare-metal-checklist.md`)
+  and record its three gates separately: installation boots, provisioning completes, health
+  verification passes.
 
-Read `reports\drivers.json` (health status and flags), the engines' results, `attempts.jsonl` and
-the deployment report into one verification and health view.
+## Next
+
+- Phase 8.5 (postponed): targeted Windows customizations, each registering a verification adapter
+  (`customizationAdapters`).
 
 ## Then
 

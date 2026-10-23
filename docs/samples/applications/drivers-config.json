@@ -22,7 +22,7 @@
   "maxNetworkDeferrals": 6,
   "windowsUpdate": {
     "enabled": true,
-    "drivers": "exclude",
+    "drivers": "include",
     "stateFile": "C:\\ProgramData\\WindowsDeploymentBuilder\\Updates\\state.json",
     "resultFile": "C:\\ProgramData\\WindowsDeploymentBuilder\\Updates\\result.json",
     "taskPath": "\\WindowsDeploymentBuilder\\",

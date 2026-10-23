@@ -122,6 +122,17 @@ export const MIGRATIONS: Record<number, Migration> = {
       note: 'Hardware-aware driver provisioning (added in schema version 5) is turned off for this older profile, so it produces the same deployment as before. Turn it on under "Hardware & Drivers" if you want it.',
     };
   },
+
+  // v6 (Phase 9) adds deployment verification and health reports. New deployments verify
+  // themselves; an older profile keeps the package it produced (no health engine), and its
+  // explicit Windows Update driver policy is kept as it was.
+  5: (input) => {
+    if (isObj(input.health)) return { value: input };
+    return {
+      value: { ...input, health: { enabled: false } },
+      note: 'Deployment verification and health reports (added in schema version 6) are turned off for this older profile, so it produces the same deployment as before. Turn them on under "Verification & Health" if you want them.',
+    };
+  },
 };
 
 /** The six (empty) built-in profiles of schema version 3, for the v2→v3 step. */

@@ -66,6 +66,8 @@ describe('earlier milestones are preserved', () => {
     const r = generate(profile((p) => {
       p.windowsUpdate.enabled = false;
       noApps(p);
+      // Milestone 1's owner default withheld drivers from quality updates; Phase 9 changed the default.
+      p.updates.excludeDrivers = true;
     }));
     expect(r.xml).toBe(M1_XML);
     expect(r.assets).toEqual([]);
@@ -80,7 +82,14 @@ describe('earlier milestones are preserved', () => {
     expect(r.profile!.schemaVersion).toBe(SCHEMA_VERSION);
     expect(r.profile!.applications.selection.selectedProfiles).toEqual([]);
     expect(r.profile!.deferred).toEqual({ installPowerShell7: true });
-    expect(generate(r.profile).xml).toBe(generate(profile(noApps)).xml);
+    // The older profile keeps its explicit driver policy and gets no health engine (schema 6 migration).
+    expect(r.profile!.updates.excludeDrivers).toBe(true);
+    expect(r.profile!.health.enabled).toBe(false);
+    expect(generate(r.profile).xml).toBe(generate(profile((p) => {
+      noApps(p);
+      p.updates.excludeDrivers = true;
+      p.health.enabled = false;
+    })).xml);
   });
 
   it('a Milestone 1 profile with recorded WinGet IDs moves them to an unselected profile; the XML is unchanged', () => {

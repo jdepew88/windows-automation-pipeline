@@ -20,5 +20,9 @@ export default defineConfig({
     // Tablet portrait width (iPad Air class), Chromium with touch.
     { name: 'tablet-chromium', use: { ...devices['Desktop Chrome'], viewport: { width: 820, height: 1180 }, hasTouch: true } },
     { name: 'mobile-chromium', use: { ...devices['Pixel 7'] } },
+    // Phase 9: the Advanced catalog scroll regression in Firefox (its scroll anchoring differs from
+    // Chromium's). Opt-in, because it needs Playwright's Firefox build: npx playwright install firefox,
+    // then E2E_FIREFOX=1 npx playwright test --project=desktop-firefox
+    ...(process.env.E2E_FIREFOX ? [{ name: 'desktop-firefox', use: { ...devices['Desktop Firefox'] }, testMatch: /app-review\.spec\.ts/, grep: /keeps the scroll position/ }] : []),
   ],
 });

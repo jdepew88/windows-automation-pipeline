@@ -9,9 +9,11 @@ import { SETTINGS_BY_PATH } from '../features';
 import { BUILTIN_PROFILES, UNIVERSAL_PROFILES } from './applications/builtin';
 import { installable, resolveSelection, type SelectionResult } from './applications/selection';
 import { toggleProfile } from './applications/profiles';
-import { applicationsActive } from './applications';
-import { ongoingPolicyDeferred } from './windows-update';
+import { applicationsActive, isReviewed } from './applications';
+import { ongoingPolicyDeferred, resolveDrivers } from './windows-update';
 import { deploymentActive } from './deployment';
+import { HEALTH_SHORTCUT, healthActive } from './health';
+import { migrationActive, settingsRestoreActive } from './migration/plan';
 
 /**
  * Phase 4.3 Quick Deployment: a second way to edit the SAME Profile the Advanced Configuration
@@ -347,7 +349,7 @@ export function reviewSummary(p: Profile, sel: SelectionResult = resolveSelectio
         ? 'Windows will identify hardware, use compatible existing or Windows Update drivers, and report any missing drivers.'
         : 'Off: the deployment does not install or change drivers.',
       detail: p.drivers.enabled
-        ? `Detected on the installed computer, not by this website.${p.windowsUpdate.enabled && p.updates.excludeDrivers && p.windowsUpdate.drivers === 'followPolicy' ? ' Windows Update is set not to install drivers, so missing ones come from the Windows driver store or approved offline packages, or are reported.' : ''}`
+        ? `Detected on the installed computer, not by this website.${p.windowsUpdate.enabled && p.updates.excludeDrivers && p.windowsUpdate.drivers === 'followPolicy' ? ' Windows Update is set not to install drivers, so missing ones come from the Windows driver store or approved offline packages, or are reported.' : p.windowsUpdate.enabled && p.drivers.useWindowsUpdate && resolveDrivers(p) === 'include' ? ' Windows Update goes first and may supply compatible drivers; the driver stage handles only what is still missing.' : ''}`
         : null,
       offline: p.drivers.enabled && p.drivers.bundle && p.drivers.includeOfflinePackages ? `Offline bundle ${p.drivers.bundle.folderName} (${p.drivers.bundle.packages.length} package(s))` : null,
     },
@@ -363,8 +365,19 @@ export function reviewSummary(p: Profile, sel: SelectionResult = resolveSelectio
       universal: UNIVERSAL_PROFILES.filter((u) => sel.activeProfiles.includes(u)).map(profileName),
       conflicts: sel.groupConflicts.map((g) => g.message),
       dependencies: sel.packages.filter((x) => x.origins.includes('required')).map((x) => x.displayName),
+      // Phase 9: installers WinGet does not cover, so they are visible before deployment too.
+      additional: p.additionalSoftware.items.map((i) => `${i.name || i.fileName || 'Unnamed installer'} (${i.execution === 'automatic' && isReviewed(i) ? 'installed from the supplied file' : 'manual follow-up'})`),
       // Phase 5: how failures are handled (configured in Advanced > Applications > Reliability & recovery).
       recovery: `${p.applications.recovery.automaticRetry ? `Temporary failures retried automatically (up to ${p.applications.maxAttemptsPerPackage} attempts, growing wait); a lost connection pauses instead of failing` : 'No automatic retry (one attempt each)'}. ${p.applications.recovery.includeRecoveryTool ? 'Failed apps can be retried later with the "Deployment recovery" tool, without reinstalling Windows.' : 'No recovery tool in the package.'}`,
+    },
+    verification: {
+      final: healthActive(p)
+        ? 'Automatic and read-only: when the deployment finishes, the computer checks the edition, account, updates, selected applications, drivers, security and storage against Windows itself, and again after a pending restart'
+        : p.health.enabled
+          ? 'Nothing runs after installation, so there is nothing to verify'
+          : 'Off: no health report (the deployment report is still written)',
+      reports: healthActive(p) ? [p.health.technicianReport ? 'technician dashboard' : '', p.health.customerReport ? 'customer handoff' : '', 'machine-readable JSON'].filter(Boolean).join(', ') + ` on the installed computer ("${HEALTH_SHORTCUT}")` : null,
+      restoration: settingsRestoreActive(p) ? `Settings restored from backup ${p.migration.backup!.folderName} (put it on the USB drive); verified per application` : migrationActive(p) ? 'Applications from the inventory review; no settings backup' : 'No backup restoration',
     },
     package: {
       starts: deploymentActive(p),

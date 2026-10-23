@@ -1,4 +1,4 @@
-# Windows Deployment Builder (Milestone 1 + Phase 2 Windows Update + Phase 3 WinGet provisioning + Phase 4 USB deployment + Phase 4.2 application profiles + Phase 4.3 Quick Deployment + Phase 5 resilient provisioning + Phase 6 application backup and restore + Phase 7 USB media preparation + Phase 8 hardware-aware drivers)
+# Windows Deployment Builder (Milestone 1 + Phase 2 Windows Update + Phase 3 WinGet provisioning + Phase 4 USB deployment + Phase 4.2 application profiles + Phase 4.3 Quick Deployment + Phase 5 resilient provisioning + Phase 6 application backup and restore + Phase 7 USB media preparation + Phase 8 hardware-aware drivers + Phase 9 deployment verification and health)
 
 A local, offline, browser-based generator for **Windows 11 Pro `autounattend.xml`** answer files,
 written entirely in TypeScript. It is built on the option model and XML patterns of
@@ -91,6 +91,44 @@ utilities (NVIDIA App, CUDA, Intel DSA, OEM tools) are never installed because h
 BIOS and firmware are never updated. Result: `reports\drivers.json`. The website cannot see a
 computer: an inventory taken on it (read-only tool) can be imported to review it beforehand. Details:
 [docs/phase-8-hardware-aware-drivers/architecture.md](docs/phase-8-hardware-aware-drivers/architecture.md).
+
+## Deployment verification and health (Phase 9)
+
+**Advanced Configuration › Verification & Health** (on for new deployments). When the deployment
+ends, the installed computer checks what was requested against Windows itself, read-only. It
+checks:
+
+- the edition, the `owner` account and its rights, and the computer name;
+- Windows Update;
+- the selected applications (only those) and restored settings;
+- every device's problem code;
+- Defender, the firewall, UAC and encryption;
+- the network and the system drive.
+
+A script that exited with 0 is never taken as proof. The result is one of:
+
+| State | Meaning |
+|---|---|
+| Ready | everything required is verified |
+| ReadyWithWarnings | required items verified; follow-ups remain |
+| NeedsAttention | a required item is not met |
+| Incomplete | still working, or waiting for a restart or the network |
+| Unverifiable | evidence is missing or damaged |
+| Failed | a critical check failed |
+
+**Reports** (`C:\ProgramData\WindowsDeploymentBuilder\reports\health`): a technician dashboard (offline
+HTML; print it to PDF), a separate customer handoff without passwords or technical details, and
+`deployment-health.json`. Earlier reports are kept, so a re-check shows what was resolved.
+
+**Desktop:** "Windows Deployment — Health Report" verifies again and opens the dashboard.
+
+**Repairs** stay in "Deployment recovery". It now also refuses to move per-user installations to
+another administrator's profile unless asked (`-RetargetUser`).
+
+New deployments also let Windows Update offer compatible drivers again: the old default hid them
+from the driver stage.
+
+Details: [docs/phase-9-deployment-verification-health/architecture.md](docs/phase-9-deployment-verification-health/architecture.md).
 
 ## Prepare the installation USB (Phase 7)
 
@@ -269,6 +307,8 @@ from code).
 - [docs/phase-7-usb-media-preparation/testing.md](docs/phase-7-usb-media-preparation/testing.md), [physical-usb-checklist.md](docs/phase-7-usb-media-preparation/physical-usb-checklist.md) and [implementation-report.md](docs/phase-7-usb-media-preparation/implementation-report.md)
 - [docs/phase-8-hardware-aware-drivers/architecture.md](docs/phase-8-hardware-aware-drivers/architecture.md), [inventory-and-identification.md](docs/phase-8-hardware-aware-drivers/inventory-and-identification.md), [matching-and-sources.md](docs/phase-8-hardware-aware-drivers/matching-and-sources.md), [windows-update.md](docs/phase-8-hardware-aware-drivers/windows-update.md), [offline-setup-network.md](docs/phase-8-hardware-aware-drivers/offline-setup-network.md), [sequencing-and-recovery.md](docs/phase-8-hardware-aware-drivers/sequencing-and-recovery.md), [security.md](docs/phase-8-hardware-aware-drivers/security.md), [phase9-integration.md](docs/phase-8-hardware-aware-drivers/phase9-integration.md)
 - [docs/phase-8-hardware-aware-drivers/testing.md](docs/phase-8-hardware-aware-drivers/testing.md), [bare-metal-checklist.md](docs/phase-8-hardware-aware-drivers/bare-metal-checklist.md) and [implementation-report.md](docs/phase-8-hardware-aware-drivers/implementation-report.md)
+- [docs/phase-9-deployment-verification-health/architecture.md](docs/phase-9-deployment-verification-health/architecture.md), [health-states.md](docs/phase-9-deployment-verification-health/health-states.md), [checks.md](docs/phase-9-deployment-verification-health/checks.md), [reports.md](docs/phase-9-deployment-verification-health/reports.md), [security.md](docs/phase-9-deployment-verification-health/security.md)
+- [docs/phase-9-deployment-verification-health/testing.md](docs/phase-9-deployment-verification-health/testing.md), [audit.md](docs/phase-9-deployment-verification-health/audit.md), [bare-metal-checklist.md](docs/phase-9-deployment-verification-health/bare-metal-checklist.md) (the combined first installation, Phases 1-9) and [implementation-report.md](docs/phase-9-deployment-verification-health/implementation-report.md)
 
 ## Not yet implemented
 

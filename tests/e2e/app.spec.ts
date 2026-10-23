@@ -208,7 +208,8 @@ test('Windows Update automation: on by default, assets downloadable, policy conf
   await expect(checkbox(page, 'windowsUpdate.enabled')).toBeChecked();
   await expect(radio(page, 'windowsUpdate.drivers', 'followPolicy')).toBeChecked();
   await expect(radio(page, 'windowsUpdate.featureUpdates', 'skip')).toBeChecked();
-  await expect(page.getByTestId('summary')).toContainText('On: drivers excluded, feature updates skipped');
+  // Phase 9: new deployments let Windows Update offer compatible drivers.
+  await expect(page.getByTestId('summary')).toContainText('On: drivers included, feature updates skipped');
   await expect(preview(page)).toContainText('WindowsUpdate\\Install-UpdateEngine.ps1');
 
   const assets = page.getByTestId('assets');
@@ -219,7 +220,7 @@ test('Windows Update automation: on by default, assets downloadable, policy conf
   const [dl] = await Promise.all([page.waitForEvent('download'), assets.locator('[data-asset="config.json"] [data-action="download-asset"]').click()]);
   expect(dl.suggestedFilename()).toBe('config.json');
   const config = JSON.parse(await readFile((await dl.path())!, 'utf8'));
-  expect(config).toMatchObject({ drivers: 'exclude', featureUpdates: 'skip', maxReboots: 10 });
+  expect(config).toMatchObject({ drivers: 'include', featureUpdates: 'skip', maxReboots: 10 });
 
   await page.getByRole('button', { name: 'Advanced', exact: true }).click();
   await go(page, 'windowsUpdate');
@@ -229,11 +230,17 @@ test('Windows Update automation: on by default, assets downloadable, policy conf
   const [dl2] = await Promise.all([page.waitForEvent('download'), assets.locator('[data-asset="config.json"] [data-action="download-asset"]').click()]);
   expect(JSON.parse(await readFile((await dl2.path())!, 'utf8'))).toMatchObject({ maxReboots: 3, excludedKbs: ['KB5034441'] });
 
+  // The conflict with a policy that withholds drivers (an older profile's or an organization's choice).
+  await go(page, 'updates');
+  await checkbox(page, 'updates.excludeDrivers').check();
   await go(page, 'windowsUpdate');
   await radio(page, 'windowsUpdate.drivers', 'include').check();
   await expect(field(page, 'windowsUpdate.drivers').locator('.issues .error')).toContainText('conflicts');
   await expect(page.getByTestId('status')).toContainText('Cannot generate');
   await radio(page, 'windowsUpdate.drivers', 'followPolicy').check();
+  await go(page, 'updates');
+  await checkbox(page, 'updates.excludeDrivers').uncheck();
+  await go(page, 'windowsUpdate');
 
   await checkbox(page, 'windowsUpdate.enabled').uncheck();
   await expect(field(page, 'windowsUpdate.drivers')).toBeHidden();

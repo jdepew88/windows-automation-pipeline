@@ -363,7 +363,7 @@ export function renderWizard(ctx: WizardContext): WizardHandle {
     patchChildren(typeGrid, cards);
 
     // The combined selection after every ticked profile, device answer and individual change.
-    const apps = effectiveApps(sel, p.applications.enabled, r);
+    const apps = effectiveApps(sel, p.applications.enabled, r, p.additionalSoftware.items);
     patchChildren(combinedBox, [
       h(
         'button',
@@ -691,10 +691,16 @@ export function renderWizard(ctx: WizardContext): WizardHandle {
             ['Manual follow-up', a.manual.length ? a.manual.join(', ') : 'None'],
             ['Microsoft Store', a.store.length ? a.store.join(', ') : null],
             ['Added by dependency', a.dependencies.length ? a.dependencies.join(', ') : null],
+            ['Additional Software', a.additional.length ? a.additional.join(', ') : null],
             ['Your changes', `${a.added} added · ${a.unticked} unticked`],
             ['If something fails', a.enabled ? a.recovery : null],
             ['Conflicts', a.conflicts.length ? h('span', { class: 'err-text' }, a.conflicts.join(' ')) : null],
-          ], [selectedAppsSummary(p.applications.selection, p.applications.enabled, sel)], 'review-apps'),
+          ], [selectedAppsSummary(p.applications.selection, p.applications.enabled, sel, p.additionalSoftware.items)], 'review-apps'),
+          section('Verification & handoff', 'shieldCheck', { label: 'Edit in Advanced', run: () => ctx.openAdvanced('section-health') }, [
+            ['Final verification', s.verification.final],
+            ['Reports', s.verification.reports],
+            ['Backup & restore', s.verification.restoration],
+          ], [], 'review-verification'),
           section('Deployment package', 'usb', { label: 'Advanced', run: () => ctx.openAdvanced('section-deployment') }, [
             ['Installation media', s.package.media],
             ['Answer file', `${s.package.answerFile} at the root of the USB drive`],

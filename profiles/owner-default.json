@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 5,
+  "schemaVersion": 6,
   "profileName": "Owner default",
   "setup": {
     "languageMode": "unattended",
@@ -68,7 +68,7 @@
   },
   "updates": {
     "mode": "notifyInstall",
-    "excludeDrivers": true,
+    "excludeDrivers": false,
     "preventAutomaticReboot": false
   },
   "windowsUpdate": {
@@ -143,6 +143,17 @@
     "verifiedPackages": [],
     "approvals": [],
     "hardware": null
+  },
+  "health": {
+    "enabled": true,
+    "technicianReport": true,
+    "customerReport": true,
+    "keepHistory": true,
+    "storageObservations": true,
+    "openReportAfterDeployment": true,
+    "networkRequirement": "auto",
+    "optionalApps": [],
+    "customerNotes": ""
   },
   "system": {
     "disableFastStartup": true,

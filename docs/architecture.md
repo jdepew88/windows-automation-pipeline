@@ -209,6 +209,15 @@ Windows ranks), verifies the device, and writes `reports\drivers.json`. The appl
 for it (`coordination.drivers`). The USB assistant places the bundle and the Setup-critical drivers
 (`$WinPEDriver$`). See `docs/phase-8-hardware-aware-drivers/architecture.md`.
 
+Phase 9 adds the read-only health engine `DeploymentHealth.ps1`. The website writes the
+verification plan (`health-config.json`: only the selected applications, the expected edition,
+account, name, security values and settings adapters). `Complete-Deployment.ps1` runs it once the
+deployment state is Completed: it reads the engines' results as evidence, checks each expectation
+against Windows through small `Get-Wdh*` adapters, and writes `reports\health\` (JSON, technician
+dashboard, customer handoff, history). It runs again after a pending restart (a self-removing startup
+task), from the desktop shortcut and from the recovery tool. It never repairs anything. See
+`docs/phase-9-deployment-verification-health/architecture.md`.
+
 ## Extension points for later milestones
 
 - `profile.deferred.installPowerShell7` is recorded and round-tripped. Nothing reads it during

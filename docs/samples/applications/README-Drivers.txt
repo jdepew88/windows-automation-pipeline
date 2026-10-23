@@ -15,7 +15,7 @@ What happens
   1. First start: every present device is inspected (identifiers, driver, problem code).
      If no network adapter has a working driver, verified offline packages are tried first.
   2. Waits for the Windows Update stage to finish and for its restart (at most 8 h).
-     Windows Update drivers: not allowed by this deployment's update policy.
+     Windows Update drivers: allowed (Windows Update may install drivers itself).
   3. Inspects again. What works is kept; nothing is replaced because a newer version exists.
   4. For a missing or broken driver only: the Windows driver store, the pinned offline bundle, then technician-verified packages (SHA-256, Microsoft-signed INF only).
      Windows' own driver ranking makes the final choice (pnputil /add-driver /install).

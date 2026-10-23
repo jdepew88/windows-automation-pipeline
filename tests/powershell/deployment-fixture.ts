@@ -46,7 +46,36 @@ export function writeDeploymentFixture(dir: string): { packageId: string; files:
   writeFileSync(join(dir, 'package.zip'), pkg.zip);
   writeMigrationFixture(join(dir, 'migration'));
   writeDriversFixture(join(dir, 'drivers'));
+  writeHealthFixture(join(dir, 'health'));
   return { packageId: pkg.manifest.packageId, files: pkg.manifest.files.length };
+}
+
+/**
+ * Phase 9 fixture (<dir>/health): a new deployment as the owner defaults make it (account "owner",
+ * Windows Update, the driver stage and verification on), Core Essentials without its manual
+ * RustDesk entry so a perfect computer can be "Ready", plus Git, an iPhone (Apple Devices from the
+ * Microsoft Store) and the portable Rufus. VLC is marked optional for delivery.
+ */
+export function writeHealthFixture(dir: string): { packageId: string } {
+  rmSync(dir, { recursive: true, force: true });
+  const p = ownerDefaults();
+  p.applications.selection.devices.phone = 'iphone';
+  p.applications.selection.removed.push('catalog:rustdesk');
+  p.applications.selection.added.push(catalogRef(catalogEntryById('rufus')!)!);
+  p.applications.selection.added.push({ packageIdentifier: 'Git.Git', source: 'winget', displayName: 'Git', version: '', scope: '' });
+  p.health.optionalApps = ['winget:videolan.vlc'];
+  p.health.customerNotes = 'Your files from the old computer are in Documents. Call us with any question.';
+  const r = generate(p);
+  if (!r.ok) throw new Error(`health fixture profile is invalid: ${JSON.stringify(r.issues)}`);
+  const pkg = buildDeploymentPackage(p, r);
+  const usb = join(dir, 'usb');
+  for (const e of readZip(pkg.zip)) {
+    const target = join(usb, ...e.path.split('/'));
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, e.data);
+  }
+  writeFileSync(join(dir, 'package.zip'), pkg.zip);
+  return { packageId: pkg.manifest.packageId };
 }
 
 export const MIGRATION_BACKUP_FOLDER = 'WDB-AppBackup-20261021-120000-a1b2c3';

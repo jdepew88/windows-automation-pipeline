@@ -1,4 +1,4 @@
-import type { ApplicationsSelection } from '../engine/schema/applications';
+import type { AdditionalItem, ApplicationsSelection } from '../engine/schema/applications';
 import { effectiveApps, type AppSummaryItem, type EffectiveApps, type ProfilePreview } from '../engine/applications/preview';
 import type { SelectionResult } from '../engine/applications/selection';
 import { appLogo } from './app-icon';
@@ -46,7 +46,7 @@ export function effectiveAppsView(apps: EffectiveApps, opts: { testid: string; o
     ? 'Application provisioning is off: no applications are installed.'
     : apps.total === 0
       ? 'No applications are selected.'
-      : `${plural(apps.total, 'application')} selected: ${apps.automatic.length} installed automatically${apps.manual.length ? `, ${apps.manual.length} manual follow-up` : ''}${apps.unresolved.length ? `, ${apps.unresolved.length} cannot be installed` : ''}.`;
+      : `${plural(apps.total, 'application')} selected: ${apps.automatic.length} installed automatically${apps.manual.length ? `, ${apps.manual.length} manual follow-up` : ''}${apps.unresolved.length ? `, ${apps.unresolved.length} cannot be installed` : ''}${apps.additional.length ? `, ${apps.additional.length} Additional Software` : ''}.`;
   return h(
     'div',
     { class: 'app-sum', 'data-testid': opts.testid, 'data-total': String(apps.total) },
@@ -54,12 +54,13 @@ export function effectiveAppsView(apps: EffectiveApps, opts: { testid: string; o
     group('Installed automatically', apps.automatic, `${opts.testid}-auto`, note),
     group('Manual follow-up', apps.manual, `${opts.testid}-manual`, note, 'Listed with official download instructions; never reported as installed.'),
     group('Cannot be installed', apps.unresolved, `${opts.testid}-unresolved`, note, 'Fix or remove them in Applications.'),
+    group('Additional Software', apps.additional, `${opts.testid}-additional`, (x) => (opts.origins ? x.origin : x.kind === 'manual' ? 'Manual follow-up' : 'Installed from the supplied installer'), 'Installers WinGet does not cover; each is checked by the final verification.'),
   );
 }
 
 /** Final Review: only what the deployment installs or lists. */
-export function selectedAppsSummary(sel: ApplicationsSelection, enabled: boolean, r: SelectionResult): HTMLElement {
-  return effectiveAppsView(effectiveApps(sel, enabled, r), { testid: 'review-app-summary' });
+export function selectedAppsSummary(sel: ApplicationsSelection, enabled: boolean, r: SelectionResult, additional: readonly AdditionalItem[] = []): HTMLElement {
+  return effectiveAppsView(effectiveApps(sel, enabled, r, additional), { testid: 'review-app-summary' });
 }
 
 /** The list a profile's "View applications" opens. */

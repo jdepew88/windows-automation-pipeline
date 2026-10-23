@@ -171,7 +171,7 @@ function Invoke-WddInitialize {
     param([hashtable] $Manifest, [string] $ManifestPath, [string] $SourceMode, [string] $SourceRoot, [string] $EmbeddedRoot, [hashtable] $Paths, [switch] $NoConsole)
     Initialize-WddLogging $Paths
     $identity = Get-WddIdentity
-    Write-WddLog "==== Deployment orchestrator $script:DeployVersion: initialize ($SourceMode) as $($identity.Name), package $($Manifest.packageId) ===="
+    Write-WddLog "==== Deployment orchestrator $($script:DeployVersion): initialize ($SourceMode) as $($identity.Name), package $($Manifest.packageId) ===="
     if (Test-WddWinPE) { Write-WddLog 'Refusing to run in Windows PE.' 'ERROR'; return 'RefusedWinPE' }
     if (-not $identity.IsAdmin) { Write-WddLog 'Refusing to run without administrator rights.' 'ERROR'; return 'RefusedNotElevated' }
 
