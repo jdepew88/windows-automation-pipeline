@@ -224,16 +224,21 @@ describe('deployment assets and contracts', () => {
     expect(PACKAGE_STATUSES).toEqual(['Pending', 'Installing', 'Succeeded', 'AlreadyInstalled', 'Skipped', 'SkippedByUser', 'RequiresInteraction', 'RequiresRestart', 'Failed', 'Unavailable']);
   });
 
-  it('describes stages, order, locks and the Phase 4 driver hand-off in orchestration.json', () => {
-    const o = orchestrationContract(withApps());
+  it('describes stages, order, locks and the driver stage in orchestration.json', () => {
+    // Phase 8 implemented the driver stage the Phase 4 contract reserved: applications now wait for it.
+    const o = orchestrationContract(withApps((p) => (p.drivers.enabled = true)));
     expect(o.stages.map((s) => [s.id, s.order, s.enabled, s.implemented])).toEqual([
       ['windowsUpdate', 1, true, true],
       ['applications', 2, true, true],
-      ['drivers', 3, false, false],
+      ['drivers', 3, true, true],
     ]);
-    expect(o.stages[1]!.waitsFor).toEqual(['windowsUpdate']);
+    expect(o.stages[1]!.waitsFor).toEqual(['windowsUpdate', 'drivers']);
+    // Without the driver stage the Phase 4 coordination is unchanged.
+    const off = withApps();
+    expect(orchestrationContract(off).stages[1]!.waitsFor).toEqual(['windowsUpdate']);
+    expect(orchestrationContract(off).stages[2]).toMatchObject({ enabled: false, implemented: true });
     expect(o.coordination.installLock).toBe('C:\\ProgramData\\WindowsDeploymentBuilder\\state\\install.lock');
-    expect(o.stages[2]).toMatchObject({ inventory: DRIVER_STAGE.inventoryFile, marker: DRIVER_STAGE.marker, waitsFor: ['windowsUpdate'] });
+    expect(o.stages[2]).toMatchObject({ inventory: [...DRIVER_STAGE.inventoryFiles], marker: DRIVER_STAGE.marker, waitsFor: ['windowsUpdate'] });
   });
 
   it('keeps PowerShell and TypeScript paths and versions in step', () => {

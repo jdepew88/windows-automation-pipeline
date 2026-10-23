@@ -112,6 +112,16 @@ export const MIGRATIONS: Record<number, Migration> = {
     if (converted.length) notes.push(`Built-in profiles are now fixed templates; your filled-in ${converted.map((n) => `"${n}"`).join(', ')} became custom profile(s) "… (from an older profile)" with the same packages.`);
     return { value, note: notes.join(' ') };
   },
+
+  // v5 (Phase 8) adds hardware-aware driver provisioning. New deployments start with it on; an
+  // older profile keeps the deployment it produced, so the stage starts off for it.
+  4: (input) => {
+    if (isObj(input.drivers)) return { value: input };
+    return {
+      value: { ...input, drivers: { enabled: false } },
+      note: 'Hardware-aware driver provisioning (added in schema version 5) is turned off for this older profile, so it produces the same deployment as before. Turn it on under "Hardware & Drivers" if you want it.',
+    };
+  },
 };
 
 /** The six (empty) built-in profiles of schema version 3, for the v2→v3 step. */

@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 4,
+  "schemaVersion": 5,
   "profileName": "Owner default",
   "setup": {
     "languageMode": "unattended",
@@ -129,6 +129,20 @@
     "backup": null,
     "settings": [],
     "followUps": []
+  },
+  "drivers": {
+    "enabled": true,
+    "useWindowsUpdate": true,
+    "resolveMissing": true,
+    "includeOfflinePackages": true,
+    "optionalReplacements": "never",
+    "reportUnresolved": true,
+    "networkBootstrap": true,
+    "maxReboots": 2,
+    "bundle": null,
+    "verifiedPackages": [],
+    "approvals": [],
+    "hardware": null
   },
   "system": {
     "disableFastStartup": true,

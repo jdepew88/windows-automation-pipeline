@@ -201,6 +201,14 @@ backup), and places and verifies `autounattend.xml`, `WindowsDeployment\` and th
 existing or newly created Windows USB. The website never accesses a disk and there is no local
 service. See `docs/phase-7-usb-media-preparation/architecture.md`.
 
+Phase 8 implements the `drivers` stage the Phase 3 contract reserved: `DriverEngine.ps1` (SYSTEM,
+launched once by the orchestrator like the other engines) inspects every device by hardware ID,
+waits for the Windows Update stage and its restart, installs verified INF packages only where a
+driver is missing or broken (driver store, pinned offline bundle, technician-verified downloads;
+Windows ranks), verifies the device, and writes `reports\drivers.json`. The application stage waits
+for it (`coordination.drivers`). The USB assistant places the bundle and the Setup-critical drivers
+(`$WinPEDriver$`). See `docs/phase-8-hardware-aware-drivers/architecture.md`.
+
 ## Extension points for later milestones
 
 - `profile.deferred.installPowerShell7` is recorded and round-tripped. Nothing reads it during

@@ -28,7 +28,9 @@ describe('media contract in the deployment package', () => {
     const answer = entries.find((e) => e.path === 'autounattend.xml')!;
     expect(manifest.media.answerFile).toEqual({ fileName: 'autounattend.xml', size: answer.data.length, sha256: sha256(answer.data) });
     expect(manifest.media.requirements).toEqual({ editionMode: 'genericKey', editionId: 'pro', dismEditionId: 'Professional', editionName: 'Windows 11 Pro', architectures: ['amd64'], minimumBuild: 22000 });
-    expect(manifest.media.layout).toEqual({ answerFile: 'autounattend.xml', packageDir: 'WindowsDeployment', backupsDir: 'WindowsDeployment/backups' });
+    expect(manifest.media.layout).toEqual({ answerFile: 'autounattend.xml', packageDir: 'WindowsDeployment', backupsDir: 'WindowsDeployment/backups', driversDir: 'WindowsDeployment/drivers', setupDriversDir: '$WinPEDriver$' });
+    // Phase 8: without a pinned driver bundle the media needs no driver files.
+    expect(manifest.media.drivers).toBeUndefined();
     expect(manifest.media.usbRequiredAfterSetup).toBe(false);
     expect(manifest.media.backup).toBeNull();
     expect(pkg.manifest.media.contractVersion).toBe(1);
@@ -90,11 +92,13 @@ describe('Windows release information (cached from Microsoft, offline capable)',
 });
 
 describe('USB Preparation Assistant (static checks)', () => {
-  it('ships as a bundle with the assistant, the Phase 6 validator, the launcher, release data and a README', () => {
+  it('ships as a bundle with the assistant, the Phase 6 and Phase 8 validators, the launcher, release data and a README', () => {
     const files = readZip(assistantBundle()).map((e) => e.path);
     expect(files).toEqual([
       'usb-preparation-assistant/WdbMediaAssistant.ps1',
       'usb-preparation-assistant/WdbMigration.ps1',
+      'usb-preparation-assistant/DriverEngine.ps1',
+      'usb-preparation-assistant/driver-sources.json',
       'usb-preparation-assistant/Prepare-InstallationUSB.cmd',
       'usb-preparation-assistant/windows-releases.json',
       'usb-preparation-assistant/README-USB-Assistant.txt',

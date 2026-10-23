@@ -4,6 +4,7 @@ import { DATA_ROOT } from '../engine/windows-update';
 import { PACKAGE_DIR, PACKAGE_ROOT, RESUME_SCRIPT, STATUS_SCRIPT, buildDeploymentPackage, type DeploymentPackage } from '../engine/deployment';
 import { ASSISTANT_BUNDLE, ASSISTANT_SCRIPT, MICROSOFT_DOWNLOAD, WINDOWS_RELEASES, assistantBundle, mediaRequirements } from '../engine/media';
 import { settingsRestoreActive } from '../engine/migration/plan';
+import { driverMediaBlock } from '../engine/drivers';
 import { clear, download, h } from './dom';
 import { icon, type IconName } from './icons';
 
@@ -56,6 +57,7 @@ export function renderDeploymentPage(): DeploymentPageHandle {
   const usbAnswer = h('span', {});
   const usbNeeds = h('p', { class: 'desc', 'data-testid': 'usb-requirements' });
   const usbBackup = h('p', { class: 'desc', 'data-testid': 'usb-backup-note' });
+  const usbDrivers = h('p', { class: 'desc', 'data-testid': 'usb-drivers-note' });
   const assistantBtn = h(
     'button',
     { type: 'button', class: 'btn primary', 'data-action': 'download-usb-assistant', onclick: () => download(ASSISTANT_BUNDLE, assistantBundle(), 'application/zip') },
@@ -147,6 +149,7 @@ export function renderDeploymentPage(): DeploymentPageHandle {
           ),
           usbNeeds,
           usbBackup,
+          usbDrivers,
           h('div', { class: 'action-stack' }, assistantBtn),
           h('pre', { class: 'mig-cmd usb-cmd', 'aria-label': 'Assistant commands' }, `.\\${ASSISTANT_SCRIPT} -Mode Discover
 .\\${ASSISTANT_SCRIPT} -Mode Plan -Workflow Update -Package windows-deployment-package.zip -Target E:
@@ -196,6 +199,10 @@ export function renderDeploymentPage(): DeploymentPageHandle {
       usbBackup.textContent = settingsRestoreActive(p)
         ? `This deployment restores application settings: give the assistant the backup folder ${p.migration.backup!.folderName}. It is checked against the pinned SHA-256 and copied to WindowsDeployment\\backups\\${p.migration.backup!.folderName}. The drive then holds personal configuration data: keep it private.`
         : 'No settings backup is needed for this deployment.';
+      const dm = driverMediaBlock(p);
+      usbDrivers.textContent = dm
+        ? `This deployment uses the offline driver bundle ${dm.bundle.folderName}: give the assistant that folder (-Drivers). It is checked against the pinned SHA-256 and copied to WindowsDeployment\\drivers\\${dm.bundle.folderName}${dm.setupCritical ? `; ${dm.setupCritical.packages.length} storage driver(s) go to $WinPEDriver$\\${dm.bundle.folderName} so Windows Setup can see the disk (required)` : ''}.`
+        : 'No offline drivers are needed on the drive for this deployment.';
       const errors = result.issues.filter((i) => i.severity === 'error');
       clear(status);
       clear(contents);
@@ -242,6 +249,7 @@ export function renderDeploymentPage(): DeploymentPageHandle {
       }
       for (const s of [...x.manifest.stages].sort((a, b) => a.order - b.order)) {
         const state = !s.implemented ? ['Not implemented', 'muted'] : s.enabled ? ['On', 'ok'] : ['Off', 'muted'];
+        const where = s.id === 'drivers' && s.enabled ? ' · offline drivers from the bundle; downloads only verified packages' : '';
         stages.append(
           h(
             'li',
@@ -251,7 +259,7 @@ export function renderDeploymentPage(): DeploymentPageHandle {
               'div',
               {},
               h('strong', {}, s.name, ' ', h('span', { class: `pill ${state[1]}` }, state[0]!)),
-              h('span', {}, `${s.context === 'SYSTEM' ? 'Runs as SYSTEM' : 'Runs as the signed-in user (elevated)'}${s.requiresInternet ? ' · needs Internet' : ' · works offline'}`),
+              h('span', {}, `${s.context === 'SYSTEM' ? 'Runs as SYSTEM' : 'Runs as the signed-in user (elevated)'}${s.requiresInternet ? ' · needs Internet' : ' · works offline'}${where}`),
             ),
           ),
         );

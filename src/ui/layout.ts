@@ -30,6 +30,7 @@ export const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
       page('privacy', 'Privacy', 'lock'),
       page('updates', 'Windows Update', 'refresh'),
       page('windowsUpdate', 'Update automation', 'cloudDown'),
+      page('drivers', 'Hardware & Drivers', 'chip'),
       page('system', 'System tweaks', 'sliders'),
       page('explorer', 'File Explorer', 'folder'),
       page('taskbar', 'Taskbar', 'taskbar'),
@@ -187,6 +188,21 @@ export const FIELD_GROUPS: Partial<Record<SectionId, FieldGroup[]>> = {
       paths: ['migration.backup', 'migration.settings'],
     },
     { title: '4. Deployment', paths: ['migration.enabled'] },
+  ],
+  drivers: [
+    {
+      title: 'Driver provisioning',
+      description:
+        'Detected on the installed computer, not here. Working drivers are always kept; a newer version alone never replaces one, and a working driver is never downgraded. BIOS and firmware updates are never automated.',
+      paths: ['drivers.enabled', 'drivers.useWindowsUpdate', 'drivers.resolveMissing', 'drivers.reportUnresolved', 'drivers.optionalReplacements', 'drivers.networkBootstrap', 'drivers.maxReboots'],
+    },
+    { title: 'Before installation: hardware of the target computer (optional)', paths: ['drivers.hardware'] },
+    {
+      title: 'Offline and Setup-critical drivers',
+      description: 'For computers without a network during installation, and for storage controllers Windows Setup must load before it can see the disk.',
+      paths: ['drivers.includeOfflinePackages', 'drivers.bundle'],
+    },
+    { title: 'Verified packages & approvals', paths: ['drivers.verifiedPackages', 'drivers.approvals'] },
   ],
   system: [
     { title: 'Startup & sign-in', paths: ['system.disableFastStartup', 'system.disableAutomaticRestartSignOn', 'system.deleteWindowsOld'] },

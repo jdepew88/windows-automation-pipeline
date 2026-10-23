@@ -37,6 +37,11 @@ Unit test coverage by acceptance criterion:
   - busy installer, already finished, pending restart, corrupt state;
   - single instance (mutex across processes), log content, config defaults.
 
+- **Phase 8 (hardware-aware drivers)**: `drivers.test.ts`, `Drivers.Tests.ps1` (the engine of the
+  real generated package against simulated hardware: fixtures A-H, selection, Windows Update,
+  restarts, recovery, orchestrator and recovery-tool integration), driver scenarios in
+  `Media.Tests.ps1` and `drivers.spec.ts`; see
+  [phase-8-hardware-aware-drivers/testing.md](phase-8-hardware-aware-drivers/testing.md).
 - **Phase 7 (USB media preparation)**: `media.test.ts`, `Media.Tests.ps1` (the assistant against
   the real generated packages, simulated disks and synthetic Windows images) and `usb.spec.ts`; see
   [phase-7-usb-media-preparation/testing.md](phase-7-usb-media-preparation/testing.md).

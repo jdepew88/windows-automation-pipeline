@@ -13,6 +13,13 @@
       "resultFile": "C:\\ProgramData\\WindowsDeploymentBuilder\\Updates\\result.json",
       "taskPath": "\\WindowsDeploymentBuilder\\",
       "taskName": "WindowsUpdate"
+    },
+    "drivers": {
+      "enabled": true,
+      "stateFile": "C:\\ProgramData\\WindowsDeploymentBuilder\\Drivers\\state.json",
+      "resultFile": "C:\\ProgramData\\WindowsDeploymentBuilder\\Drivers\\result.json",
+      "taskPath": "\\WindowsDeploymentBuilder\\",
+      "taskName": "Drivers"
     }
   },
   "restartPolicy": "whenRequired",

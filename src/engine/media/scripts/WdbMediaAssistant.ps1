@@ -15,7 +15,8 @@
       -Mode Inspect    (read-only) a USB drive, a folder or a Windows ISO: Windows Setup structure,
                        image editions, architecture, build and servicing level, deployment files,
                        conflicting files, Ventoy, free space
-      -Mode Plan       (read-only) validates the deployment package (and the Phase 6 backup it pins)
+      -Mode Plan       (read-only) validates the deployment package (the Phase 6 backup and the Phase 8
+                       driver bundle it pins)
                        against the media and writes a plan: every file added or replaced, every
                        destructive step, the space needed, blockers and warnings
       -Mode Apply      carries out a plan after re-validating everything:
@@ -32,6 +33,10 @@
       <root>\autounattend.xml                          found by Windows Setup on removable media
       <root>\WindowsDeployment\...                     the package (manifest + hashed files)
       <root>\WindowsDeployment\backups\<folder>\       the Phase 6 settings backup, when pinned
+      <root>\WindowsDeployment\drivers\<folder>\       the Phase 8 offline driver bundle, when pinned
+      <root>\$WinPEDriver$\<folder>\                  its Setup-critical (storage) drivers: Windows
+                                                     Setup loads INF drivers from here and stages
+                                                     them into the installed Windows
     The installed computer does not need the USB after Windows Setup: everything the deployment runs
     is embedded in the answer file and staged locally.
 
@@ -53,6 +58,7 @@ param(
     [string] $Workflow = 'Update',
     [string] $Package = '',
     [string] $Backup = '',
+    [string] $Drivers = '',
     [string] $Target = '',
     [string] $Iso = '',
     [int] $Disk = -1,
@@ -69,7 +75,7 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
 # Captured first: dot-sourcing WdbMigration.ps1 below binds its own parameters (Mode, Json) in this scope.
-$script:WdmArgs = @{ Mode = $Mode; Workflow = $Workflow; Package = $Package; Backup = $Backup; Target = $Target; Iso = $Iso; Disk = $Disk; PlanPath = $PlanPath
+$script:WdmArgs = @{ Mode = $Mode; Workflow = $Workflow; Package = $Package; Backup = $Backup; Drivers = $Drivers; Target = $Target; Iso = $Iso; Disk = $Disk; PlanPath = $PlanPath
                      ConfirmErase = $ConfirmErase; IsoSha256 = $IsoSha256; ReplaceExisting = [bool] $ReplaceExisting; NoDataPartition = [bool] $NoDataPartition; CheckOnline = [bool] $CheckOnline; Json = [bool] $Json }
 $script:WdmMain = $MyInvocation.InvocationName -ne '.'
 $script:WdmVersion = '1.0.0'
@@ -84,6 +90,9 @@ $script:AnswerFile = 'autounattend.xml'
 $script:StateFile = 'wdb-media-state.json'
 $script:ReportFile = 'wdb-media-report.txt'
 $script:PreviousDir = 'WDB-previous'
+# Phase 8: where Windows Setup looks for drivers on every drive (documented Setup behaviour).
+$script:WinPEDriverDir = '$WinPEDriver$'
+$script:DriverBundleFolder = '^WDB-Drivers-\d{8}-\d{6}-[0-9a-f]{6}$'
 $script:Fat32MaxFile = 4GB - 1
 # Windows formats FAT32 volumes up to 32 GB; a larger drive gets FAT32 for Setup plus NTFS for the rest.
 $script:Fat32MaxVolume = 32GB - 64MB
@@ -581,7 +590,7 @@ function Read-WdmPackage {
         if (Test-Path -LiteralPath $src) {
             foreach ($f in @(Get-ChildItem -LiteralPath $src -Recurse -File -Force)) {
                 $rel = $f.FullName.Substring($src.TrimEnd('\').Length + 1)
-                if ($rel -like 'backups\*') { continue }
+                if ($rel -like 'backups\*' -or $rel -like 'drivers\*') { continue }
                 $dst = Join-Path (Join-Path $staging $script:PackageDir) $rel
                 New-Item -ItemType Directory -Path (Split-Path -Parent $dst) -Force | Out-Null
                 Copy-Item -LiteralPath $f.FullName -Destination $dst
@@ -656,6 +665,15 @@ function Read-WdmPackage {
         $res.Backup = @{ backupId = [string] $sr['backupId']; manifestSha256 = [string] $sr['manifestSha256']; folderName = [string] $sr['folderName'] }
         if ($res.Backup.folderName -notmatch '^[A-Za-z0-9._-]{1,80}$' -or $res.Backup.manifestSha256 -notmatch $script:WdmSha256) { $problems.Add('The settings restore reference in the manifest is invalid.') }
     }
+    # Phase 8: the offline driver bundle this deployment pins, and its Setup-critical packages.
+    $res.Drivers = $null
+    if ($res.Media -and $res.Media.Contains('drivers') -and $res.Media['drivers']) {
+        $dm = $res.Media['drivers']
+        $b = $dm['bundle']
+        $sc = $(if ($dm['setupCritical']) { @($dm['setupCritical']['packages']) } else { @() })
+        $res.Drivers = @{ bundleId = [string] $b['bundleId']; folderName = [string] $b['folderName']; manifestSha256 = [string] $b['manifestSha256']; setupCritical = @($sc | ForEach-Object { [string] $_ }); required = [bool] $dm['required'] }
+        if ($res.Drivers.folderName -notmatch $script:DriverBundleFolder -or $res.Drivers.manifestSha256 -notmatch $script:WdmSha256 -or @($res.Drivers.setupCritical | Where-Object { $_ -notmatch '^pkg-[0-9a-f]{12}$' }).Count) { $problems.Add('The driver bundle reference in the manifest is invalid.') }
+    }
     $res.Ok = ($problems.Count -eq 0)
     return $res
 }
@@ -692,6 +710,50 @@ function Test-WdmCompatibility {
     @{ Blockers = $blockers; Warnings = $warnings; Selected = $sel; Freshness = $fresh }
 }
 
+<#
+    Phase 8: validates the offline driver bundle pinned by the package with the assistant's own copy
+    of DriverEngine.ps1 (never one from a package): pinned manifest SHA-256, folder name, every file,
+    the INF of every package and its Microsoft catalog signature.
+#>
+function Open-WdmDrivers {
+    param($Pinned, [string] $Path)
+    $r = @{ Ok = $false; Problems = @(); Validated = $null; Bytes = [int64] 0; SetupBytes = [int64] 0; SetupPackages = @() }
+    if (-not (Get-Command Test-WdvBundle -CommandType Function -ErrorAction SilentlyContinue)) { $r.Problems = @('DriverEngine.ps1 and driver-sources.json must be next to this assistant to verify the driver bundle.'); return $r }
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path -PathType Container)) { $r.Problems = @("Driver bundle folder not found: $Path"); return $r }
+    if ((Split-Path -Leaf $Path.TrimEnd('\')) -ne $Pinned.folderName) { $r.Problems = @("The driver bundle folder is named '$(Split-Path -Leaf $Path.TrimEnd('\'))'; this deployment expects '$($Pinned.folderName)'."); return $r }
+    try { $v = Test-WdvBundle $Path.TrimEnd('\') $Pinned.manifestSha256 $Pinned.folderName (Get-WdvSources '') } catch { $r.Problems = @("The driver bundle could not be checked: $($_.Exception.Message)"); return $r }
+    if (-not $v.Ok) { $r.Problems = @($v.Problems | Select-Object -First 8 | ForEach-Object { "Driver bundle: $_" }); return $r }
+    if ([string] $v.Manifest['bundleId'] -ne $Pinned.bundleId) { $r.Problems = @('The driver bundle id does not match the deployment.'); return $r }
+    $ids = @($v.Packages | ForEach-Object { [string] $_.Entry['id'] })
+    $missing = @($Pinned.setupCritical | Where-Object { $ids -notcontains $_ })
+    if ($missing.Count) { $r.Problems = @("The bundle lacks the Setup-critical package(s) $($missing -join ', ')."); return $r }
+    $r.Ok = $true; $r.Validated = $v
+    foreach ($p in @($v.Packages)) {
+        $bytes = [int64] (@($p.Entry['files']) | ForEach-Object { [int64] $_['size'] } | Measure-Object -Sum).Sum
+        $r.Bytes += $bytes
+        if ($Pinned.setupCritical -contains [string] $p.Entry['id']) { $r.SetupBytes += $bytes; $r.SetupPackages += , $p }
+    }
+    return $r
+}
+
+<# Copies the listed files of a validated bundle (all packages, or only the given ones) and hashes every copy. #>
+function Copy-WdmDriverFiles {
+    param($Validated, [string] $Destination, [object[]] $Packages = $null, [switch] $WithManifest)
+    $count = 0
+    if ($WithManifest) { [void] (Copy-WdmVerifiedFile (Join-Path $Validated.Folder 'drivers-manifest.json') (Join-Path $Destination 'drivers-manifest.json')); $count++ }
+    foreach ($p in @(if ($null -ne $Packages) { $Packages } else { $Validated.Packages })) {
+        $leaf = $(if ($WithManifest) { ([string] $p.Entry['folder']) -replace '/', '\' } else { Split-Path -Leaf (([string] $p.Entry['folder']) -replace '/', '\') })
+        foreach ($f in @($p.Entry['files'])) {
+            $rel = ([string] $f['path']) -replace '/', '\'
+            $dst = Join-Path (Join-Path $Destination $leaf) $rel
+            [void] (Copy-WdmVerifiedFile (Join-Path $p.Root $rel) $dst)
+            if ((Get-WdmFileSha256 $dst) -ne [string] $f['sha256']) { throw "The copy of $($p.Entry['folder'])/$($f['path']) does not match the bundle." }
+            $count++
+        }
+    }
+    return $count
+}
+
 <# Validates the Phase 6 settings backup pinned by the package (the assistant's own copy of WdbMigration.ps1). #>
 function Open-WdmBackup {
     param($Pinned, [string] $Path)
@@ -722,7 +784,7 @@ function Get-WdmTreeSize { param([string] $Root, [string[]] $Skip = @()) [int64]
 #>
 function New-WdmPlan {
     param([ValidateSet('Update', 'Create')] [string] $Workflow, [string] $PackagePath, [string] $BackupPath = '', [string] $TargetLetter = '', [string] $IsoPath = '', [int] $DiskNumber = -1,
-          [switch] $Replace, [switch] $NoData, [string] $ExpectedIsoSha256 = '', [switch] $Online)
+          [switch] $Replace, [switch] $NoData, [string] $ExpectedIsoSha256 = '', [switch] $Online, [string] $DriversPath = '')
     $blockers = New-Object System.Collections.Generic.List[string]
     $warnings = New-Object System.Collections.Generic.List[string]
     $ops = New-Object System.Collections.Generic.List[object]
@@ -736,6 +798,15 @@ function New-WdmPlan {
         if (-not $BackupPath) { $blockers.Add("This deployment restores application settings from backup $($pkg.Backup.folderName); choose that backup folder (-Backup).") }
         else { $backup = Open-WdmBackup $pkg.Backup $BackupPath; foreach ($p in $backup.Problems) { $blockers.Add($p) } }
     } elseif ($BackupPath) { $warnings.Add('A backup was given, but this deployment does not restore settings; it is not copied.') }
+    # Phase 8: the pinned offline driver bundle (required when it carries a storage driver Setup needs).
+    $drivers = $null
+    if ($pkg.Ok -and $pkg.Drivers) {
+        Write-WdmProgress 'Plan' 'Validating the driver bundle'
+        if (-not $DriversPath) {
+            if ($pkg.Drivers.required) { $blockers.Add("This deployment needs Setup-critical drivers from bundle $($pkg.Drivers.folderName) (Windows Setup may not see the disk without them); choose that bundle folder (-Drivers).") }
+            else { $warnings.Add("This deployment uses the offline driver bundle $($pkg.Drivers.folderName); without it on the drive, offline drivers (and a network driver for a computer without network) are not available. Add it with -Drivers <folder>.") }
+        } else { $drivers = Open-WdmDrivers $pkg.Drivers $DriversPath; foreach ($p in $drivers.Problems) { $blockers.Add($p) } }
+    } elseif ($DriversPath) { $warnings.Add('A driver bundle was given, but this deployment does not use one; it is not copied.') }
     $releases = Get-WdmReleaseInfo -Online:$Online
     $disks = @(Get-WdmDisks)
     $target = [ordered]@{}
@@ -765,6 +836,11 @@ function New-WdmPlan {
                 else { $ops.Add([ordered]@{ id = 'keepPrevious'; kind = 'keepPrevious'; destructive = $false; description = "Move the existing autounattend.xml and WindowsDeployment ($oldId) to $($script:PreviousDir)\<time>\ (kept, not deleted)"; bytes = 0 }) }
             }
             if ($media.image) { $source = $media }
+            $winpe = Join-Path $t.Root $script:WinPEDriverDir
+            if ((Test-Path -LiteralPath $winpe) -and -not ($pkg.Manifest -and $target.Contains('existingPackageId') -and $target.existingPackageId -eq [string] $pkg.Manifest['packageId'])) {
+                $warnings.Add("The drive has a $($script:WinPEDriverDir) folder: Windows Setup loads every driver in it. $(if ($Replace -or -not ($media.answerFile -or $media.packageDir)) { "It is moved to $($script:PreviousDir)\<time>\ with the previous deployment." } else { 'Check that it belongs to this deployment.' })")
+                if (-not ($media.answerFile -or $media.packageDir)) { $ops.Add([ordered]@{ id = 'keepPrevious'; kind = 'keepPrevious'; destructive = $false; description = "Move the existing $($script:WinPEDriverDir) folder to $($script:PreviousDir)\<time>\ (kept, not deleted)"; bytes = 0 }) }
+            }
         }
     } else {
         if (-not $IsoPath -or -not (Test-Path -LiteralPath $IsoPath -PathType Leaf)) { $blockers.Add("Windows ISO not found: $IsoPath. Download it from https://www.microsoft.com/software-download/windows11.") }
@@ -832,6 +908,10 @@ function New-WdmPlan {
     }
     $ops.Add([ordered]@{ id = 'placePackage'; kind = 'placePackage'; destructive = $false; description = "Copy $($script:PackageDir)\ (package $(if ($pkg.Manifest) { $pkg.Manifest['packageId'] })) to the drive root, verified against its manifest"; bytes = $pkg.Bytes })
     if ($backup -and $backup.Ok) { $ops.Add([ordered]@{ id = 'placeBackup'; kind = 'placeBackup'; destructive = $false; description = "Copy settings backup $($pkg.Backup.folderName) to $($script:PackageDir)\backups\ (personal data: keep the drive private)"; bytes = $backup.Bytes }) }
+    if ($drivers -and $drivers.Ok) {
+        $ops.Add([ordered]@{ id = 'placeDrivers'; kind = 'placeDrivers'; destructive = $false; description = "Copy offline driver bundle $($pkg.Drivers.folderName) ($(@($drivers.Validated.Packages).Count) INF package(s)) to $($script:PackageDir)\drivers\, verified"; bytes = $drivers.Bytes })
+        if (@($drivers.SetupPackages).Count) { $ops.Add([ordered]@{ id = 'placeSetupDrivers'; kind = 'placeSetupDrivers'; destructive = $false; description = "Copy $(@($drivers.SetupPackages).Count) Setup-critical driver package(s) to $($script:WinPEDriverDir)\$($pkg.Drivers.folderName)\ so Windows Setup can load them (the Windows image is not modified)"; bytes = $drivers.SetupBytes }) }
+    }
     $ops.Add([ordered]@{ id = 'placeAnswerFile'; kind = 'placeAnswerFile'; destructive = $false; description = "Write $($script:AnswerFile) to the drive root (last, so a drive is never half-configured)"; bytes = 0 })
     $ops.Add([ordered]@{ id = 'verify'; kind = 'verify'; destructive = $false; description = 'Verify every written file and write the readiness report'; bytes = 0 })
     $needed = [int64] 0
@@ -865,6 +945,15 @@ function New-WdmPlan {
     $plan.format = $script:PlanFormat; $plan.formatVersion = 1; $plan.planId = $planId; $plan.createdUtc = (Get-WdmNow).ToString('o'); $plan.tool = $script:WdmVersion; $plan.workflow = $Workflow
     $plan.package = $packageInfo
     $plan.backup = $backupInfo
+    $driversInfo = $null
+    if ($pkg.Drivers) {
+        $driversInfo = [ordered]@{}
+        $driversInfo.path = $DriversPath; $driversInfo.bundleId = $pkg.Drivers.bundleId; $driversInfo.folderName = $pkg.Drivers.folderName; $driversInfo.manifestSha256 = $pkg.Drivers.manifestSha256
+        $driversInfo.setupCritical = @($pkg.Drivers.setupCritical); $driversInfo.required = [bool] $pkg.Drivers.required
+        $driversInfo.bytes = [int64] 0
+        if ($drivers) { $driversInfo.bytes = [int64] $drivers.Bytes }
+    }
+    $plan.drivers = $driversInfo
     $plan.target = $target
     $plan.image = $imageInfo
     $plan.freshness = $compat.Freshness
@@ -890,6 +979,7 @@ function Format-WdmPlan {
     if ($Plan.image -and $Plan.image.selected) { $l.Add("Selected : index $($Plan.image.selected.index) $($Plan.image.selected.name) [$($Plan.image.selected.editionId)]") }
     if ($Plan.freshness) { $l.Add("Freshness: $($Plan.freshness.status). $($Plan.freshness.message)") }
     if ($Plan.backup) { $l.Add("Backup   : $($Plan.backup.folderName) (manifest $($Plan.backup.manifestSha256))") }
+    if ($Plan.Contains('drivers') -and $Plan.drivers) { $l.Add("Drivers  : $($Plan.drivers.folderName) (manifest $($Plan.drivers.manifestSha256))$(if (@($Plan.drivers.setupCritical).Count) { ", $(@($Plan.drivers.setupCritical).Count) Setup-critical" })") }
     $l.Add("Space    : $([Math]::Round([int64] $Plan.requiredBytes / 1MB)) MB needed$(if ($Plan.availableBytes) { ", $([Math]::Round([int64] $Plan.availableBytes / 1MB)) MB available" })")
     $l.Add('')
     $l.Add('Operations:')
@@ -938,7 +1028,7 @@ function Assert-WdmTarget {
               resumed without a new plan and confirmation.
 #>
 function Invoke-WdmApply {
-    param($Plan, [string] $Confirm = '', [string] $IsoPath = '', [string] $BackupPath = '')
+    param($Plan, [string] $Confirm = '', [string] $IsoPath = '', [string] $BackupPath = '', [string] $DriversPath = '')
     $refuse = { param([string] $Message) $o = [ordered]@{}; $o.format = $script:ReportFormat; $o.status = 'Failed'; $o.message = "Refused: $Message Nothing was changed."; $o.planId = [string] $Plan['planId']; $o.bootTested = $false; $o }
     if ($Plan['format'] -ne $script:PlanFormat -or "$($Plan['formatVersion'])" -ne '1') { return (& $refuse 'not a USB preparation plan of this version.') }
     if (@($Plan.blockers).Count) { return (& $refuse "the plan has blockers; fix them and plan again: $(@($Plan.blockers) -join ' ')") }
@@ -971,6 +1061,12 @@ function Invoke-WdmApply {
             $backup = Open-WdmBackup $pkg.Backup $bp
             if (-not $backup.Ok) { throw "The settings backup does not validate: $($backup.Problems -join ' ')" }
         }
+        $drivers = $null
+        $dp = $(if ($DriversPath) { $DriversPath } elseif ($Plan.Contains('drivers') -and $Plan.drivers) { [string] $Plan.drivers.path } else { '' })
+        if ($pkg.Drivers -and $dp) {
+            $drivers = Open-WdmDrivers $pkg.Drivers $dp
+            if (-not $drivers.Ok) { throw "The driver bundle does not validate: $($drivers.Problems -join ' ')" }
+        } elseif ($pkg.Drivers -and $pkg.Drivers.required) { throw "This deployment needs the Setup-critical drivers of bundle $($pkg.Drivers.folderName); choose that folder (-Drivers)." }
         $disk = Assert-WdmTarget $Plan $Plan.workflow
         $root = ''
         if ($create) {
@@ -1066,6 +1162,14 @@ function Invoke-WdmApply {
                 $check = Test-WdbBackup $bdst $pkg.Backup.manifestSha256
                 if (-not $check.Ok) { throw "The copied settings backup does not validate: $($check.Problems -join ' ')" }
             }
+            if ($drivers) {
+                & $checkpoint
+                Write-WdmProgress 'Driver bundle' "Copying $($pkg.Drivers.folderName)"
+                $ddst = Join-Path $new "drivers\$($pkg.Drivers.folderName)"
+                [void] (Copy-WdmDriverFiles $drivers.Validated $ddst -WithManifest)
+                $dcheck = Test-WdvBundle $ddst $pkg.Drivers.manifestSha256 $pkg.Drivers.folderName (Get-WdvSources '')
+                if (-not $dcheck.Ok) { throw "The copied driver bundle does not validate: $(@($dcheck.Problems) -join ' ')" }
+            }
             & $checkpoint
             # Swap: the previous deployment is kept (never deleted), then the new one takes its place.
             $stamp = (Get-WdmNow).ToString('yyyyMMdd-HHmmss')
@@ -1078,10 +1182,24 @@ function Invoke-WdmApply {
                 if (Test-Path -LiteralPath $live) { Move-Item -LiteralPath $live -Destination (Join-Path $keep $script:PackageDir) }
                 $journal['previous'] = $keep
             }
+            # Setup loads every driver in $WinPEDriver$: one from another deployment goes with it.
+            $winpeOld = Join-Path $root $script:WinPEDriverDir
+            if (-not $sameId -and (Test-Path -LiteralPath $winpeOld)) {
+                New-Item -ItemType Directory -Path $keep -Force | Out-Null
+                Move-Item -LiteralPath $winpeOld -Destination (Join-Path $keep $script:WinPEDriverDir)
+                $journal['previous'] = $keep
+            }
             if (-not $sameId) {
                 Move-Item -LiteralPath $new -Destination $live
                 & $mark 'placePackage' 'Done' "$($files.Count) file(s)$(if ($backup) { ' and the settings backup' }) verified"
             }
+        }
+        if ($drivers -and @($drivers.SetupPackages).Count -and -not (& $done 'placeSetupDrivers')) {
+            & $checkpoint
+            & $mark 'placeSetupDrivers' 'Running'
+            Write-WdmProgress 'Setup drivers' "Copying $(@($drivers.SetupPackages).Count) package(s) to $($script:WinPEDriverDir)"
+            $n = Copy-WdmDriverFiles $drivers.Validated (Join-Path $root "$($script:WinPEDriverDir)\$($pkg.Drivers.folderName)") @($drivers.SetupPackages)
+            & $mark 'placeSetupDrivers' 'Done' "$n file(s) of $(@($drivers.SetupPackages).Count) package(s) verified"
         }
         if (-not (& $done 'placeAnswerFile')) {
             & $checkpoint
@@ -1089,7 +1207,7 @@ function Invoke-WdmApply {
             & $mark 'placeAnswerFile' 'Done' 'verified'
         }
         Write-WdmProgress 'Verify' 'Checking the prepared drive'
-        $report = Test-WdmMedia $root $pkg $backup $Plan -CurrentPlanId $planId
+        $report = Test-WdmMedia $root $pkg $backup $Plan -CurrentPlanId $planId -Drivers $drivers
         $journal['status'] = $(if ($report.status -in 'ReadyForInstallation', 'ReadyWithWarnings') { 'Complete' } else { 'Failed' })
         $journal['message'] = [string] $report.status
         & $mark 'verify' $(if ($journal['status'] -eq 'Complete') { 'Done' } else { 'Failed' }) ([string] $report.status)
@@ -1131,7 +1249,7 @@ function Invoke-WdmApply {
     "Media structure validated" is never "boot tested": no firmware boot is performed here.
 #>
 function Test-WdmMedia {
-    param([string] $Root, $Package = $null, $BackupInfo = $null, $Plan = $null, [switch] $Online, [string] $CurrentPlanId = '')
+    param([string] $Root, $Package = $null, $BackupInfo = $null, $Plan = $null, [switch] $Online, [string] $CurrentPlanId = '', $Drivers = $null)
     $checks = New-Object System.Collections.Generic.List[object]
     $add = { param([string] $Name, [string] $Result, [string] $Detail) $checks.Add([ordered]@{ check = $Name; result = $Result; detail = $Detail }) }
     $media = Get-WdmMediaInfo $Root
@@ -1191,6 +1309,35 @@ function Test-WdmMedia {
                         & $add 'Settings backup' $(if ($v.Ok) { 'Pass' } else { 'Fail' }) $(if ($v.Ok) { "Backup $($sr['folderName']) verified (manifest SHA-256 matches the deployment, every file hashed)." } else { "Backup $($sr['folderName']): $(@($v.Problems) -join ' ')" })
                     } else { & $add 'Settings backup' 'Warn' 'WdbMigration.ps1 is not next to the assistant; the backup was not verified.' }
                 }
+            }
+            # Phase 8: the driver bundle and the Setup-critical drivers in $WinPEDriver$.
+            $md = $(if ($m.Contains('media') -and $m['media'] -and $m['media'].Contains('drivers')) { $m['media']['drivers'] } else { $null })
+            $winpeRoot = Join-Path $Root $script:WinPEDriverDir
+            if ($md) {
+                $fname = [string] $md['bundle']['folderName']
+                $ddir = Join-Path $Root "$($script:PackageDir)\drivers\$fname"
+                $req8 = [bool] $md['required']
+                if (-not (Test-Path -LiteralPath $ddir)) { & $add 'Driver bundle' $(if ($req8) { 'Missing' } else { 'Warn' }) "Bundle $fname is not on the drive; offline drivers are unavailable during the deployment." }
+                elseif (Get-Command Test-WdvBundle -CommandType Function -ErrorAction SilentlyContinue) {
+                    $v = Test-WdvBundle $ddir ([string] $md['bundle']['manifestSha256']) $fname (Get-WdvSources '')
+                    & $add 'Driver bundle' $(if ($v.Ok) { 'Pass' } else { 'Fail' }) $(if ($v.Ok) { "Bundle $fname verified ($(@($v.Packages).Count) INF package(s), manifest SHA-256 pinned by the deployment, catalogs Microsoft-signed)." } else { "Bundle $fname`: $(@($v.Problems | Select-Object -First 4) -join ' ')" })
+                    if ($v.Ok -and $md['setupCritical']) {
+                        $want = @($md['setupCritical']['packages'] | ForEach-Object { [string] $_ })
+                        $bad8 = @(); $ok8 = 0
+                        foreach ($p in @($v.Packages | Where-Object { $want -contains [string] $_.Entry['id'] })) {
+                            $leaf = Split-Path -Leaf (([string] $p.Entry['folder']) -replace '/', '\')
+                            foreach ($f in @($p.Entry['files'])) {
+                                $fp = Join-Path (Join-Path (Join-Path $winpeRoot $fname) $leaf) (([string] $f['path']) -replace '/', '\')
+                                if (-not (Test-Path -LiteralPath $fp -PathType Leaf) -or (Get-WdmFileSha256 $fp) -ne [string] $f['sha256']) { $bad8 += "$leaf/$($f['path'])" } else { $ok8++ }
+                            }
+                        }
+                        & $add 'Setup-critical drivers' $(if ($bad8.Count) { 'Missing' } else { 'Pass' }) $(if ($bad8.Count) { "Not in $($script:WinPEDriverDir)\$fname or modified: $((@($bad8) | Select-Object -First 5) -join ', ')" } else { "$(@($want).Count) package(s), $ok8 file(s) in $($script:WinPEDriverDir)\$fname verified; Windows Setup loads them (not boot tested)." })
+                    }
+                } else { & $add 'Driver bundle' 'Warn' 'DriverEngine.ps1 is not next to the assistant; the bundle was not verified.' }
+                $others = @(Get-ChildItem -LiteralPath $winpeRoot -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne $fname })
+                if ($others.Count) { & $add 'Setup drivers' 'Warn' "$($script:WinPEDriverDir) also contains $(@($others | ForEach-Object { $_.Name }) -join ', '): Windows Setup loads those drivers too." }
+            } elseif (Test-Path -LiteralPath $winpeRoot) {
+                & $add 'Setup drivers' 'Warn' "The drive has a $($script:WinPEDriverDir) folder that this deployment did not put there: Windows Setup loads every driver in it."
             }
             if ($pkg.Requirements -and $media.image) {
                 $compat = Test-WdmCompatibility $pkg.Requirements $media.image $releases
@@ -1288,25 +1435,30 @@ function Invoke-WdmWizard {
     }
     $pkgPath = Read-WdmAnswer 'Deployment package ZIP (windows-deployment-package.zip)'
     $bk = Read-WdmAnswer 'Settings backup folder, if this deployment restores settings (Enter to skip)'
+    # Phase 8: asked only when the package pins an offline driver bundle.
+    $dv = ''
+    $peek = Read-WdmPackage $pkgPath
+    if ($peek.Staging -and (Test-Path -LiteralPath $peek.Staging)) { Remove-Item -LiteralPath $peek.Staging -Recurse -Force -ErrorAction SilentlyContinue }
+    if ($peek.Ok -and $peek.Drivers) { $dv = Read-WdmAnswer "Driver bundle folder $($peek.Drivers.folderName)$(if ($peek.Drivers.required) { ' (required: it has storage drivers Windows Setup needs)' } else { ' (Enter to skip)' })" }
     Write-Output ''
     foreach ($d in @(Get-WdmDisks)) { $e = Test-WdmDiskEligibility $d @(Get-WdmDisks); Write-Output "$(Format-WdmDisk $d)`r`n    update: $(if ($e.Update.Allowed) { 'yes' } else { 'no - ' + ($e.Update.Reasons -join '; ') })   erase: $(if ($e.Create.Allowed) { 'yes' } else { 'no - ' + ($e.Create.Reasons -join '; ') })" }
     if ($c -eq '1') {
         $t = Read-WdmAnswer 'Drive letter of the Windows USB (for example E:)'
-        $plan = New-WdmPlan Update $pkgPath $bk $t
+        $plan = New-WdmPlan Update $pkgPath $bk $t -DriversPath $dv
         Write-Output (Format-WdmPlan $plan)
         if (@($plan.blockers).Count -and @($plan.blockers | Where-Object { $_ -match 'already has a deployment' }).Count -and (Read-WdmAnswer 'Replace the existing deployment (it is kept in WDB-previous)? Type REPLACE') -ceq 'REPLACE') {
-            $plan = New-WdmPlan Update $pkgPath $bk $t -Replace
+            $plan = New-WdmPlan Update $pkgPath $bk $t -Replace -DriversPath $dv
             Write-Output (Format-WdmPlan $plan)
         }
         if (@($plan.blockers).Count) { return $plan }
         if ((Read-WdmAnswer 'Write these files? Type YES') -cne 'YES') { Write-Output 'Nothing was changed.'; return $plan }
-        $r = Invoke-WdmApply $plan '' '' $bk
+        $r = Invoke-WdmApply $plan '' '' $bk $dv
     } else {
         $isoPath = Read-WdmAnswer 'Windows 11 ISO file'
         $hash = Read-WdmAnswer 'SHA-256 from Microsoft''s download page (Enter to skip)'
         $num = Read-WdmAnswer 'Disk NUMBER of the USB flash drive to ERASE'
         if ($num -notmatch '^\d{1,3}$') { Write-Output 'No disk chosen; nothing was changed.'; return $null }
-        $plan = New-WdmPlan Create $pkgPath $bk '' $isoPath ([int] $num) -ExpectedIsoSha256 $hash
+        $plan = New-WdmPlan Create $pkgPath $bk '' $isoPath ([int] $num) -ExpectedIsoSha256 $hash -DriversPath $dv
         Write-Output (Format-WdmPlan $plan)
         if (@($plan.blockers).Count) { return $plan }
         Write-Output ''
@@ -1323,7 +1475,7 @@ function Invoke-WdmWizard {
             Write-Output "Finished with exit code $($proc.ExitCode). The report is in $(Join-Path (Get-WdmStateRoot) 'reports')."
             return $null
         }
-        $r = Invoke-WdmApply $plan $code '' $bk
+        $r = Invoke-WdmApply $plan $code '' $bk $dv
     }
     Write-Output (Format-WdmReport $r)
     if ($r.Contains('root')) { Write-Output "Report: $(Save-WdmReport $r)" }
@@ -1339,10 +1491,13 @@ $script:WdmExit = @{ ReadyForInstallation = 0; ReadyWithWarnings = 0; Inspection
 # The Phase 6 backup validator ships next to this assistant (never loaded from a package or backup).
 $script:WdmLibrary = Join-Path $PSScriptRoot 'WdbMigration.ps1'
 if (Test-Path -LiteralPath $script:WdmLibrary) { . $script:WdmLibrary -Mode Library; Set-StrictMode -Version 2.0 }
+# Phase 8: the driver bundle validator ships next to this assistant too (never loaded from a package or bundle).
+$script:WdmDriverLibrary = Join-Path $PSScriptRoot 'DriverEngine.ps1'
+if (Test-Path -LiteralPath $script:WdmDriverLibrary) { . $script:WdmDriverLibrary -Mode Library; Set-StrictMode -Version 2.0 }
 
 if ($script:WdmMain -and $script:WdmArgs.Mode -ne 'Library') {
     $a = $script:WdmArgs
-    $Mode = $a.Mode; $Workflow = $a.Workflow; $Package = $a.Package; $Backup = $a.Backup; $Target = $a.Target; $Iso = $a.Iso; $Disk = $a.Disk; $PlanPath = $a.PlanPath
+    $Mode = $a.Mode; $Workflow = $a.Workflow; $Package = $a.Package; $Backup = $a.Backup; $Drivers = $a.Drivers; $Target = $a.Target; $Iso = $a.Iso; $Disk = $a.Disk; $PlanPath = $a.PlanPath
     $ConfirmErase = $a.ConfirmErase; $IsoSha256 = $a.IsoSha256; $ReplaceExisting = $a.ReplaceExisting; $NoDataPartition = $a.NoDataPartition; $CheckOnline = $a.CheckOnline; $Json = $a.Json
     switch ($Mode) {
         'Wizard' { $r = Invoke-WdmWizard; if ($r -and $r.Contains('status')) { exit $script:WdmExit[[string] $r.status] }; exit 0 }
@@ -1359,7 +1514,7 @@ if ($script:WdmMain -and $script:WdmArgs.Mode -ne 'Library') {
             exit 0
         }
         'Plan' {
-            $plan = New-WdmPlan $Workflow $Package $Backup $Target $Iso $Disk -Replace:([bool] $ReplaceExisting) -NoData:([bool] $NoDataPartition) -ExpectedIsoSha256 $IsoSha256 -Online:([bool] $CheckOnline)
+            $plan = New-WdmPlan $Workflow $Package $Backup $Target $Iso $Disk -Replace:([bool] $ReplaceExisting) -NoData:([bool] $NoDataPartition) -ExpectedIsoSha256 $IsoSha256 -Online:([bool] $CheckOnline) -DriversPath $Drivers
             $file = $(if ($PlanPath) { $PlanPath } else { Join-Path (Get-WdmStateRoot) "plan-$($plan.planId).json" })
             Write-WdmFileAtomic ([IO.Path]::GetFullPath($file)) (Get-WdmUtf8 (ConvertTo-WdmJson $plan))
             if ($Json) { ConvertTo-WdmJson $plan } else { Format-WdmPlan $plan; ''; "Plan saved: $file"; if (-not @($plan.blockers).Count) { "Apply it: .\WdbMediaAssistant.ps1 -Mode Apply -PlanPath `"$file`"$(if ($plan.workflow -eq 'Create') { " -ConfirmErase $($plan.target.confirmCode)" })" } }
@@ -1369,7 +1524,7 @@ if ($script:WdmMain -and $script:WdmArgs.Mode -ne 'Library') {
         'Apply' {
             $plan = Read-WdmJsonFile $PlanPath
             if (-not $plan) { 'Plan not found.'; exit $script:WdmExit.Failed }
-            $r = Invoke-WdmApply $plan $ConfirmErase $Iso $Backup
+            $r = Invoke-WdmApply $plan $ConfirmErase $Iso $Backup $Drivers
             $path = $(if ($r.Contains('root')) { Save-WdmReport $r } else { '' })
             if ($Json) { ConvertTo-WdmJson $r } else { Format-WdmReport $r; if ($path) { "Report: $path" } }
             exit $script:WdmExit[[string] $r.status]

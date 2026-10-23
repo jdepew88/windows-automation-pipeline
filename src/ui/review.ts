@@ -137,6 +137,16 @@ function summaryTiles(p: Profile, result: GenerateResult): Tile[] {
       badge: p.windowsUpdate.enabled ? ['On', 'ok'] : ['Off', 'muted'],
     },
     {
+      key: 'drivers',
+      label: 'Hardware & drivers',
+      icon: 'chip',
+      value: p.drivers.enabled
+        ? `On: inspects the hardware on the installed computer, keeps working drivers, ${p.drivers.useWindowsUpdate && p.windowsUpdate.enabled ? 'waits for Windows Update, ' : ''}${p.drivers.resolveMissing ? 'installs only verified drivers where one is missing' : 'reports missing drivers'}`
+        : 'Off',
+      detail: p.drivers.enabled && p.drivers.bundle && p.drivers.includeOfflinePackages ? `Offline bundle ${p.drivers.bundle.folderName}, ${p.drivers.bundle.packages.length} package(s)` : undefined,
+      badge: p.drivers.enabled ? ['On', 'ok'] : ['Off', 'muted'],
+    },
+    {
       key: 'applications',
       label: 'Applications',
       icon: 'package',
@@ -196,6 +206,7 @@ function applicationsSummary(p: Profile): { value: string; detail?: string; badg
 
 const ASSET_CATEGORIES: { group: DeploymentAsset['group']; title: string; icon: IconName; empty: string }[] = [
   { group: 'windows-update', title: 'Windows Update scripts & configuration', icon: 'cloudDown', empty: 'None. Windows Update automation is off.' },
+  { group: 'drivers', title: 'Hardware & driver engine', icon: 'chip', empty: 'None. Hardware-aware driver provisioning is off.' },
   { group: 'applications', title: 'WinGet provisioning scripts & JSON', icon: 'package', empty: 'None. No applications or Additional Software are selected.' },
   { group: 'orchestration', title: 'Orchestration contracts', icon: 'layers', empty: 'None. Generated with the engines.' },
 ];

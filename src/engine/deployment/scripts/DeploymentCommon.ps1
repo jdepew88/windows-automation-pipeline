@@ -290,7 +290,16 @@ function Exit-WddMutex { param($Mutex) if ($Mutex) { try { $Mutex.ReleaseMutex()
 
 function Get-WddStage { param([hashtable] $Manifest, [string] $Id) @($Manifest.stages) | Where-Object { $_.id -eq $Id } | Select-Object -First 1 }
 
-function Get-WddEngineStages { param([hashtable] $Manifest) @(@($Manifest.stages) | Where-Object { $_.id -in 'windowsUpdate', 'applications' -and $_.enabled } | Sort-Object { [int] $_.order }) }
+# Phase 8: the driver stage is an engine stage when the manifest enables it (older manifests never do).
+function Get-WddEngineStages { param([hashtable] $Manifest) @(@($Manifest.stages) | Where-Object { $_.id -in 'windowsUpdate', 'applications', 'drivers' -and $_.enabled -and ($_.id -ne 'drivers' -or $_['launcher']) } | Sort-Object { [int] $_.order }) }
+
+<# Phase 8: the driver engine's flag for a computer that is offline because no network adapter has a driver. #>
+function Get-WddNetworkDriverFlag {
+    param([hashtable] $Paths)
+    $f = Read-WddJson (Join-Path $Paths.StateDir 'network-driver-missing.json')
+    if ($f -and $f['detail']) { return [string] $f['detail'] }
+    return ''
+}
 
 function ConvertTo-WddDate {
     param($Value)
@@ -384,6 +393,10 @@ function Get-WddSnapshot {
     $stages = @()
     foreach ($s in Get-WddEngineStages $Manifest) { $stages += , (Get-WddStageSnapshot $s $Paths $State) }
     $drivers = Get-WddStage $Manifest 'drivers'
+    $drvSnap = @($stages | Where-Object { $_.id -eq 'drivers' } | Select-Object -First 1)
+    $drvState = $(if ($drvSnap.Count) { [ordered]@{ id = 'drivers'; state = $drvSnap[0].state; status = $drvSnap[0].status; detail = $drvSnap[0].detail } }
+                  elseif ($drivers -and $drivers['implemented']) { [ordered]@{ id = 'drivers'; state = 'NotPartOfDeployment'; detail = [string] $drivers['note'] } }
+                  else { [ordered]@{ id = 'drivers'; state = 'NotImplemented'; detail = $(if ($drivers) { [string] $drivers['note'] } else { '' }) } })
     $engine = @($stages)
     $allFinal = ($engine.Count -eq 0) -or (@($engine | Where-Object { $_.state -ne 'Final' }).Count -eq 0)
     $blocked = @($engine | Where-Object { $_.state -in 'Stalled', 'LaunchFailed' })
@@ -394,7 +407,8 @@ function Get-WddSnapshot {
         deploymentState = $(if ($State) { [string] $State.status } else { 'NotInitialized' })
         currentStage    = $(if ($current.Count) { $current[0].id } else { '' })
         stages          = $stages
-        drivers         = [ordered]@{ id = 'drivers'; state = 'NotImplemented'; detail = $(if ($drivers) { [string] $drivers.note } else { '' }) }
+        drivers         = $drvState
+        networkDriverMissing = (Get-WddNetworkDriverFlag $Paths)
         allFinal        = $allFinal
         restartPending  = (Test-WddRestartPending $Paths)
         needsAttention  = @($blocked | ForEach-Object { "$($_.name): $($_.state). $($_.detail)" })
@@ -516,6 +530,8 @@ function Get-WddDeploymentOutcome {
     $live = @($stages | Where-Object { $_ -and $_.state -ne 'Final' })
     if (($Snapshot -and $Snapshot.restartPending) -or @($live | Where-Object { $_.status -in 'Rebooting', 'RebootDeferred' }).Count) { return & $o 'PausedAwaitingReboot' 'A restart is scheduled or in progress; the deployment continues after it.' }
     $net = @($live | Where-Object { $_.status -eq 'WaitingForNetwork' })
+    # Phase 8: offline because no network adapter has a driver: say so, the network will not appear by itself.
+    if ($Snapshot -and $Snapshot.Contains('networkDriverMissing') -and $Snapshot.networkDriverMissing) { return & $o 'PausedAwaitingNetwork' ([string] $Snapshot.networkDriverMissing) }
     if ($net.Count) { return & $o 'PausedAwaitingNetwork' ("$(($net | ForEach-Object { $_.name }) -join ', '): waiting for the network. $(($net | ForEach-Object { $_.detail } | Where-Object { $_ }) -join '; ')".Trim()) }
     $user = @($live | Where-Object { $_.state -in 'Stalled', 'LaunchFailed' -or $_.idle })
     if ($user.Count) { return & $o 'PausedAwaitingUser' (($user | ForEach-Object { "$($_.name): $(if ($_.idle) { $_.idle } else { "$($_.state). $($_.detail)" })" }) -join ' ') }

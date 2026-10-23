@@ -10,6 +10,7 @@ import { importBackupManifest } from '../../src/engine/migration/backup';
 import { InventorySchema } from '../../src/engine/migration/inventory';
 import { matchInventory } from '../../src/engine/migration/matching';
 import { applyMigration, attachBackup, defaultDecisions } from '../../src/engine/migration/plan';
+import { importDriverBundleManifest } from '../../src/engine/drivers';
 
 /**
  * Builds the fixture Deployment.Tests.ps1 runs against: the real deployment ZIP produced by the
@@ -22,6 +23,9 @@ import { applyMigration, attachBackup, defaultDecisions } from '../../src/engine
 export function writeDeploymentFixture(dir: string): { packageId: string; files: number } {
   const p = ownerDefaults();
   p.accounts.personName = 'Alex';
+  // The Phase 4-7 orchestrator scenarios run without the Phase 8 driver stage (the "off" regression);
+  // the driver stage has its own fixture below (<dir>/drivers).
+  p.drivers.enabled = false;
   p.applications.selection.devices.phone = 'iphone';
   p.applications.selection.added.push(catalogRef(catalogEntryById('rufus')!)!);
   p.applications.selection.added.push(
@@ -41,6 +45,7 @@ export function writeDeploymentFixture(dir: string): { packageId: string; files:
   }
   writeFileSync(join(dir, 'package.zip'), pkg.zip);
   writeMigrationFixture(join(dir, 'migration'));
+  writeDriversFixture(join(dir, 'drivers'));
   return { packageId: pkg.manifest.packageId, files: pkg.manifest.files.length };
 }
 
@@ -111,6 +116,7 @@ export function writeMigrationFixture(dir: string): { packageId: string; manifes
   const p = ownerDefaults();
   p.accounts.personName = 'Alex';
   p.windowsUpdate.enabled = false;
+  p.drivers.enabled = false;
   const items = matchInventory(inventory);
   const decisions = defaultDecisions(items);
   decisions.set('app-000000000003', { decision: 'manual', confirmed: false });
@@ -119,6 +125,117 @@ export function writeMigrationFixture(dir: string): { packageId: string; manifes
   const r = generate(p);
   if (!r.ok) throw new Error(`migration fixture profile is invalid: ${JSON.stringify(r.issues)}`);
   const pkg = buildDeploymentPackage(p, r);
+  for (const e of readZip(pkg.zip)) {
+    const target = join(usb, ...e.path.split('/'));
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, e.data);
+  }
+  writeFileSync(join(dir, 'package.zip'), pkg.zip);
+  return { packageId: pkg.manifest.packageId, manifestSha256: attached.reference!.manifestSha256 };
+}
+
+export const DRIVER_BUNDLE_FOLDER = 'WDB-Drivers-20261022-120000-abc123';
+const CLASS_GUIDS = {
+  Display: '{4d36e968-e325-11ce-bfc1-08002be10318}',
+  Net: '{4d36e972-e325-11ce-bfc1-08002be10318}',
+  SCSIAdapter: '{4d36e97b-e325-11ce-bfc1-08002be10318}',
+  System: '{4d36e97d-e325-11ce-bfc1-08002be10318}',
+} as const;
+
+/** The synthetic INF driver packages of the Phase 8 fixture (text the engine parses; no real driver). */
+export const FIXTURE_DRIVER_PACKAGES = [
+  { id: 'pkg-0000000000a1', base: 'nvdisp', cls: 'Display', provider: 'NVIDIA', version: '32.0.15.8100', date: '09/15/2026', ids: ['PCI\\VEN_10DE&DEV_2484&SUBSYS_146B10DE', 'PCI\\VEN_10DE&DEV_2484'], setupCritical: false },
+  { id: 'pkg-0000000000a2', base: 'rt25cx21x64', cls: 'Net', provider: 'Realtek', version: '10.68.815.2026', date: '08/15/2026', ids: ['PCI\\VEN_10EC&DEV_8125'], setupCritical: false },
+  { id: 'pkg-0000000000a3', base: 'iastorvd', cls: 'SCSIAdapter', provider: 'Intel Corporation', version: '20.1.0.1032', date: '07/01/2026', ids: ['PCI\\VEN_8086&DEV_9A0B'], setupCritical: true },
+  { id: 'pkg-0000000000a4', base: 'netwtw', cls: 'Net', provider: 'Intel', version: '23.160.0.4', date: '09/01/2026', ids: ['PCI\\VEN_8086&DEV_51F0'], setupCritical: false },
+  { id: 'pkg-0000000000a5', base: 'u0400000', cls: 'Display', provider: 'Advanced Micro Devices, Inc.', version: '32.0.21025.1024', date: '09/20/2026', ids: ['PCI\\VEN_1002&DEV_73BF'], setupCritical: false },
+  { id: 'pkg-0000000000a6', base: 'baseclass', cls: 'System', provider: 'Contoso', version: '1.0.0.0', date: '01/01/2026', ids: ['PCI\\CC_0880'], setupCritical: false },
+] as const;
+
+export function fixtureInf(x: (typeof FIXTURE_DRIVER_PACKAGES)[number]): string {
+  return [
+    '; Synthetic driver package for the Windows Deployment Builder tests (installs nothing)',
+    '[Version]',
+    'Signature = "$WINDOWS NT$"',
+    `Class = ${x.cls}`,
+    `ClassGuid = ${CLASS_GUIDS[x.cls]}`,
+    'Provider = %Mfg%',
+    `DriverVer = ${x.date},${x.version}`,
+    `CatalogFile = ${x.base}.cat`,
+    '',
+    '[Manufacturer]',
+    '%Mfg% = Models, NTamd64.10.0...22000',
+    '',
+    '[Models.NTamd64.10.0...22000]',
+    ...x.ids.map((id) => `%Desc% = Install, ${id}`),
+    '',
+    '[Install]',
+    'CopyFiles = Files',
+    '',
+    '[Strings]',
+    `Mfg = "${x.provider}"`,
+    'Desc = "Test device"',
+    '',
+  ].join('\r\n');
+}
+
+/**
+ * Phase 8 fixture (<dir>/drivers): an offline driver bundle written in the bundle tool's format (so
+ * the PowerShell validator checks a manifest produced by TypeScript), and the real deployment
+ * package with the driver stage on that pins it (the storage package is Setup-critical). The bundle
+ * stays outside the ZIP, as in a real deployment.
+ */
+export function writeDriversFixture(dir: string): { packageId: string; manifestSha256: string } {
+  rmSync(dir, { recursive: true, force: true });
+  const bundleRoot = join(dir, 'source', DRIVER_BUNDLE_FOLDER);
+  const packages = FIXTURE_DRIVER_PACKAGES.map((x, n) => {
+    const folder = `packages/${String(n + 1).padStart(3, '0')}-${x.base}`;
+    const files: Record<string, Uint8Array> = {
+      [`${x.base}.inf`]: utf8(fixtureInf(x)),
+      [`${x.base}.cat`]: utf8(`synthetic catalog for ${x.base}\r\n`),
+      [`${x.base}.sys`]: utf8(`synthetic driver binary ${x.base} ${x.version}\r\n`),
+    };
+    for (const [name, data] of Object.entries(files)) {
+      mkdirSync(join(bundleRoot, ...folder.split('/')), { recursive: true });
+      writeFileSync(join(bundleRoot, ...folder.split('/'), name), data);
+    }
+    const list = Object.entries(files).map(([path, data]) => ({ path, size: data.length, sha256: sha256(data) }));
+    const [mm, dd, yyyy] = x.date.split('/');
+    return {
+      id: x.id, folder, inf: `${x.base}.inf`, class: x.cls, classGuid: CLASS_GUIDS[x.cls], provider: x.provider, version: x.version, date: `${yyyy}-${mm}-${dd}`,
+      catalog: `${x.base}.cat`, targets: [{ arch: 'amd64', minBuild: 22000 }], hardwareIds: [...x.ids].map((i) => i.toUpperCase()).sort(),
+      signature: { status: 'Valid', signer: 'Microsoft Windows Hardware Compatibility Publisher', whql: true },
+      setupCritical: x.setupCritical, networkDriver: x.cls === 'Net', files: list, bytes: list.reduce((s, f) => s + f.size, 0),
+    };
+  });
+  const manifest = {
+    format: 'windows-deployment-builder/driver-bundle',
+    formatVersion: 1,
+    bundleId: 'b1d2c3e4f5a60000',
+    folderName: DRIVER_BUNDLE_FOLDER,
+    createdUtc: '2026-10-22T12:00:00.0000000Z',
+    tool: { name: 'DriverEngine.ps1', version: '1.0.0' },
+    source: { kind: 'driverStoreExport', manufacturer: 'Contoso', model: 'Workstation 7', osBuild: '26100', architecture: 'amd64' },
+    packages,
+    refused: [],
+    totals: { packages: packages.length, files: packages.reduce((s, p) => s + p.files.length, 0), bytes: packages.reduce((s, p) => s + p.bytes, 0) },
+    notice: 'INF driver packages only.',
+  };
+  const mBytes = utf8(JSON.stringify(manifest, null, 2) + '\n');
+  writeFileSync(join(bundleRoot, 'drivers-manifest.json'), mBytes);
+  const attached = importDriverBundleManifest(mBytes);
+  if (!attached.ok) throw new Error(`fixture driver bundle is invalid: ${attached.errors.join('; ')}`);
+
+  const p = ownerDefaults();
+  p.accounts.personName = 'Alex';
+  p.drivers.bundle = attached.reference!;
+  p.drivers.verifiedPackages = [
+    { id: 'contoso-nic', name: 'Contoso NIC driver', vendor: 'Contoso', url: 'https://download.microsoft.com/download/contoso/nic.cab', sha256: 'A'.repeat(64), format: 'cab', hardwareIds: ['PCI\\VEN_1D6A&DEV_07B1'], deviceClass: 'Net', version: '3.1.0.0', architecture: 'amd64' },
+  ];
+  const r = generate(p);
+  if (!r.ok) throw new Error(`drivers fixture profile is invalid: ${JSON.stringify(r.issues)}`);
+  const pkg = buildDeploymentPackage(p, r);
+  const usb = join(dir, 'usb');
   for (const e of readZip(pkg.zip)) {
     const target = join(usb, ...e.path.split('/'));
     mkdirSync(dirname(target), { recursive: true });

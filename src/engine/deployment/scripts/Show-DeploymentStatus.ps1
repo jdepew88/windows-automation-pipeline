@@ -47,7 +47,9 @@ function Format-WddStatus {
         if ($st.idle) { $l.Add("  note: $($st.idle)") }
         if ($st.outstanding) { $l.Add("  outstanding operations: $($st.outstanding) (retry them with the deployment recovery tool)") }
     }
-    $l.Add(('{0,-22} {1,-12} {2,-22} {3}' -f 'Manufacturer drivers', 'NotImplemented', '', 'Not part of this version'))
+    if ($s.drivers.state -eq 'NotPartOfDeployment') { $l.Add(('{0,-22} {1,-12} {2,-22} {3}' -f 'Hardware & drivers', 'Off', '', 'Not part of this deployment')) }
+    elseif ($s.drivers.state -eq 'NotImplemented') { $l.Add(('{0,-22} {1,-12} {2,-22} {3}' -f 'Manufacturer drivers', 'NotImplemented', '', 'Not part of this version')) }
+    if ($s.Contains('networkDriverMissing') -and $s.networkDriverMissing) { $l.Add("NETWORK: $($s.networkDriverMissing)") }
     $l.Add('')
     if (@($s.needsAttention).Count) {
         $l.Add('NEEDS ATTENTION')

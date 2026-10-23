@@ -4048,3 +4048,109 @@ div.callout {
     grid-column: 1 / -1;
   }
 }
+
+/* Phase 8: Hardware & Drivers ----------------------------------------------------------------- */
+.drv-banner {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin: 8px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--accent-soft);
+  font-size: 13px;
+}
+.drv-banner svg {
+  flex: none;
+  margin-top: 2px;
+}
+.drv-table {
+  display: grid;
+  gap: 4px;
+  margin: 10px 0;
+}
+.drv-tr > summary,
+.drv-th,
+.drv-table.compact .drv-tr {
+  display: grid;
+  grid-template-columns: minmax(0, 2.2fr) minmax(0, 1.2fr) minmax(0, 1.6fr) minmax(70px, 0.6fr);
+  gap: 10px;
+  align-items: start;
+}
+.drv-th {
+  padding: 0 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+details.drv-tr,
+.drv-table.compact .drv-tr {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+details.drv-tr > summary {
+  padding: 8px 10px;
+  cursor: pointer;
+  list-style: none;
+}
+details.drv-tr > summary::-webkit-details-marker {
+  display: none;
+}
+.drv-table.compact .drv-tr {
+  padding: 8px 10px;
+}
+.drv-table.compact .drv-th {
+  border: 0;
+  background: none;
+}
+details.drv-tr.attention {
+  border-color: var(--warn-border);
+  background: var(--warn-soft);
+}
+.drv-tr span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.drv-tr small {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+}
+.drv-tr .tag {
+  margin-left: 6px;
+}
+.drv-conf.low {
+  color: var(--warn-text);
+}
+.drv-detail {
+  padding: 0 10px 10px;
+  font-size: 13px;
+}
+.drv-detail code {
+  white-space: pre-wrap;
+}
+.drv-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 8px;
+  margin: 8px 0;
+}
+.drv-form textarea {
+  grid-column: 1 / -1;
+}
+.drv-apps ul {
+  margin: 4px 0 8px;
+  padding-left: 18px;
+}
+@media (max-width: 720px) {
+  .drv-tr > summary,
+  .drv-th,
+  .drv-table.compact .drv-tr {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+  .drv-th span:nth-child(n + 3) {
+    display: none;
+  }
+}

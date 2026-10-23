@@ -20,7 +20,8 @@ import { APP_ENGINE_VERSION, APP_PROFILE_FILE, APP_TASK_NAME, RESTORATION_FILE, 
 import { migrationActive, settingsRestoreActive } from '../migration/plan';
 import { adapterById } from '../migration/adapters';
 import { allProfiles, effectiveDevices, resolveSelection } from '../applications/selection';
-import { DRIVER_STAGE } from '../drivers/contract';
+import { DRIVER_STAGE, DRIVER_FINAL_STATUSES } from '../drivers/contract';
+import { DRIVER_ENGINE_VERSION, DRIVER_TASK_NAME, EMBEDDED_DRIVER_FILES, MEDIA_DRIVERS_DIR, MEDIA_WINPE_DRIVERS_DIR, driverAssets, driverTiming, driversActive } from '../drivers';
 import { isEffective, PHASES } from '../../features/scripts';
 import { sha256, utf8 } from './sha256';
 import { createZip } from './zip';
@@ -94,7 +95,7 @@ const crlf = (s: string): string => s.replace(/\r?\n/g, '\r\n');
 
 /** True when the answer file starts the post-installation deployment. */
 export function deploymentActive(p: Profile): boolean {
-  return p.windowsUpdate.enabled || applicationsActive(p);
+  return p.windowsUpdate.enabled || applicationsActive(p) || driversActive(p);
 }
 
 const ORCHESTRATOR_SCRIPTS: { path: string; source: string; description: string }[] = [
@@ -170,6 +171,16 @@ export function packageFiles(p: Profile): PackageFile[] {
       embedded: EMBEDDED_UPDATE_FILES.includes(a.name) ? `WindowsUpdate\\${a.name}` : null,
     });
   }
+  // Phase 8: the driver engine (the README and result schema ship in the package only).
+  for (const a of driverAssets(p)) {
+    files.push({
+      path: `scripts/drivers/${a.name}`,
+      content: a.content,
+      role: a.name.endsWith('.json') ? 'configuration' : a.name.endsWith('.txt') ? 'documentation' : 'engine',
+      description: a.description,
+      embedded: EMBEDDED_DRIVER_FILES.includes(a.name) ? `Drivers\\${a.name}` : null,
+    });
+  }
   for (const a of applicationAssets(p)) {
     if (a.name === APP_PROFILE_FILE) continue;
     files.push({
@@ -216,7 +227,9 @@ const asciiJson = (v: unknown) => crlf(JSON.stringify(v, null, 2).replace(/[\u00
 export function deadlineHours(p: Profile): number {
   const wu = p.windowsUpdate.enabled ? p.windowsUpdate.maxRuntimeHours : 0;
   const apps = applicationsActive(p) ? p.applications.waitForUpdatesHours + p.applications.maxRuntimeHours : 0;
-  return wu + apps + ORCHESTRATOR_LIMITS.graceHours;
+  // Phase 8: the driver stage adds its own resolution time after Windows Update.
+  const drivers = driversActive(p) ? driverTiming(p).maxRuntimeHours - driverTiming(p).waitForUpdatesHours : 0;
+  return wu + apps + drivers + ORCHESTRATOR_LIMITS.graceHours;
 }
 
 export function buildManifest(p: Profile) {
@@ -233,6 +246,7 @@ export function buildManifest(p: Profile) {
   const apps = applicationsActive(p);
   const wu = p.windowsUpdate;
   const a = p.applications;
+  const drv = driversActive(p);
   const manifest = {
     format: MANIFEST_FORMAT,
     manifestVersion: 1,
@@ -240,7 +254,7 @@ export function buildManifest(p: Profile) {
     packageId,
     /** package: the ZIP's manifest (every file); answerFile: the copy embedded in the answer file (embedded files only). */
     scope: 'package' as 'package' | 'answerFile',
-    generator: { name: 'Windows Deployment Builder', orchestrator: DEPLOYMENT_VERSION, windowsUpdateEngine: ENGINE_VERSION, applicationEngine: APP_ENGINE_VERSION },
+    generator: { name: 'Windows Deployment Builder', orchestrator: DEPLOYMENT_VERSION, windowsUpdateEngine: ENGINE_VERSION, applicationEngine: APP_ENGINE_VERSION, ...(drv ? { driverEngine: DRIVER_ENGINE_VERSION } : {}) },
     dataRoot: DATA_ROOT,
     packageFolder: PACKAGE_DIR,
     answerFile: {
@@ -302,18 +316,37 @@ export function buildManifest(p: Profile) {
         coordination: a.coordination,
         requiresInternet: true,
       },
-      {
-        id: DRIVER_STAGE.id,
-        order: 3,
-        name: 'Manufacturer drivers',
-        enabled: false,
-        implemented: false,
-        status: 'NotImplemented',
-        context: 'SYSTEM',
-        waitsFor: ['windowsUpdate'],
-        note: 'Not implemented in this version. Nothing installs or changes drivers. Interface: src/engine/drivers/contract.ts.',
-        requiresInternet: true,
-      },
+      drv
+        ? {
+            id: DRIVER_STAGE.id,
+            order: 3,
+            name: 'Hardware & drivers',
+            enabled: true,
+            implemented: true,
+            context: 'SYSTEM',
+            launcher: 'scripts/drivers/Install-DriverEngine.ps1',
+            task: { path: TASK_PATH, name: DRIVER_TASK_NAME },
+            result: 'Drivers\\result.json',
+            status: 'Drivers\\status.json',
+            marker: 'state\\drivers.done',
+            report: 'reports\\drivers.json',
+            finalStatuses: [...DRIVER_FINAL_STATUSES],
+            waitsFor: wu.enabled && p.drivers.useWindowsUpdate ? ['windowsUpdate'] : [],
+            note: 'Inspects the hardware at the first start, waits for Windows Update, then installs verified drivers only where one is missing or not working. The application stage starts after it.',
+            requiresInternet: false,
+          }
+        : {
+            id: DRIVER_STAGE.id,
+            order: 3,
+            name: 'Hardware & drivers',
+            enabled: false,
+            implemented: true,
+            status: 'NotPartOfDeployment',
+            context: 'SYSTEM',
+            waitsFor: ['windowsUpdate'],
+            note: 'Hardware-aware driver provisioning is off for this deployment. Nothing installs or changes drivers.',
+            requiresInternet: false,
+          },
       {
         id: 'finalization',
         order: 4,
@@ -364,6 +397,7 @@ export function buildManifest(p: Profile) {
     restartPolicy: {
       windowsUpdate: { maxReboots: wu.maxReboots, rebootWarningSeconds: wu.rebootWarningSeconds },
       applications: { restartPolicy: a.restartPolicy, maxReboots: a.maxReboots, rebootWarningSeconds: a.rebootWarningSeconds },
+      ...(drv ? { drivers: { maxReboots: p.drivers.maxReboots, rebootWarningSeconds: wu.rebootWarningSeconds } } : {}),
     },
     failureHandling: {
       windowsUpdate: { maxAttemptsPerUpdate: wu.maxAttemptsPerUpdate, maxRuntimeHours: wu.maxRuntimeHours, networkWaitMinutes: wu.networkWaitMinutes, drivers: resolveDrivers(p) },
@@ -374,9 +408,31 @@ export function buildManifest(p: Profile) {
         waitForUpdatesHours: a.waitForUpdatesHours,
         networkWaitMinutes: a.networkWaitMinutes,
       },
+      ...(drv ? { drivers: { ...driverTiming(p), maxAttemptsPerOperation: 2, maxReboots: p.drivers.maxReboots } } : {}),
       orchestrator: { ...ORCHESTRATOR_LIMITS, deadlineHours: deadlineHours(p) },
     },
-    drivers: { implemented: false, preferences: { mode: 'notConfigured' }, note: 'Reserved for a later phase (vendor packages matched by hardware ID).' },
+    drivers: drv
+      ? {
+          implemented: true,
+          enabled: true,
+          policy: {
+            useWindowsUpdate: p.drivers.useWindowsUpdate,
+            windowsUpdateDrivers: resolveDrivers(p),
+            resolveMissing: p.drivers.resolveMissing,
+            offlinePackages: p.drivers.includeOfflinePackages,
+            optionalReplacements: p.drivers.optionalReplacements,
+            reportUnresolved: p.drivers.reportUnresolved,
+            networkBootstrap: p.drivers.networkBootstrap,
+          },
+          offlineBundle:
+            p.drivers.bundle && p.drivers.includeOfflinePackages
+              ? { bundleId: p.drivers.bundle.bundleId, folderName: p.drivers.bundle.folderName, manifestSha256: p.drivers.bundle.manifestSha256, expectedLocation: `WindowsDeployment\\drivers\\${p.drivers.bundle.folderName}`, packages: p.drivers.bundle.packages.length, setupCritical: p.drivers.bundle.packages.filter((x) => x.setupCritical).map((x) => x.id), includedInPackage: false }
+              : null,
+          verifiedPackages: p.drivers.verifiedPackages.map((v) => ({ id: v.id, name: v.name, vendor: v.vendor, sha256: v.sha256 })),
+          report: DRIVER_STAGE.reportFile,
+          neverAutomated: ['BIOS and firmware updates', 'vendor EXE installers', 'removing or rolling back drivers', 'replacing a working driver without approval'],
+        }
+      : { implemented: true, enabled: false, note: 'Hardware-aware driver provisioning is off for this deployment; nothing installs or changes drivers.' },
     customScripts: { managedBy: 'answer file', ...Object.fromEntries(PHASES.map((ph) => [ph.phase, p.scripts[ph.phase].filter(isEffective).length])) },
     paths: { package: PACKAGE_ROOT, state: DEPLOYMENT_STATE, status: DEPLOYMENT_STATUS, marker: DEPLOYMENT_MARKER, report: DEPLOYMENT_REPORT, monitorTask: `${MONITOR_TASK.path}${MONITOR_TASK.name}`, recoveryTool: recoveryToolIncluded(p) ? RECOVERY_TOOL : null },
     files: entries,
@@ -433,6 +489,7 @@ export function buildDeploymentPackage(p: Profile, result: GenerateResult): Depl
   if (p.output.answerFileName !== 'autounattend.xml') warnings.push(`The answer file is named ${p.output.answerFileName}, so Windows Setup will not find it automatically. Choose "autounattend.xml" under Output for a USB installation.`);
   if (!deploymentActive(p)) warnings.push('Windows Update automation is off and no applications are selected, so nothing runs after installation; the package contains the answer file and the tools only.');
   if (manifest.applications.packages.some((x) => x.requiresAttention)) warnings.push('Some selected applications are unresolved or need interaction; they are reported for follow-up and not installed automatically.');
+  if (driversActive(p) && p.drivers.bundle && p.drivers.includeOfflinePackages) warnings.push(`The offline driver bundle ${p.drivers.bundle.folderName} is not part of this ZIP: put it on the USB drive as WindowsDeployment\\drivers\\${p.drivers.bundle.folderName} (the USB Preparation Assistant does this and verifies it).`);
   return {
     fileName: PACKAGE_FILE_NAME,
     zip: createZip(zipEntries.map((e) => ({ path: e.path, data: e.data }))),
@@ -473,7 +530,9 @@ function stageLines(p: Profile): string {
     ...(migrationActive(p)
       ? [`     Restoration plan: ${p.migration.decisions.filter((d) => d.decision === 'restore').length} application(s) from the inventory${settingsRestoreActive(p) ? `; settings of ${p.migration.settings.filter((s) => s.enabled).length} application(s) restored after installation` : ''} (restore-plan.txt)`]
       : []),
-    '  3. Manufacturer drivers  not implemented in this version (nothing is installed)',
+    driversActive(p)
+      ? `  3. Hardware & drivers   on   (SYSTEM; inspects the hardware, waits for Windows Update, installs verified drivers only where needed${applicationsActive(p) ? '; applications start after it' : ''})`
+      : '  3. Hardware & drivers   off  (nothing installs or changes drivers)',
     '  4. Report               C:\\ProgramData\\WindowsDeploymentBuilder\\reports\\deployment-report.txt',
   ].join('\n');
 }
@@ -514,6 +573,23 @@ Application settings backup (not included in this ZIP; it stays on a drive you c
 `;
 }
 
+/** Phase 8: where the offline driver bundle goes (never part of this ZIP). */
+function driversText(p: Profile): string {
+  const d = p.drivers;
+  if (!driversActive(p) || !d.bundle || !d.includeOfflinePackages) return '';
+  const critical = d.bundle.packages.filter((x) => x.setupCritical);
+  return `
+Offline driver bundle (not included in this ZIP)
+  Copy the bundle folder ${d.bundle.folderName} to the USB drive as
+    ${MEDIA_DRIVERS_DIR.replace(/\//g, '\\')}\\${d.bundle.folderName}
+  The deployment accepts only that bundle (manifest SHA-256 ${d.bundle.manifestSha256}) and installs a
+  package from it only for a device whose hardware IDs it matches.${critical.length ? `
+  ${critical.length} storage driver(s) must be available to Windows Setup: copy those packages to
+    ${MEDIA_WINPE_DRIVERS_DIR}\\${d.bundle.folderName}\\<package folder>
+  (the USB Preparation Assistant does both and verifies them).` : ''}
+`;
+}
+
 function readme(p: Profile): string {
   return `Windows Deployment Builder - deployment package ${DEPLOYMENT_VERSION}
 ==================================================
@@ -528,7 +604,7 @@ into an automated deployment. It does not contain Windows itself.
     setup.cmd                Manual entry point (run as administrator). Not needed for a USB
                              installation.
     deployment-manifest.json Stages, selections, limits and the SHA-256 of every file.
-    scripts\\                 Orchestrator, Windows Update engine, application engine.
+    scripts\\                 Orchestrator, Windows Update engine, application engine${driversActive(p) ? ', driver engine' : ''}.
     profiles\\                This configuration (no passwords) and the application selection.
     config\\orchestration.json
     docs\\INSTALLATION.txt    Step-by-step USB preparation and installation.
@@ -541,7 +617,7 @@ formats or selects a disk; you choose where Windows is installed.
 
 Progress on the installed computer: "Deployment progress" on the desktop, or
   C:\\ProgramData\\WindowsDeploymentBuilder\\Deployment\\status.json
-${recoveryText(p)}${backupText(p)}
+${recoveryText(p)}${backupText(p)}${driversText(p)}
 Status: generated and tested with simulations only. Validate in a virtual machine or on a spare
 computer before relying on it.
 `;
@@ -594,7 +670,7 @@ Recovery: see the report, or run (elevated)
   ... -Status                 shows progress
   ... -RestartStage <stage>   starts windowsUpdate or applications again
 ${recoveryText(p)}
-${backupText(p)}Remove the USB drive, or at least ${p.output.answerFileName}, after installing: another computer
+${backupText(p)}${driversText(p)}Remove the USB drive, or at least ${p.output.answerFileName}, after installing: another computer
 booted from it would be installed with the same settings, and the file may contain passwords.
 `;
 }

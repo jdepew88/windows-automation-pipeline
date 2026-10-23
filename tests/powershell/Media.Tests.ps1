@@ -4,8 +4,9 @@
     simulated computer: disks, partitions and volumes are records whose "drives" are temporary
     folders; ISO mounting, DISM, partitioning, signatures, elevation and the online release page are
     replaced. The deployment packages are the REAL ZIPs produced by the generator (fixture), and
-    the Phase 6 backup is the real fixture backup. No real disk is listed, erased, partitioned or
-    written; no ISO is mounted; DISM is never called.
+    the Phase 6 backup is the real fixture backup, the Phase 8 driver bundle the fixture bundle
+    (catalog signatures simulated). No real disk is listed, erased, partitioned or written; no ISO is
+    mounted; DISM is never called.
 
     Run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\powershell\Media.Tests.ps1 -Fixture <dir>
     (<dir> from "vite-node tests/powershell/make-deployment-fixture.ts <dir>"; npm run test:ps does both.)
@@ -15,7 +16,12 @@ param([Parameter(Mandatory = $true)] [string] $Fixture)
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '..\..\src\engine\media\scripts\WdbMediaAssistant.ps1') -Mode Library
 . (Join-Path $PSScriptRoot '..\..\src\engine\migration\scripts\WdbMigration.ps1') -Mode Library
+# Phase 8: the driver bundle validator (shipped next to the assistant in its ZIP).
+. (Join-Path $PSScriptRoot '..\..\src\engine\drivers\scripts\DriverEngine.ps1') -Mode Library
 Set-StrictMode -Version 2.0
+$script:DriverSources = ConvertTo-WdvHashtable ([IO.File]::ReadAllText((Join-Path $PSScriptRoot '..\..\src\data\driver-sources.json')) | ConvertFrom-Json)
+function Get-WdvSources { param([string] $ConfigPath) $script:DriverSources }
+function Get-WdvSignature { param([string] $Path) @{ Status = 'Valid'; Signer = 'Microsoft Windows Hardware Compatibility Publisher' } }
 $script:WdmReleaseFile = Join-Path $PSScriptRoot '..\..\src\data\windows-releases.json'
 ${function:Invoke-WdmPartitionDiskReal} = ${function:Invoke-WdmPartitionDisk}
 
@@ -25,6 +31,9 @@ $script:MainZip = (Resolve-Path (Join-Path $Fixture 'package.zip')).Path
 $script:MigZip = (Resolve-Path (Join-Path $Fixture 'migration\package.zip')).Path
 $script:MigBackupFolder = 'WDB-AppBackup-20261021-120000-a1b2c3'
 $script:MigBackup = (Resolve-Path (Join-Path $Fixture "migration\usb\WindowsDeployment\backups\$script:MigBackupFolder")).Path
+$script:DrvZip = (Resolve-Path (Join-Path $Fixture 'drivers\package.zip')).Path
+$script:DrvBundleFolder = 'WDB-Drivers-20261022-120000-abc123'
+$script:DrvBundle = (Resolve-Path (Join-Path $Fixture "drivers\source\$script:DrvBundleFolder")).Path
 
 function Assert-Equal($Actual, $Expected, [string] $Message) { if ("$Actual" -ne "$Expected") { throw "ASSERT: $Message. Expected <$Expected>, got <$Actual>." } }
 function Assert-True($Value, [string] $Message) { if (-not $Value) { throw "ASSERT: $Message" } }
@@ -530,6 +539,60 @@ function Set-SimIso {
     [IO.File]::WriteAllText($isoFile, 'simulated ISO container')
     $script:Sim.Mounted[$isoFile] = $isoRoot + '\'
     return $isoFile
+}
+
+$tests['drivers: a bundle with Setup-critical drivers is required, validated, copied; only the storage driver goes to $WinPEDriver$'] = {
+    Reset-Sim; $e = Set-SimComputer
+    Assert-Match (New-WdmPlan Update $script:DrvZip '' 'E:').blockers 'Setup-critical drivers from bundle' 'required when it carries a Setup-critical driver'
+    $wrong = Join-Path $script:Sim.Root 'WDB-Drivers-20260101-000000-ffffff'; Copy-Item $script:DrvBundle $wrong -Recurse
+    Assert-Match (New-WdmPlan Update $script:DrvZip '' 'E:' -DriversPath $wrong).blockers "expects '$script:DrvBundleFolder'" 'another bundle (folder name)'
+    $tampered = Join-Path (Join-Path $script:Sim.Root 't') $script:DrvBundleFolder; Copy-Item $script:DrvBundle $tampered -Recurse
+    [IO.File]::AppendAllText((Join-Path $tampered 'packages\003-iastorvd\iastorvd.sys'), 'x')
+    Assert-Match (New-WdmPlan Update $script:DrvZip '' 'E:' -DriversPath $tampered).blockers 'Driver bundle:.*iastorvd\.sys was modified' 'a modified bundle is refused'
+    $plan = New-WdmPlan Update $script:DrvZip '' 'E:' -DriversPath $script:DrvBundle
+    Assert-Equal @($plan.blockers).Count 0 "plan: $(@($plan.blockers) -join '; ')"
+    Assert-Match @($plan.operations | ForEach-Object { $_.description }) 'Copy offline driver bundle .*\(6 INF package' 'bundle copy planned'
+    Assert-Match @($plan.operations | ForEach-Object { $_.description }) 'Copy 1 Setup-critical driver package\(s\) to \$WinPEDriver\$' 'Setup-critical copy planned'
+    Assert-Match @((Format-WdmPlan $plan) -split "`r`n") 'Drivers  : WDB-Drivers-.*1 Setup-critical' 'shown in the plan'
+    $r = Invoke-WdmApply $plan
+    Assert-Equal $r.status 'ReadyForInstallation' "ready: $(Get-Problems $r)"
+    Assert-True (Test-Path (Join-Path $e.Root "WindowsDeployment\drivers\$script:DrvBundleFolder\drivers-manifest.json")) 'bundle at WindowsDeployment\drivers\<folder>'
+    $winpe = Join-Path $e.Root "`$WinPEDriver`$\$script:DrvBundleFolder"
+    Assert-True (Test-Path (Join-Path $winpe '003-iastorvd\iastorvd.inf')) 'storage driver where Windows Setup loads it'
+    Assert-Equal @(Get-ChildItem -LiteralPath $winpe -Directory).Count 1 'only the Setup-critical package in $WinPEDriver$ (nothing else hardware-specific)'
+    $checks = @($r.checks | ForEach-Object { "$($_.check) $($_.result) $($_.detail)" })
+    Assert-Match $checks '^Driver bundle Pass' 'bundle verified on the drive'
+    Assert-Match $checks '^Setup-critical drivers Pass .*not boot tested' 'Setup-critical drivers verified; no boot claim'
+    Assert-True (Test-Path $script:DrvBundle) 'the source bundle is kept'
+    $stage = Join-Path $e.Root 'WindowsDeployment\scripts\bootstrap\Stage-Deployment.ps1'
+    $out = & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $stage -SourceMode Package -SourceRoot (Join-Path $e.Root 'WindowsDeployment') 2>&1
+    Assert-Equal $LASTEXITCODE 0 "the drive still passes the deployment's own verification: $($out -join ' ')"
+    $engine = Get-Content -Raw (Join-Path $e.Root 'WindowsDeployment\scripts\drivers\DriverEngine.ps1')
+    Assert-True ($engine.Contains('WindowsDeployment\drivers\$($b.folderName)')) 'the bundle sits where the driver engine looks for it'
+}
+
+$tests['drivers: a replaced or foreign $WinPEDriver$ is moved aside; Verify reports missing Setup drivers; no bundle, no copy'] = {
+    Reset-Sim; $e = Set-SimComputer
+    $foreign = Join-Path $e.Root '$WinPEDriver$\OtherCustomer'
+    New-Item -ItemType Directory -Path $foreign -Force | Out-Null
+    [IO.File]::WriteAllText((Join-Path $foreign 'raid.inf'), '[Version]')
+    $plan = New-WdmPlan Update $script:DrvZip '' 'E:' -DriversPath $script:DrvBundle
+    Assert-Match (Get-Lines $plan) 'loads every driver in it' 'the existing $WinPEDriver$ is named'
+    $r = Invoke-WdmApply $plan
+    Assert-Equal $r.status 'ReadyForInstallation' "ready: $(Get-Problems $r)"
+    Assert-True (-not (Test-Path $foreign)) 'not left where Setup would load it'
+    Assert-True (@(Get-ChildItem -LiteralPath (Join-Path $e.Root 'WDB-previous') -Recurse -Filter 'raid.inf').Count -eq 1) 'kept in WDB-previous, not deleted'
+    Remove-Item -LiteralPath (Join-Path $e.Root "`$WinPEDriver`$\$script:DrvBundleFolder\003-iastorvd\iastorvd.sys")
+    $v = Test-WdmMedia $e.Root (Read-WdmPackage $script:DrvZip)
+    Assert-Equal $v.status 'Incomplete' 'a missing Setup-critical file is not ready'
+    Assert-Match @($v.checks | ForEach-Object { "$($_.check) $($_.result)" }) '^Setup-critical drivers Missing' 'named'
+    # A package without drivers never copies a bundle.
+    Reset-Sim; $e = Set-SimComputer
+    $plan = New-WdmPlan Update $script:MainZip '' 'E:' -DriversPath $script:DrvBundle
+    Assert-Match (Get-Lines $plan) 'does not use one; it is not copied' 'not copied'
+    Assert-Equal (Invoke-WdmApply $plan).status 'ReadyForInstallation' 'ready'
+    Assert-True (-not (Test-Path (Join-Path $e.Root 'WindowsDeployment\drivers'))) 'no driver bundle on the drive'
+    Assert-True (-not (Test-Path (Join-Path $e.Root '$WinPEDriver$'))) 'no $WinPEDriver$'
 }
 
 $tests['Create: an ISO onto a positively identified stick, after typed confirmation and elevation; layout for 16 GB and 64 GB'] = {

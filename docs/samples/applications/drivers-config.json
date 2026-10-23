@@ -1,0 +1,595 @@
+{
+  "schemaVersion": 1,
+  "engineVersion": "1.0.0",
+  "dataRoot": "C:\\ProgramData\\WindowsDeploymentBuilder",
+  "taskPath": "\\WindowsDeploymentBuilder\\",
+  "taskName": "Drivers",
+  "policy": {
+    "useWindowsUpdate": true,
+    "resolveMissing": true,
+    "offlinePackages": true,
+    "optionalReplacements": "never",
+    "reportUnresolved": true,
+    "networkBootstrap": true
+  },
+  "maxReboots": 2,
+  "maxAttemptsPerOperation": 2,
+  "maxRuntimeHours": 14,
+  "waitForUpdatesHours": 8,
+  "networkWaitMinutes": 5,
+  "lockWaitMinutes": 60,
+  "rebootWarningSeconds": 60,
+  "maxNetworkDeferrals": 6,
+  "windowsUpdate": {
+    "enabled": true,
+    "drivers": "exclude",
+    "stateFile": "C:\\ProgramData\\WindowsDeploymentBuilder\\Updates\\state.json",
+    "resultFile": "C:\\ProgramData\\WindowsDeploymentBuilder\\Updates\\result.json",
+    "taskPath": "\\WindowsDeploymentBuilder\\",
+    "taskName": "WindowsUpdate"
+  },
+  "bundle": null,
+  "verifiedPackages": [],
+  "approvals": [],
+  "expectedSystem": null,
+  "sources": {
+    "format": "windows-deployment-builder/driver-sources",
+    "version": 1,
+    "checkedUtc": "2026-10-22",
+    "notice": "Identification data and official support pages only. Nothing here is a download location: drivers are installed only from the Windows driver store, Windows Update, a pinned offline bundle or a technician-verified package (SHA-256). Support pages are shown for manual follow-up.",
+    "componentVendors": [
+      {
+        "id": "intel",
+        "name": "Intel",
+        "pci": [
+          "8086"
+        ],
+        "usb": [
+          "8087"
+        ],
+        "acpi": [
+          "INT",
+          "INTC"
+        ],
+        "supportUrl": "https://www.intel.com/content/www/us/en/download-center/home.html",
+        "urlCheck": "bot-protected (HTTP 403 to scripts)",
+        "optionalApplications": [
+          {
+            "name": "Intel Driver & Support Assistant",
+            "purpose": "Notifies about newer Intel drivers. Optional utility, never required for a device to work."
+          }
+        ]
+      },
+      {
+        "id": "amd",
+        "name": "AMD",
+        "pci": [
+          "1022",
+          "1002"
+        ],
+        "usb": [],
+        "acpi": [
+          "AMDI",
+          "AMD"
+        ],
+        "supportUrl": "https://www.amd.com/en/support/download/drivers.html",
+        "urlCheck": "HTTP 200",
+        "optionalApplications": [
+          {
+            "name": "AMD Software: Adrenalin Edition",
+            "purpose": "Radeon control and tuning application. The display driver works without its optional features; OEM laptops may require the OEM's graphics package."
+          }
+        ]
+      },
+      {
+        "id": "nvidia",
+        "name": "NVIDIA",
+        "pci": [
+          "10DE"
+        ],
+        "usb": [
+          "0955"
+        ],
+        "acpi": [
+          "NVDA"
+        ],
+        "supportUrl": "https://www.nvidia.com/en-us/drivers/",
+        "urlCheck": "HTTP 200",
+        "optionalApplications": [
+          {
+            "name": "NVIDIA App",
+            "purpose": "Game settings and driver notifications. Optional; not installed because a GPU is present."
+          },
+          {
+            "name": "CUDA Toolkit",
+            "purpose": "Developer and compute toolkit. Only for people who develop or run CUDA software; never installed automatically."
+          }
+        ]
+      },
+      {
+        "id": "realtek",
+        "name": "Realtek",
+        "pci": [
+          "10EC"
+        ],
+        "usb": [
+          "0BDA"
+        ],
+        "acpi": [
+          "RTL"
+        ],
+        "supportUrl": "https://www.realtek.com/Download/Overview",
+        "urlCheck": "HTTP 200",
+        "optionalApplications": [
+          {
+            "name": "Realtek Audio Console",
+            "purpose": "Audio control panel supplied with OEM audio packages. Optional."
+          }
+        ]
+      },
+      {
+        "id": "broadcom",
+        "name": "Broadcom",
+        "pci": [
+          "14E4"
+        ],
+        "usb": [
+          "0A5C"
+        ],
+        "acpi": [
+          "BCM"
+        ],
+        "supportUrl": "",
+        "urlCheck": "",
+        "optionalApplications": []
+      },
+      {
+        "id": "qualcomm",
+        "name": "Qualcomm",
+        "pci": [
+          "17CB",
+          "168C"
+        ],
+        "usb": [
+          "0CF3",
+          "05C6"
+        ],
+        "acpi": [
+          "QCOM"
+        ],
+        "supportUrl": "",
+        "urlCheck": "",
+        "optionalApplications": []
+      },
+      {
+        "id": "mediatek",
+        "name": "MediaTek",
+        "pci": [
+          "14C3"
+        ],
+        "usb": [
+          "0E8D"
+        ],
+        "acpi": [
+          "MTK"
+        ],
+        "supportUrl": "",
+        "urlCheck": "",
+        "optionalApplications": []
+      },
+      {
+        "id": "marvell",
+        "name": "Marvell / Aquantia",
+        "pci": [
+          "11AB",
+          "1D6A"
+        ],
+        "usb": [],
+        "acpi": [],
+        "supportUrl": "",
+        "urlCheck": "",
+        "optionalApplications": []
+      },
+      {
+        "id": "asmedia",
+        "name": "ASMedia",
+        "pci": [
+          "1B21"
+        ],
+        "usb": [
+          "174C"
+        ],
+        "acpi": [],
+        "supportUrl": "",
+        "urlCheck": "",
+        "optionalApplications": []
+      },
+      {
+        "id": "samsung",
+        "name": "Samsung",
+        "pci": [
+          "144D"
+        ],
+        "usb": [
+          "04E8"
+        ],
+        "acpi": [],
+        "supportUrl": "",
+        "urlCheck": "",
+        "optionalApplications": []
+      },
+      {
+        "id": "skhynix",
+        "name": "SK hynix",
+        "pci": [
+          "1C5C"
+        ],
+        "usb": [],
+        "acpi": [],
+        "supportUrl": "",
+        "urlCheck": "",
+        "optionalApplications": []
+      },
+      {
+        "id": "wdc",
+        "name": "Western Digital / SanDisk",
+        "pci": [
+          "15B7"
+        ],
+        "usb": [
+          "0781",
+          "1058"
+        ],
+        "acpi": [],
+        "supportUrl": "",
+        "urlCheck": "",
+        "optionalApplications": []
+      },
+      {
+        "id": "kioxia",
+        "name": "KIOXIA",
+        "pci": [
+          "1E0F"
+        ],
+        "usb": [],
+        "acpi": [],
+        "supportUrl": "",
+        "urlCheck": "",
+        "optionalApplications": []
+      },
+      {
+        "id": "synaptics",
+        "name": "Synaptics",
+        "pci": [],
+        "usb": [
+          "06CB"
+        ],
+        "acpi": [
+          "SYN",
+          "SYNA"
+        ],
+        "supportUrl": "",
+        "urlCheck": "",
+        "optionalApplications": []
+      },
+      {
+        "id": "elan",
+        "name": "ELAN",
+        "pci": [],
+        "usb": [
+          "04F3"
+        ],
+        "acpi": [
+          "ELAN"
+        ],
+        "supportUrl": "",
+        "urlCheck": "",
+        "optionalApplications": []
+      },
+      {
+        "id": "goodix",
+        "name": "Goodix",
+        "pci": [],
+        "usb": [
+          "27C6"
+        ],
+        "acpi": [
+          "GDIX"
+        ],
+        "supportUrl": "",
+        "urlCheck": "",
+        "optionalApplications": []
+      },
+      {
+        "id": "cirrus",
+        "name": "Cirrus Logic",
+        "pci": [
+          "1013"
+        ],
+        "usb": [],
+        "acpi": [
+          "CSC"
+        ],
+        "supportUrl": "",
+        "urlCheck": "",
+        "optionalApplications": []
+      },
+      {
+        "id": "conexant",
+        "name": "Conexant / Synaptics audio",
+        "pci": [
+          "14F1"
+        ],
+        "usb": [],
+        "acpi": [],
+        "supportUrl": "",
+        "urlCheck": "",
+        "optionalApplications": []
+      },
+      {
+        "id": "logitech",
+        "name": "Logitech",
+        "pci": [],
+        "usb": [
+          "046D"
+        ],
+        "acpi": [],
+        "supportUrl": "",
+        "urlCheck": "",
+        "optionalApplications": []
+      },
+      {
+        "id": "microsoft",
+        "name": "Microsoft",
+        "pci": [
+          "1414"
+        ],
+        "usb": [
+          "045E"
+        ],
+        "acpi": [
+          "MSFT"
+        ],
+        "supportUrl": "",
+        "urlCheck": "",
+        "optionalApplications": []
+      },
+      {
+        "id": "vmware",
+        "name": "VMware (virtual hardware)",
+        "pci": [
+          "15AD"
+        ],
+        "usb": [
+          "0E0F"
+        ],
+        "acpi": [
+          "VMW"
+        ],
+        "supportUrl": "",
+        "urlCheck": "",
+        "optionalApplications": []
+      },
+      {
+        "id": "virtio",
+        "name": "Red Hat VirtIO / QEMU (virtual hardware)",
+        "pci": [
+          "1AF4",
+          "1B36"
+        ],
+        "usb": [],
+        "acpi": [
+          "QEMU"
+        ],
+        "supportUrl": "",
+        "urlCheck": "",
+        "optionalApplications": []
+      },
+      {
+        "id": "virtualbox",
+        "name": "VirtualBox (virtual hardware)",
+        "pci": [
+          "80EE"
+        ],
+        "usb": [
+          "80EE"
+        ],
+        "acpi": [
+          "VBOX"
+        ],
+        "supportUrl": "",
+        "urlCheck": "",
+        "optionalApplications": []
+      }
+    ],
+    "systemManufacturers": [
+      {
+        "id": "dell",
+        "name": "Dell",
+        "match": "^dell",
+        "pciSubsystemVendor": "1028",
+        "supportUrl": "https://www.dell.com/support/home/",
+        "urlCheck": "bot-protected (HTTP 403 to scripts)",
+        "optionalApplications": [
+          {
+            "name": "Dell Command | Update",
+            "purpose": "Dell's own driver, BIOS and firmware updater. Optional; BIOS and firmware updates are never automated by this deployment."
+          }
+        ]
+      },
+      {
+        "id": "hp",
+        "name": "HP",
+        "match": "^(hp|hewlett)",
+        "pciSubsystemVendor": "103C",
+        "supportUrl": "https://support.hp.com/us-en/drivers",
+        "urlCheck": "HTTP 200",
+        "optionalApplications": [
+          {
+            "name": "HP Support Assistant",
+            "purpose": "HP's driver and update utility. Optional."
+          }
+        ]
+      },
+      {
+        "id": "lenovo",
+        "name": "Lenovo",
+        "match": "^lenovo",
+        "pciSubsystemVendor": "17AA",
+        "supportUrl": "https://pcsupport.lenovo.com/",
+        "urlCheck": "HTTP 302 to the regional page",
+        "optionalApplications": [
+          {
+            "name": "Lenovo Vantage / Lenovo System Update",
+            "purpose": "Lenovo's driver and settings utilities. Optional."
+          }
+        ]
+      },
+      {
+        "id": "asus",
+        "name": "ASUS",
+        "match": "^asus",
+        "pciSubsystemVendor": "1043",
+        "supportUrl": "https://www.asus.com/support/download-center/",
+        "urlCheck": "HTTP 200",
+        "optionalApplications": [
+          {
+            "name": "MyASUS / Armoury Crate",
+            "purpose": "ASUS control and update utilities. Optional."
+          }
+        ]
+      },
+      {
+        "id": "acer",
+        "name": "Acer",
+        "match": "^acer",
+        "pciSubsystemVendor": "1025",
+        "supportUrl": "https://www.acer.com/us-en/support/drivers-and-manuals",
+        "urlCheck": "no response to scripts (unverified)",
+        "optionalApplications": [
+          {
+            "name": "Acer Care Center",
+            "purpose": "Acer's update utility. Optional."
+          }
+        ]
+      },
+      {
+        "id": "msi",
+        "name": "MSI",
+        "match": "^(micro-star|msi)",
+        "pciSubsystemVendor": "1462",
+        "supportUrl": "https://www.msi.com/support/download",
+        "urlCheck": "bot-protected (HTTP 403 to scripts)",
+        "optionalApplications": [
+          {
+            "name": "MSI Center",
+            "purpose": "MSI's control and update utility. Optional."
+          }
+        ]
+      },
+      {
+        "id": "gigabyte",
+        "name": "Gigabyte",
+        "match": "^gigabyte",
+        "pciSubsystemVendor": "1458",
+        "supportUrl": "https://www.gigabyte.com/Support",
+        "urlCheck": "bot-protected (HTTP 403 to scripts)",
+        "optionalApplications": [
+          {
+            "name": "GIGABYTE Control Center",
+            "purpose": "Gigabyte's control and update utility. Optional."
+          }
+        ]
+      },
+      {
+        "id": "asrock",
+        "name": "ASRock",
+        "match": "^asrock",
+        "pciSubsystemVendor": "1849",
+        "supportUrl": "",
+        "urlCheck": "",
+        "optionalApplications": []
+      },
+      {
+        "id": "microsoft",
+        "name": "Microsoft Surface",
+        "match": "^microsoft corporation",
+        "pciSubsystemVendor": "1414",
+        "supportUrl": "https://support.microsoft.com/surface",
+        "urlCheck": "HTTP 301 to the regional page",
+        "optionalApplications": [
+          {
+            "name": "Surface app",
+            "purpose": "Surface settings and pen. Optional."
+          }
+        ]
+      },
+      {
+        "id": "samsung",
+        "name": "Samsung",
+        "match": "^samsung",
+        "pciSubsystemVendor": "144D",
+        "supportUrl": "",
+        "urlCheck": "",
+        "optionalApplications": []
+      },
+      {
+        "id": "dynabook",
+        "name": "Dynabook / Toshiba",
+        "match": "^(toshiba|dynabook)",
+        "pciSubsystemVendor": "1179",
+        "supportUrl": "",
+        "urlCheck": "",
+        "optionalApplications": []
+      },
+      {
+        "id": "fujitsu",
+        "name": "Fujitsu",
+        "match": "^fujitsu",
+        "pciSubsystemVendor": "1734",
+        "supportUrl": "",
+        "urlCheck": "",
+        "optionalApplications": []
+      }
+    ],
+    "virtualPlatforms": [
+      "^vmware",
+      "^qemu",
+      "^innotek",
+      "^parallels",
+      "^xen",
+      "virtual machine"
+    ],
+    "basicDrivers": [
+      {
+        "inf": "display.inf",
+        "classes": [
+          "Display"
+        ],
+        "meaning": "Microsoft Basic Display Adapter: a fallback with limited resolution and no hardware acceleration"
+      }
+    ],
+    "microsoftCatalogUrl": "https://www.catalog.update.microsoft.com/Home.aspx",
+    "downloadHosts": [
+      "catalog.s.download.windowsupdate.com",
+      "download.windowsupdate.com",
+      "download.microsoft.com",
+      "downloadmirror.intel.com",
+      "us.download.nvidia.com",
+      "international.download.nvidia.com",
+      "drivers.amd.com",
+      "dl.dell.com",
+      "downloads.dell.com",
+      "ftp.hp.com",
+      "download.lenovo.com",
+      "dlcdnets.asus.com",
+      "download.msi.com",
+      "download.gigabyte.com"
+    ],
+    "whqlSigners": [
+      "Microsoft Windows Hardware Compatibility Publisher",
+      "Microsoft Windows"
+    ],
+    "nvidiaBranchPolicy": "The deployment never chooses between Game Ready and Studio drivers: it uses the driver Windows Update offers, or the exact package a technician verified. Choose Studio for creative and production workloads and Game Ready for gaming; both are WHQL packages for the same hardware."
+  }
+}

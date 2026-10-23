@@ -73,8 +73,17 @@ repairs interrupted preparations and reports readiness (never "boot tested"). Th
 `media` block; the answer file is unchanged. Tested with simulated disks and synthetic images only.
 Report: `phase-7-usb-media-preparation/implementation-report.md`.
 
-The remaining roadmap: Phase 8 hardware-aware
-drivers (it takes over the hardware-specific applications a migration review excludes), Phase 9
+## Phase 8: hardware-aware drivers (branch `feature/phase-8-hardware-aware-drivers`)
+
+A SYSTEM driver stage of the existing orchestrator: inventory by hardware ID before and after the
+Windows Update stage, working drivers kept, verified INF packages only (driver store, pinned offline
+bundle, technician-verified downloads) for missing or broken drivers, Windows ranking, verification
+from the device, network bootstrap, `$WinPEDriver$` for Setup-critical storage drivers through the
+USB assistant, recovery-tool integration, `reports\drivers.json` for Phase 9. Hardware utilities are
+optional applications. Tested with simulated hardware only.
+Report: `phase-8-hardware-aware-drivers/implementation-report.md`.
+
+The remaining roadmap: Phase 9
 deployment verification and health (it can read `attempts.jsonl`, `status.json` outcomes, report v2
 and `restoration.json`). The first real installation is one combined bare-metal test of all phases.
 
@@ -104,14 +113,14 @@ and `restoration.json`). The first real installation is one combined bare-metal 
 - Run the Phase 7 physical USB checklist (`phase-7-usb-media-preparation/physical-usb-checklist.md`):
   real disk listing, Create from an ISO on 16-32 GB and 64-128 GB sticks, an unplugged stick, Update
   and replace, UEFI boot with Secure Boot, split-image installation.
+- Run the Phase 8 checklist (`phase-8-hardware-aware-drivers/bare-metal-checklist.md`): real
+  inventory, export bundle, `$WinPEDriver$` storage driver, NVIDIA on the basic display driver, a
+  computer without a network driver, a driver that needs a restart.
 
-## Next: manufacturer drivers
+## Next: deployment verification and health (Phase 9)
 
-Implement the hand-off in `src/engine/drivers/contract.ts` as the `drivers` stage the Phase 4
-orchestrator already reports (`NotImplemented`): inventory, vendor-recommended candidates by
-hardware ID (AMD, NVIDIA, Intel, OEM utilities, mixed hardware), verified installation, restart
-under `install.lock`, and device validation. Never replace a driver only because a newer package
-exists.
+Read `reports\drivers.json` (health status and flags), the engines' results, `attempts.jsonl` and
+the deployment report into one verification and health view.
 
 ## Then
 

@@ -455,7 +455,8 @@ Test-Scenario 'report: computer, failed KBs, application results, interaction, r
     Assert-Equal $r.windowsUpdate.installed 2 'installed count'
     Assert-Equal $r.applications.requiresInteraction[0] $script:Zoe 'interaction'
     Assert-Equal $r.restarts.windowsUpdate 1 'restarts'
-    Assert-Equal $r.drivers.state 'NotImplemented' 'drivers not claimed'
+    # Phase 8: this package has the driver stage turned off, which the report says (nothing is claimed).
+    Assert-Equal $r.drivers.state 'NotPartOfDeployment' 'drivers not claimed'
     Assert-True (@($r.remainingTasks) -match 'KB5034441').Count 'remaining: KB'
     Assert-True (@($r.remainingTasks) -match 'drivers').Count 'remaining: drivers'
     $txt = Get-Content -LiteralPath $script:Paths.ReportText -Raw -Encoding UTF8

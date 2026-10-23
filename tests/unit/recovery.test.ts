@@ -154,7 +154,7 @@ describe('Phase 5 scripts: static safety checks', () => {
     const list = recoverySource.slice(recoverySource.indexOf('$script:DiagnosticFiles = @('), recoverySource.indexOf('function Export-WdrDiagnostics'));
     const paths = [...list.matchAll(/'([^']+)'/g)].map((m) => m[1]!);
     expect(paths.length).toBeGreaterThan(20);
-    for (const x of paths) expect(x, x).toMatch(/^(Deployment|state|reports|Applications|Updates|Network|Package)\\/);
+    for (const x of paths) expect(x, x).toMatch(/^(Deployment|state|reports|Applications|Updates|Network|Drivers|Package)\\/);
     expect(list).not.toMatch(/autounattend|unattend\.xml|Panther|\.xml'/i);
     expect(recoverySource).not.toContain('keyMaterial');
   });

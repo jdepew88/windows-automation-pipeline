@@ -52,7 +52,8 @@
         "CompletedWithFailures"
       ],
       "waitsFor": [
-        "windowsUpdate"
+        "windowsUpdate",
+        "drivers"
       ],
       "includes": [
         "winget packages",
@@ -62,18 +63,34 @@
     {
       "id": "drivers",
       "order": 3,
-      "enabled": false,
-      "implemented": false,
-      "phase": 4,
+      "enabled": true,
+      "implemented": true,
+      "phase": 8,
       "runsAs": "SYSTEM",
-      "inventory": "C:\\ProgramData\\WindowsDeploymentBuilder\\Drivers\\inventory.json",
-      "plan": "C:\\ProgramData\\WindowsDeploymentBuilder\\Drivers\\plan.json",
+      "task": "\\WindowsDeploymentBuilder\\Drivers",
+      "inventory": [
+        "C:\\ProgramData\\WindowsDeploymentBuilder\\Drivers\\inventory-initial.json",
+        "C:\\ProgramData\\WindowsDeploymentBuilder\\Drivers\\inventory-after-updates.json",
+        "C:\\ProgramData\\WindowsDeploymentBuilder\\Drivers\\inventory-final.json"
+      ],
       "result": "C:\\ProgramData\\WindowsDeploymentBuilder\\Drivers\\result.json",
+      "report": "C:\\ProgramData\\WindowsDeploymentBuilder\\reports\\drivers.json",
       "marker": "C:\\ProgramData\\WindowsDeploymentBuilder\\state\\drivers.done",
+      "finalStatuses": [
+        "Succeeded",
+        "CompletedWithFollowUp",
+        "CompletedWithFailures",
+        "Failed"
+      ],
+      "markerStatuses": [
+        "Succeeded",
+        "CompletedWithFollowUp",
+        "CompletedWithFailures"
+      ],
       "waitsFor": [
         "windowsUpdate"
       ],
-      "note": "Interface only (src/engine/drivers/contract.ts). No driver is installed by this version."
+      "note": "Inspection before Windows Update (and network bootstrap from verified offline packages), resolution only after the Windows Update stage is final and restarted. Installing a driver and scheduling a restart both require the install lock."
     }
   ]
 }

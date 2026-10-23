@@ -152,13 +152,15 @@ describe('deployment package (ZIP)', () => {
     expect(withSecrets.manifest.answerFile.containsSecrets).toBe(true);
   });
 
-  it('records stages, contexts, limits and the unimplemented driver stage', () => {
+  it('records stages, contexts, limits and the driver stage (off in this profile)', () => {
     const ids = manifest.stages.map((s: { id: string }) => s.id);
     expect(ids).toEqual(['staging', 'windowsUpdate', 'applications', 'drivers', 'finalization']);
     const st = Object.fromEntries(manifest.stages.map((s: { id: string }) => [s.id, s]));
     expect(st.windowsUpdate).toMatchObject({ enabled: true, context: 'SYSTEM', finalStatuses: ['Succeeded', 'CompletedWithFailures', 'Failed', 'Offline'] });
     expect(st.applications).toMatchObject({ enabled: true, context: 'user', waitsFor: ['windowsUpdate'] });
-    expect(st.drivers).toMatchObject({ enabled: false, implemented: false, status: 'NotImplemented' });
+    // Phase 8: the stage exists; this profile (the Phase 4 owner default shape) does not use it.
+    expect(st.drivers).toMatchObject({ enabled: false, implemented: true, status: 'NotPartOfDeployment' });
+    expect(manifest.drivers).toMatchObject({ implemented: true, enabled: false });
     const d = withApps();
     expect(manifest.failureHandling.windowsUpdate.maxAttemptsPerUpdate).toBe(d.windowsUpdate.maxAttemptsPerUpdate);
     expect(manifest.restartPolicy.windowsUpdate.maxReboots).toBe(d.windowsUpdate.maxReboots);

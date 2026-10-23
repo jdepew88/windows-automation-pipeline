@@ -160,6 +160,22 @@ describe.skipIf(!onWindows)('PowerShell (Windows only)', () => {
     }
   }, 300_000);
 
+  it('hardware-aware driver engine scenarios pass against simulated hardware and the real generated package (Phase 8)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'wdv-fixture-'));
+    try {
+      writeDeploymentFixture(dir);
+      let out: string;
+      try {
+        out = await psAsync(['-File', script('../powershell/Drivers.Tests.ps1'), '-Fixture', dir]);
+      } catch (e) {
+        throw new Error(`Drivers.Tests.ps1 failed:\n${(e as { stdout?: string }).stdout ?? e}`);
+      }
+      expect(out).toMatch(/\b\d+ passed, 0 failed/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 300_000);
+
   it('Wi-Fi profile script scenarios pass against the generated Wifi.xml and script (Phase 4.3)', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'wdw-fixture-'));
     try {

@@ -1,0 +1,185 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "windows-deployment-builder/drivers-result/1",
+  "title": "Windows Deployment Builder driver result (drivers.json)",
+  "type": "object",
+  "required": [
+    "format",
+    "version",
+    "final",
+    "status",
+    "engineVersion",
+    "deploymentId",
+    "generatedUtc",
+    "system",
+    "windowsUpdate",
+    "health",
+    "devices",
+    "operations",
+    "manualActions",
+    "unsupported",
+    "optionalApplications",
+    "networkBootstrap",
+    "offlineBundle"
+  ],
+  "properties": {
+    "format": {
+      "const": "windows-deployment-builder/drivers-result"
+    },
+    "version": {
+      "const": 1
+    },
+    "final": {
+      "type": "boolean"
+    },
+    "status": {
+      "enum": [
+        "InProgress",
+        "Succeeded",
+        "CompletedWithFollowUp",
+        "CompletedWithFailures",
+        "Failed"
+      ]
+    },
+    "engineVersion": {
+      "type": "string"
+    },
+    "deploymentId": {
+      "type": "string"
+    },
+    "generatedUtc": {
+      "type": "string"
+    },
+    "scanUtc": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "health": {
+      "type": "object",
+      "required": [
+        "status",
+        "flags"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "AllHealthy",
+            "RestartPending",
+            "InstalledButMalfunctioning",
+            "MissingDriver",
+            "PossibleHardwareIssue",
+            "TechnicianRequired"
+          ]
+        },
+        "flags": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "devices": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "key",
+          "name",
+          "category",
+          "state",
+          "action",
+          "result",
+          "verification",
+          "rebootRequired",
+          "hardwareIds"
+        ],
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "category": {
+            "enum": [
+              "cpu",
+              "chipset",
+              "display",
+              "networkWired",
+              "networkWireless",
+              "network",
+              "bluetooth",
+              "storage",
+              "storageNvme",
+              "storageSata",
+              "storageRaid",
+              "usb",
+              "audio",
+              "touchpad",
+              "touchscreen",
+              "camera",
+              "biometric",
+              "input",
+              "firmware",
+              "security",
+              "monitor",
+              "unknown",
+              "other"
+            ]
+          },
+          "state": {
+            "enum": [
+              "Healthy",
+              "BasicDriver",
+              "DriverMissing",
+              "Malfunctioning",
+              "DisabledIntentionally",
+              "RestartPending",
+              "HardwareIssue",
+              "Unsupported",
+              "NotPhysical"
+            ]
+          },
+          "action": {
+            "enum": [
+              "Keep",
+              "InstallRequired",
+              "InstallRecommended",
+              "RestartRequired",
+              "ReviewRequired",
+              "None"
+            ]
+          },
+          "instanceId": {
+            "type": "string",
+            "description": "Enumerator\\device ID\\#hash: the instance-specific part (it may be a serial number) is never published"
+          },
+          "hardwareIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "problemCode": {
+            "type": "integer"
+          },
+          "source": {
+            "type": "string"
+          },
+          "result": {
+            "type": "string"
+          },
+          "verification": {
+            "type": "string"
+          },
+          "rebootRequired": {
+            "type": "boolean"
+          }
+        }
+      }
+    }
+  }
+}

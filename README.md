@@ -1,4 +1,4 @@
-# Windows Deployment Builder (Milestone 1 + Phase 2 Windows Update + Phase 3 WinGet provisioning + Phase 4 USB deployment + Phase 4.2 application profiles + Phase 4.3 Quick Deployment + Phase 5 resilient provisioning + Phase 6 application backup and restore + Phase 7 USB media preparation)
+# Windows Deployment Builder (Milestone 1 + Phase 2 Windows Update + Phase 3 WinGet provisioning + Phase 4 USB deployment + Phase 4.2 application profiles + Phase 4.3 Quick Deployment + Phase 5 resilient provisioning + Phase 6 application backup and restore + Phase 7 USB media preparation + Phase 8 hardware-aware drivers)
 
 A local, offline, browser-based generator for **Windows 11 Pro `autounattend.xml`** answer files,
 written entirely in TypeScript. It is built on the option model and XML patterns of
@@ -74,6 +74,23 @@ DeploymentRecovery.ps1 -Action Status | PendingActions | RetryFailed | Retry -Op
 Settings: Advanced Configuration › Applications › Reliability & recovery. Details:
 [docs/phase-5-resilient-provisioning/recovery.md](docs/phase-5-resilient-provisioning/recovery.md).
 New deployments start with the local username `owner` (Quick Deployment and Advanced).
+
+## Hardware-aware drivers (Phase 8)
+
+**Advanced Configuration › Hardware & Drivers** (on for new deployments). On the installed
+computer a SYSTEM task identifies every device by its hardware IDs, keeps every working driver,
+lets the Windows Update stage go first, inspects again after its restart, and installs a driver only
+where one is missing or not working and a verified, compatible package exists: the Windows driver
+store, a pinned offline bundle (exported from a computer with the same hardware, or INF drivers from
+the manufacturer), or a technician-verified package (official HTTPS host + SHA-256). Packages must be
+Microsoft-signed INF packages that declare the device; Windows' own ranking makes the final choice
+and success is read from the device itself. Everything else is reported with the official support
+page. A missing network driver is installed from the offline bundle before anything waits for the
+network; storage drivers Windows Setup needs go to `$WinPEDriver$` on the USB drive. Vendor
+utilities (NVIDIA App, CUDA, Intel DSA, OEM tools) are never installed because hardware is present;
+BIOS and firmware are never updated. Result: `reports\drivers.json`. The website cannot see a
+computer: an inventory taken on it (read-only tool) can be imported to review it beforehand. Details:
+[docs/phase-8-hardware-aware-drivers/architecture.md](docs/phase-8-hardware-aware-drivers/architecture.md).
 
 ## Prepare the installation USB (Phase 7)
 
@@ -250,11 +267,13 @@ from code).
 - [docs/phase-7-usb-media-preparation/user-guide.md](docs/phase-7-usb-media-preparation/user-guide.md): preparing, updating, verifying and repairing installation USBs
 - [docs/phase-7-usb-media-preparation/architecture.md](docs/phase-7-usb-media-preparation/architecture.md), [disk-safety.md](docs/phase-7-usb-media-preparation/disk-safety.md), [windows-image.md](docs/phase-7-usb-media-preparation/windows-image.md), [media-layout.md](docs/phase-7-usb-media-preparation/media-layout.md), [security.md](docs/phase-7-usb-media-preparation/security.md)
 - [docs/phase-7-usb-media-preparation/testing.md](docs/phase-7-usb-media-preparation/testing.md), [physical-usb-checklist.md](docs/phase-7-usb-media-preparation/physical-usb-checklist.md) and [implementation-report.md](docs/phase-7-usb-media-preparation/implementation-report.md)
+- [docs/phase-8-hardware-aware-drivers/architecture.md](docs/phase-8-hardware-aware-drivers/architecture.md), [inventory-and-identification.md](docs/phase-8-hardware-aware-drivers/inventory-and-identification.md), [matching-and-sources.md](docs/phase-8-hardware-aware-drivers/matching-and-sources.md), [windows-update.md](docs/phase-8-hardware-aware-drivers/windows-update.md), [offline-setup-network.md](docs/phase-8-hardware-aware-drivers/offline-setup-network.md), [sequencing-and-recovery.md](docs/phase-8-hardware-aware-drivers/sequencing-and-recovery.md), [security.md](docs/phase-8-hardware-aware-drivers/security.md), [phase9-integration.md](docs/phase-8-hardware-aware-drivers/phase9-integration.md)
+- [docs/phase-8-hardware-aware-drivers/testing.md](docs/phase-8-hardware-aware-drivers/testing.md), [bare-metal-checklist.md](docs/phase-8-hardware-aware-drivers/bare-metal-checklist.md) and [implementation-report.md](docs/phase-8-hardware-aware-drivers/implementation-report.md)
 
 ## Not yet implemented
 
-Manufacturer driver installation (a later phase; the interface is defined in
-`src/engine/drivers/contract.ts` and the orchestrator reports the stage as not implemented), PXE or
+Vendor EXE driver installers, OEM update tools and BIOS/firmware updates (Phase 8 installs only
+verified INF driver packages and reports the rest), PXE or
 network delivery, automatic execution of Additional Software installers, ISO/boot media editing,
 unattended disk formatting, and restoration of user files and documents (Phase 6 restores applications and supported application settings only). The profile records `deferred.installPowerShell7` as an extension point
 only. To install PowerShell 7, select "PowerShell 7" under Application provisioning.

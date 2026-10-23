@@ -21,6 +21,7 @@ export type SectionId =
   | 'applications'
   | 'additionalSoftware'
   | 'migration'
+  | 'drivers'
   | 'system'
   | 'explorer'
   | 'taskbar'

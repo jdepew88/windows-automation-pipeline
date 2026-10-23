@@ -649,7 +649,9 @@ test('deployment package: ZIP built offline in the browser, answer file at the r
   await expect(page.getByTestId('package-status')).toContainText('Ready: windows-deployment-package.zip');
   await expect(page.getByTestId('package-contents')).toContainText('WindowsDeployment/setup.cmd');
   await expect(page.getByTestId('package-contents')).toContainText('WindowsDeployment/scripts/bootstrap/Initialize-Deployment.ps1');
-  await expect(page.getByTestId('package-stages').locator('[data-stage="drivers"]')).toContainText('Not implemented');
+  // Phase 8: the driver stage is part of new deployments.
+  await expect(page.getByTestId('package-stages').locator('[data-stage="drivers"]')).toContainText('On');
+  await expect(page.getByTestId('package-stages').locator('[data-stage="drivers"]')).toContainText('Runs as SYSTEM');
   await expect(page.getByTestId('package-stages').locator('[data-stage="applications"]')).toContainText('signed-in user');
 
   const [dl] = await Promise.all([page.waitForEvent('download'), page.locator('#section-deployment [data-action="download-package"]').click()]);

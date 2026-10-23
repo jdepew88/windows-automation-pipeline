@@ -3,7 +3,8 @@ import type { DeploymentAsset } from './windows-update';
 import { COMPLETION_MARKER, DATA_ROOT, RESULT_FILE, TASK_NAME, TASK_PATH } from './windows-update';
 import { APP_MARKER, APP_RESULT_FILE, APP_TASK_NAME, applicationsActive } from './applications';
 import { FINAL_STATUSES, MARKER_STATUSES } from './applications/results';
-import { DRIVER_STAGE } from './drivers/contract';
+import { DRIVER_FINAL_STATUSES, DRIVER_MARKER_STATUSES, DRIVER_STAGE } from './drivers/contract';
+import { DRIVER_TASK_NAME, driversActive } from './drivers';
 
 /**
  * The orchestration contract (orchestration.json): which stages exist, in which order, who runs
@@ -52,22 +53,27 @@ export function orchestrationContract(p: Profile) {
         marker: APP_MARKER,
         finalStatuses: [...FINAL_STATUSES],
         markerStatuses: [...MARKER_STATUSES],
-        waitsFor: p.windowsUpdate.enabled ? ['windowsUpdate'] : [],
+        waitsFor: [...(p.windowsUpdate.enabled ? ['windowsUpdate'] : []), ...(driversActive(p) ? ['drivers'] : [])],
         includes: ['winget packages', 'additionalSoftware'],
       },
       {
         id: DRIVER_STAGE.id,
         order: 3,
-        enabled: false,
-        implemented: false,
+        enabled: driversActive(p),
+        implemented: true,
         phase: DRIVER_STAGE.phase,
         runsAs: DRIVER_STAGE.runsAs,
-        inventory: DRIVER_STAGE.inventoryFile,
-        plan: DRIVER_STAGE.planFile,
+        task: `${TASK_PATH}${DRIVER_TASK_NAME}`,
+        inventory: [...DRIVER_STAGE.inventoryFiles],
         result: DRIVER_STAGE.resultFile,
+        report: DRIVER_STAGE.reportFile,
         marker: DRIVER_STAGE.marker,
-        waitsFor: [...DRIVER_STAGE.waitsFor],
-        note: 'Interface only (src/engine/drivers/contract.ts). No driver is installed by this version.',
+        finalStatuses: [...DRIVER_FINAL_STATUSES],
+        markerStatuses: [...DRIVER_MARKER_STATUSES],
+        waitsFor: p.windowsUpdate.enabled && p.drivers.useWindowsUpdate ? [...DRIVER_STAGE.waitsFor] : [],
+        note: driversActive(p)
+          ? 'Inspection before Windows Update (and network bootstrap from verified offline packages), resolution only after the Windows Update stage is final and restarted. Installing a driver and scheduling a restart both require the install lock.'
+          : 'Off for this deployment: no driver is installed or changed.',
       },
     ],
   };

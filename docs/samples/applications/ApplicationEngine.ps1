@@ -16,7 +16,8 @@
       1. Preparation (allowed while Windows Update runs): network, WinGet check (no repair),
          package availability ("winget show").
       2. Gate (coordination policy "updatesFirst"): waits until the Windows Update engine has a
-         final result, or is not part of this deployment.
+         final result, or is not part of this deployment; and (Phase 8, only when the configuration
+         names a driver stage) until the hardware-aware driver stage has a final result.
       3. WinGet repair when needed (under the install lock), then the queue: for each package
          "winget list" (already installed?) and "winget install" while holding the machine-wide
          install lock, so Windows Update cannot restart the computer meanwhile.
@@ -843,6 +844,27 @@ function Get-WdaUpdatesGate {
         return @{ Open = $true; Reason = 'The Windows Update engine is not installed (no task, no state); continuing.'; Warn = $true }
     }
     @{ Open = $false; Reason = 'Waiting for Windows Update to finish.' }
+}
+
+<#
+    Phase 8: applications start after the driver stage, which itself waits for Windows Update. Only
+    configurations that name a driver stage (coordination.drivers) wait; any final driver status
+    opens the gate (a driver failure never blocks the applications), and so does
+    waitForUpdatesHours, or a driver engine that was never installed.
+#>
+function Get-WdaDriversGate {
+    param([hashtable] $Config, [hashtable] $State)
+    $c = $Config.coordination
+    $dv = $(if ($c -is [hashtable] -and $c.ContainsKey('drivers')) { $c['drivers'] } else { $null })
+    if (-not $dv -or -not $dv.enabled) { return @{ Open = $true; Reason = 'The driver stage is not part of this deployment.' } }
+    $s = $null
+    try { $s = Read-WdaJson $dv.stateFile } catch { }
+    if ($s -and $s['final']) { return @{ Open = $true; Reason = "Driver stage finished: $($s['final'])." } }
+    if (Test-Path -LiteralPath $dv.resultFile) { return @{ Open = $true; Reason = 'Driver stage result found.' } }
+    $waited = ((Get-WdaNow) - (ConvertTo-WdaDate $State.firstStartUtc)).TotalHours
+    if ($waited -ge [double] $Config.waitForUpdatesHours) { return @{ Open = $true; Reason = "The driver stage is still not finished after $($Config.waitForUpdatesHours) h; continuing anyway."; Warn = $true } }
+    if (-not $s -and -not (Test-WdaUpdateTask $dv) -and $waited -ge 0.5) { return @{ Open = $true; Reason = 'The driver engine is not installed (no task, no state); continuing.'; Warn = $true } }
+    @{ Open = $false; Reason = 'Waiting for the driver stage to finish.' }
 }
 
 # ------------------------------------------------------------------------------------------------
@@ -1935,6 +1957,8 @@ function Invoke-WdaRun {
     $polls = [int] $Config.gatePollMinutes
     for ($i = 0; ; $i++) {
         $gate = Get-WdaUpdatesGate $Config $State
+        # Phase 8: then the driver stage (only when the configuration has one).
+        if ($gate.Open) { $dg = Get-WdaDriversGate $Config $State; if (-not $dg.Open -or $dg.ContainsKey('Warn') -or $dg.Reason -notlike 'The driver stage is not part*') { $gate = $dg } }
         if ($gate.Open) {
             Write-WdaLog $gate.Reason $(if ($gate.ContainsKey('Warn')) { 'WARN' } else { 'INFO' })
             break

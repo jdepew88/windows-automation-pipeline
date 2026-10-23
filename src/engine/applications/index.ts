@@ -10,6 +10,7 @@ import { exportWinGetJson } from './winget-json';
 import { exportAppProfiles } from './profiles';
 import { RESULTS_JSON_SCHEMA } from './results';
 import { migrationConfig, restorePlanText, settingsRestoreActive, settingsRestoreConfig, migrationActive } from '../migration/plan';
+import { DRIVER_STAGE } from '../drivers/contract';
 
 /**
  * Phase 3 application provisioning: engine configuration, the exact WinGet commands, the plan
@@ -126,6 +127,8 @@ export interface ApplicationsConfig {
   coordination: {
     policy: Profile['applications']['coordination'];
     windowsUpdate: { enabled: boolean; stateFile: string; resultFile: string; taskPath: string; taskName: string };
+    /** Phase 8: present only when the deployment has the driver stage; applications start after it. */
+    drivers?: { enabled: boolean; stateFile: string; resultFile: string; taskPath: string; taskName: string };
   };
   restartPolicy: Profile['applications']['restartPolicy'];
   registerAppInstaller: boolean;
@@ -191,6 +194,7 @@ export function applicationsConfig(p: Profile, sel: SelectionResult = resolveSel
     coordination: {
       policy: a.coordination,
       windowsUpdate: { enabled: p.windowsUpdate.enabled, stateFile: `${DATA_ROOT}\\Updates\\state.json`, resultFile: WU_RESULT_FILE, taskPath: TASK_PATH, taskName: WU_TASK_NAME },
+      ...(p.drivers.enabled ? { drivers: { enabled: true, stateFile: DRIVER_STAGE.stateFile, resultFile: DRIVER_STAGE.resultFile, taskPath: TASK_PATH, taskName: 'Drivers' } } : {}),
     },
     restartPolicy: a.restartPolicy,
     registerAppInstaller: a.registerAppInstaller,

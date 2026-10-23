@@ -11,6 +11,7 @@ import * as f from '../features';
 import { updateEngineAssets, type DeploymentAsset } from './windows-update';
 import { applicationAssets } from './applications';
 import { orchestrationAsset } from './orchestration';
+import { driverAssets } from './drivers';
 import * as deployment from './deployment';
 
 export interface GenerateResult {
@@ -133,6 +134,7 @@ function build(profile: Profile): GenContext {
   f.scripts.modify(ctx);
   emitSequences(ctx);
   f.windowsUpdate.modify(ctx);
+  f.drivers.modify(ctx);
   f.applications.modify(ctx);
   deployment.modify(ctx);
 
@@ -144,7 +146,7 @@ function build(profile: Profile): GenContext {
 
 /** Engine assets plus, when any engine is active, the orchestration contract. */
 export function deploymentAssets(profile: Profile): DeploymentAsset[] {
-  const assets = [...updateEngineAssets(profile), ...applicationAssets(profile)];
+  const assets = [...updateEngineAssets(profile), ...driverAssets(profile), ...applicationAssets(profile)];
   if (assets.length === 0) return assets;
   return [...assets, orchestrationAsset(profile)];
 }

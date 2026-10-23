@@ -1,94 +1,155 @@
 /**
- * Phase 4 (manufacturer drivers) - interface only. Phase 3 installs no drivers and generates no
- * driver script. These types fix the hand-off so the later driver stage can plug into the same
- * orchestration: where it runs, what it waits for, what it reads and what it must write.
+ * Phase 8: the driver stage's place in the orchestration and its result contract (drivers.json)
+ * for Phase 9. The engine is src/engine/drivers/scripts/DriverEngine.ps1; this file fixes the
+ * paths it writes and the shape of what it reports.
  *
- * Intended sequence (docs/phase-3/orchestration.md):
- *   1. Windows installed  2. Windows Update stage final  3. inventory of devices and drivers
- *   4. candidate manufacturer packages per device  5. install only verified, applicable packages
- *   6. restart when required  7. validate device status (no new problem codes) and report.
+ * Sequence (docs/phase-8-hardware-aware-drivers/sequencing.md):
+ *   1. Windows installed (Setup-critical drivers from $WinPEDriver$ when the media carries them)
+ *   2. first start: Inspection A, network bootstrap from verified offline packages if needed
+ *   3. Windows Update stage final and its restart done  4. Inspection B
+ *   5. resolve what remains from verified sources only  6. restart when required
+ *   7. verify every device  8. drivers.json; the application stage starts after this stage
  *
- * Selection rules the implementation must follow:
- *   - Match on hardware IDs / compatible IDs from the inventory, never on device names.
- *   - A newer vendor package is not automatically better: replace a driver only when the vendor
- *     support policy recommends that package for this device (or the device has a problem code),
- *     and never downgrade a driver Windows Update installed unless a policy says so explicitly.
- *   - Packages come only from the vendor's official distribution, verified by signature and hash.
+ * Selection rules (unchanged from the Phase 3 interface, now implemented):
+ *   - Match on hardware IDs / compatible IDs, never on device names.
+ *   - A newer package is not automatically better: a working driver is kept; a replacement needs a
+ *     technician's approval; never downgrade a working driver.
+ *   - Packages come only from Windows (driver store, Windows Update), a pinned offline bundle or a
+ *     technician-verified package, checked by SHA-256 and Microsoft catalog signature.
  */
 
 import { DATA_ROOT } from '../windows-update';
 
 export const DRIVER_STAGE = {
   id: 'drivers',
-  phase: 4,
-  implemented: false,
+  phase: 8,
+  implemented: true,
   root: `${DATA_ROOT}\\Drivers`,
-  inventoryFile: `${DATA_ROOT}\\Drivers\\inventory.json`,
-  planFile: `${DATA_ROOT}\\Drivers\\plan.json`,
+  inventoryFiles: [`${DATA_ROOT}\\Drivers\\inventory-initial.json`, `${DATA_ROOT}\\Drivers\\inventory-after-updates.json`, `${DATA_ROOT}\\Drivers\\inventory-final.json`],
+  stateFile: `${DATA_ROOT}\\Drivers\\state.json`,
   resultFile: `${DATA_ROOT}\\Drivers\\result.json`,
+  reportFile: `${DATA_ROOT}\\reports\\drivers.json`,
   marker: `${DATA_ROOT}\\state\\drivers.done`,
-  /** The driver stage starts only after these markers (or result files with a final status) exist. */
+  networkFlag: `${DATA_ROOT}\\state\\network-driver-missing.json`,
+  /** Resolution starts after the Windows Update stage is final (Inspection A and network bootstrap run before). */
   waitsFor: ['windowsUpdate'] as const,
-  /** It runs as SYSTEM (pnputil / vendor installers need no user session). */
+  /** pnputil needs no user session; device installation runs as SYSTEM. */
   runsAs: 'SYSTEM',
 } as const;
 
-export type DriverVendor = 'nvidia' | 'amd' | 'intel' | 'oem' | 'motherboard' | 'other';
+/** Final statuses of the stage (result.json), the same names as the other engines. */
+export const DRIVER_FINAL_STATUSES = ['Succeeded', 'CompletedWithFollowUp', 'CompletedWithFailures', 'Failed'] as const;
+export const DRIVER_MARKER_STATUSES = ['Succeeded', 'CompletedWithFollowUp', 'CompletedWithFailures'] as const;
 
-/** One device as Phase 4 must record it before deciding anything (from Win32_PnPSignedDriver / pnputil). */
-export interface DriverInventoryEntry {
+/** Lifecycle of one driver operation (the Phase 5 names). */
+export const DRIVER_OPERATION_STATUSES = [
+  'Pending',
+  'Running',
+  'AlreadySatisfied',
+  'Succeeded',
+  'WaitingForNetwork',
+  'WaitingForReboot',
+  'ManualActionRequired',
+  'FailedRetryable',
+  'FailedPermanent',
+  'Unsupported',
+] as const;
+export type DriverOperationStatus = (typeof DRIVER_OPERATION_STATUSES)[number];
+
+/** Failure classes never retried automatically; Integrity and Signature are security failures. */
+export const DRIVER_PERMANENT_CLASSES = ['Permanent', 'Integrity', 'Signature', 'Incompatible', 'Policy', 'DeviceFailure', 'NoEffect', 'NotSelected', 'Manual'] as const;
+
+export const DEVICE_STATES = ['Healthy', 'BasicDriver', 'DriverMissing', 'Malfunctioning', 'DisabledIntentionally', 'RestartPending', 'HardwareIssue', 'Unsupported', 'NotPhysical'] as const;
+export type DeviceState = (typeof DEVICE_STATES)[number];
+export const DEVICE_ACTIONS = ['Keep', 'InstallRequired', 'InstallRecommended', 'RestartRequired', 'ReviewRequired', 'None'] as const;
+export type DeviceAction = (typeof DEVICE_ACTIONS)[number];
+
+/** What Phase 9 must be able to tell apart (drivers.json › health.status). */
+export const DRIVER_HEALTH = ['AllHealthy', 'RestartPending', 'InstalledButMalfunctioning', 'MissingDriver', 'PossibleHardwareIssue', 'TechnicianRequired'] as const;
+export type DriverHealth = (typeof DRIVER_HEALTH)[number];
+
+export const DRIVER_SOURCES = ['existing', 'windows', 'windowsUpdate', 'driverStore', 'offlineBundle', 'technician', 'verifiedDownload'] as const;
+
+export const DEVICE_CATEGORIES = {
+  cpu: 'Processor',
+  chipset: 'Chipset and platform',
+  display: 'Graphics',
+  networkWired: 'Wired network',
+  networkWireless: 'Wireless network',
+  network: 'Network',
+  bluetooth: 'Bluetooth',
+  storage: 'Storage controller',
+  storageNvme: 'NVMe controller',
+  storageSata: 'SATA controller',
+  storageRaid: 'RAID / VMD controller',
+  usb: 'USB controller',
+  audio: 'Audio',
+  touchpad: 'Touchpad',
+  touchscreen: 'Touchscreen',
+  camera: 'Camera',
+  biometric: 'Biometric',
+  input: 'Input device',
+  firmware: 'Firmware',
+  security: 'Security device',
+  monitor: 'Monitor',
+  unknown: 'Unknown device',
+  other: 'Other',
+} as const;
+
+export interface DriverInfo {
+  provider: string;
+  version: string;
+  date: string;
+  inf: string;
+  inbox: boolean;
+}
+
+/** One device in drivers.json (no raw instance id: its instance-specific part is a hash). */
+export interface DriverResultDevice {
+  key: string;
+  name: string;
+  category: keyof typeof DEVICE_CATEGORIES;
+  class: string;
+  vendor: { id: string; name: string; vendorId: string };
   instanceId: string;
-  deviceName: string;
-  deviceClass: string;
   hardwareIds: string[];
   compatibleIds: string[];
-  /** Win32 ConfigManagerErrorCode; 0 = working. */
   problemCode: number;
-  driver: {
-    provider: string;
-    version: string;
-    date: string;
-    infName: string;
-    signer: string;
-    /** Where the current driver came from, when known. */
-    origin: 'inbox' | 'windowsUpdate' | 'vendor' | 'unknown';
-  } | null;
-  vendor: DriverVendor;
+  driver: DriverInfo | null;
+  previousDriver: DriverInfo | null;
+  oemCustomized: boolean;
+  state: DeviceState;
+  action: DeviceAction;
+  confidence: 'high' | 'medium' | 'low';
+  reasons: string[];
+  setupCritical: boolean;
+  networkCritical: boolean;
+  source: (typeof DRIVER_SOURCES)[number];
+  result: DriverOperationStatus | 'Kept' | 'NotHandled';
+  verification: 'Verified' | 'VerifiedOtherDriver' | 'RestartPending' | 'NotVerified' | 'NotResolved' | 'Failed' | 'DeviceMissing';
+  rebootRequired: boolean;
+  errors: string[];
+  manualAction: { text: string; url: string } | null;
 }
-
-export interface DriverInventory {
-  schemaVersion: 1;
-  computer: string;
-  collectedUtc: string;
-  system: { manufacturer: string; model: string; baseboard: string; biosVersion: string; osBuild: string };
-  devices: DriverInventoryEntry[];
-}
-
-export type DriverDecision = 'keep' | 'install' | 'skip' | 'manual';
-
-export interface DriverCandidate {
-  instanceId: string;
-  vendor: DriverVendor;
-  packageName: string;
-  packageVersion: string;
-  /** Official vendor URL; never a mirror. */
-  sourceUrl: string;
-  sha256: string;
-  signer: string;
-  /** Which hardware ID the vendor package declares support for. */
-  matchedHardwareId: string;
-  decision: DriverDecision;
-  /** Why: e.g. "vendor recommends for this device", "current driver is newer", "no match". */
-  reason: string;
-}
-
-export const DRIVER_RESULT_STATUSES = ['Current', 'Updated', 'RequiresRestart', 'Skipped', 'RequiresInteraction', 'Failed', 'NotApplicable'] as const;
-export const DRIVER_FINAL_STATUSES = ['Succeeded', 'CompletedWithFollowUp', 'CompletedWithFailures', 'Failed'] as const;
 
 export interface DriverResult {
-  schemaVersion: 1;
-  stage: 'drivers';
-  status: (typeof DRIVER_FINAL_STATUSES)[number];
-  reason: string;
-  devices: { instanceId: string; deviceName: string; status: (typeof DRIVER_RESULT_STATUSES)[number]; before: string; after: string; message: string }[];
+  format: 'windows-deployment-builder/drivers-result';
+  version: 1;
+  final: boolean;
+  status: (typeof DRIVER_FINAL_STATUSES)[number] | 'InProgress';
+  engineVersion: string;
+  deploymentId: string;
+  generatedUtc: string;
+  scanUtc: string | null;
+  system: { manufacturer: string; model: string; family: string; portable: boolean; virtual: boolean; architecture: string; osBuild: number; biosVersion: string; processors: string[] };
+  windowsUpdate: { partOfDeployment: boolean; driversAllowed: boolean; waitedForIt: boolean; stageStatus: string; gate: string };
+  health: { status: DriverHealth; flags: Record<string, boolean> };
+  devices: DriverResultDevice[];
+  operations: { operationId: string; device: string; hardwareId: string; status: DriverOperationStatus; failureClass: string; source: string; attempts: number; verification: string; rebootRequired: boolean; reason: string }[];
+  manualActions: { operationId: string; device: string; text: string; url: string }[];
+  unsupported: { device: string; instanceId: string; reason: string }[];
+  optionalApplications: { name: string; vendor: string; purpose: string; required: false }[];
+  networkBootstrap: { status: string; detail: string };
+  offlineBundle: { status: string; detail: string; packages: number };
+  reboots: number;
 }

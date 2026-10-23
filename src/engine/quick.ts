@@ -342,6 +342,15 @@ export function reviewSummary(p: Profile, sel: SelectionResult = resolveSelectio
       ongoing: ongoingPolicyText(p),
       timing: ongoingPolicyTiming(p),
     },
+    drivers: {
+      summary: p.drivers.enabled
+        ? 'Windows will identify hardware, use compatible existing or Windows Update drivers, and report any missing drivers.'
+        : 'Off: the deployment does not install or change drivers.',
+      detail: p.drivers.enabled
+        ? `Detected on the installed computer, not by this website.${p.windowsUpdate.enabled && p.updates.excludeDrivers && p.windowsUpdate.drivers === 'followPolicy' ? ' Windows Update is set not to install drivers, so missing ones come from the Windows driver store or approved offline packages, or are reported.' : ''}`
+        : null,
+      offline: p.drivers.enabled && p.drivers.bundle && p.drivers.includeOfflinePackages ? `Offline bundle ${p.drivers.bundle.folderName} (${p.drivers.bundle.packages.length} package(s))` : null,
+    },
     privacy: { usesDefaults: privacyChanges.length === 0, changes: privacyChanges, securityChanges, location: p.privacy.disableLocation ? 'Off (policy)' : 'Allowed: the user can turn it on in Settings › Privacy & security › Location' },
     applications: {
       enabled: applicationsActive(p),

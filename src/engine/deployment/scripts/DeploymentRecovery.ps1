@@ -29,6 +29,11 @@
                                  expects (identified by the SHA-256 pinned in its configuration;
                                  any other or modified backup is refused) and restores the settings
                                  that are still outstanding; restored settings are never repeated
+      -Action AddDrivers -DriverPath <folder>
+                                 Phase 8: validates INF driver packages from a folder (for example
+                                 a network driver on a USB stick when the computer has no network;
+                                 Microsoft-signed only), stages them for the driver stage and runs
+                                 it again for the devices that are still unresolved
       -Action ExportDiagnostics [-OutputPath <zip>]
                                  logs, states, results and the report as one ZIP, with passwords
                                  and Wi-Fi keys removed; answer files and Wi-Fi profiles are never
@@ -45,9 +50,10 @@
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('Menu', 'Status', 'PendingActions', 'RetryFailed', 'Retry', 'Resume', 'RestoreSettings', 'ExportDiagnostics')]
+    [ValidateSet('Menu', 'Status', 'PendingActions', 'RetryFailed', 'Retry', 'Resume', 'RestoreSettings', 'AddDrivers', 'ExportDiagnostics')]
     [string] $Action = 'Menu',
     [string] $BackupPath = '',
+    [string] $DriverPath = '',
     [string[]] $Operation = @(),
     [switch] $IncludePermanent,
     [switch] $Json,
@@ -57,13 +63,16 @@ param(
 
 $script:RecoveryMain = $MyInvocation.InvocationName -ne '.'
 # Captured first: the scripts dot-sourced below bind their own parameters in this scope.
-$script:RecoveryArgs = @{ Action = $Action; BackupPath = $BackupPath; Operation = @($Operation); IncludePermanent = [bool] $IncludePermanent; Json = [bool] $Json; OutputPath = $OutputPath; Elevate = [bool] $Elevate }
+$script:RecoveryArgs = @{ Action = $Action; BackupPath = $BackupPath; DriverPath = $DriverPath; Operation = @($Operation); IncludePermanent = [bool] $IncludePermanent; Json = [bool] $Json; OutputPath = $OutputPath; Elevate = [bool] $Elevate }
 . (Join-Path $PSScriptRoot '..\common\DeploymentCommon.ps1')
 . (Join-Path $PSScriptRoot '..\bootstrap\Initialize-Deployment.ps1')
 . (Join-Path $PSScriptRoot '..\orchestrator\Show-DeploymentStatus.ps1')
 # The application engine's own functions (Retry mode, lifecycle); present when the stage is part of the package.
 $script:AppEngineScript = Join-Path $PSScriptRoot '..\applications\ApplicationEngine.ps1'
 if (Test-Path -LiteralPath $script:AppEngineScript) { . $script:AppEngineScript }
+# Phase 8: the driver engine's own functions (Retry, technician packages), when the stage is part of the package.
+$script:DriverEngineScript = Join-Path $PSScriptRoot '..\drivers\DriverEngine.ps1'
+if (Test-Path -LiteralPath $script:DriverEngineScript) { . $script:DriverEngineScript -Mode Library }
 Set-StrictMode -Version 2.0
 
 $script:RecoveryExit = @{ Done = 0; Refused = 1; NothingToDo = 1; Busy = 2; IntegrityFailed = 3; NotElevated = 4; NoState = 1; UnknownStage = 1 }
@@ -92,6 +101,24 @@ function Invoke-WdrAppInstaller {
 
 function Get-WdrDesktop { [Environment]::GetFolderPath('Desktop') }
 
+<# Phase 8: the driver engine configuration of the staged package (the verified copy). #>
+function Get-WdrDriverConfig {
+    param([hashtable] $Paths)
+    $p = Join-Path $Paths.Package 'scripts\drivers\drivers-config.json'
+    if (-not (Test-Path -LiteralPath $p) -or -not (Get-Command Get-WdvConfig -ErrorAction SilentlyContinue)) { return $null }
+    Get-WdvConfig $p
+}
+
+<# Registers and starts the driver task again without archiving its state (Install-DriverEngine.ps1 -Resume). #>
+function Invoke-WdrDriverInstaller {
+    param([hashtable] $Paths)
+    $installer = Join-Path $Paths.Package 'scripts\drivers\Install-DriverEngine.ps1'
+    $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $out = & $ps -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $installer -Resume 2>&1
+    foreach ($line in @($out)) { Write-WddLog "    | $line" }
+    return $LASTEXITCODE
+}
+
 # ------------------------------------------------------------------------------------------------
 # Status
 # ------------------------------------------------------------------------------------------------
@@ -103,8 +130,7 @@ function Get-WdrOperations {
     $s = $null
     foreach ($f in 'state.json', 'state.json.bak') { $s = Read-WddJson (Join-Path $app $f); if ($s -and $s.ContainsKey('packages')) { break } }
     $ops = @()
-    if (-not $s) { return @() }
-    foreach ($map in 'packages', 'additional', 'settings') {
+    foreach ($map in @(if ($s) { 'packages', 'additional', 'settings' })) {
         if (-not $s.ContainsKey($map) -or $s[$map] -isnot [hashtable]) { continue }
         foreach ($e in @($s[$map].Values)) {
             if ($e -isnot [hashtable]) { continue }
@@ -112,6 +138,17 @@ function Get-WdrOperations {
             $life = $(if (Get-Command Get-WdaLifecycle -ErrorAction SilentlyContinue) { Get-WdaLifecycle $e } else { [string] $e.status })
             $ops += [ordered]@{ operationId = $id; name = [string] $e['name']; status = [string] $e['status']; lifecycle = $life; failureClass = [string] $e['failureClass']
                                 retryable = [bool] $e['retryable']; attempts = [int] $e['attempts']; totalAttempts = [int] $e['totalAttempts']; detection = [string] $e['detection']; message = [string] $e['message'] }
+        }
+    }
+    # Phase 8: driver operations (their status already is a lifecycle name).
+    $d = $null
+    foreach ($f in 'state.json', 'state.json.bak') { $d = Read-WddJson (Join-Path (Join-Path $Paths.Root 'Drivers') $f); if ($d -and $d['operations'] -is [hashtable]) { break } }
+    if ($d -and $d['operations'] -is [hashtable]) {
+        foreach ($e in @($d['operations'].Values)) {
+            if ($e -isnot [hashtable]) { continue }
+            $msg = $(if ($e['manualAction'] -is [hashtable] -and $e['manualAction']['text']) { [string] $e['manualAction']['text'] } else { [string] $e['reason'] })
+            $ops += [ordered]@{ operationId = [string] $e['operationId']; name = [string] $e['name']; status = [string] $e['status']; lifecycle = [string] $e['status']; failureClass = [string] $e['failureClass']
+                                retryable = ([string] $e['status'] -eq 'FailedRetryable'); attempts = [int] $e['attempts']; totalAttempts = [int] $e['totalAttempts']; detection = ''; message = $msg }
         }
     }
     return @($ops | Sort-Object { $_.operationId })
@@ -176,9 +213,11 @@ function Get-WdrPendingActions {
         }
         if ($o.status -eq 'Succeeded' -and $o.detection -eq 'Unconfirmed') { $items += "$($o.name): WinGet reported success but could not confirm it; check that it is installed." }
     }
+    $net = Get-WddNetworkDriverFlag $Paths
+    if ($net) { $items += "Network: $net" }
     $report = Read-WddJson $Paths.ReportJson
     if ($report -and $report.ContainsKey('remainingTasks')) {
-        foreach ($t in @($report.remainingTasks)) { if ($t -and $t -notmatch '^Application ' -and $t -notmatch '^Additional Software ') { $items += [string] $t } }
+        foreach ($t in @($report.remainingTasks)) { if ($t -and $t -notmatch '^Application ' -and $t -notmatch '^Additional Software ' -and $t -notmatch '^Driver: ') { $items += [string] $t } }
     }
     return @($items | Select-Object -Unique)
 }
@@ -242,7 +281,8 @@ function Invoke-WdrRecovery {
         $accepted = @(); $refused = @(); $notes = @()
         $ops = @($Operations | Where-Object { $_ } | ForEach-Object { ([string] $_).Trim() })
         $wuRequested = $ops -contains 'stage:windowsUpdate'
-        $appOps = @($ops | Where-Object { $_ -ne 'stage:windowsUpdate' })
+        $driverOps = @($ops | Where-Object { $_ -like 'driver:*' -or $_ -eq 'stage:drivers' })
+        $appOps = @($ops | Where-Object { $_ -ne 'stage:windowsUpdate' -and $_ -notlike 'driver:*' -and $_ -ne 'stage:drivers' })
 
         # Applications: the engine's own Retry logic decides what may run again.
         $appStage = Get-WddStage $Manifest 'applications'
@@ -292,6 +332,39 @@ function Invoke-WdrRecovery {
             }
         }
 
+        # Phase 8: driver operations, through the driver engine's own Retry logic (security failures are never reopened).
+        $drvStage = Get-WddStage $Manifest 'drivers'
+        if ($drvStage -and $drvStage.enabled -and $drvStage['launcher'] -and ($Mode -ne 'Retry' -or $driverOps.Count)) {
+            $dcfg = Get-WdrDriverConfig $Paths
+            if (-not $dcfg) { $notes += 'The driver engine is not part of the staged package.' }
+            else {
+                $named = @($driverOps | Where-Object { $_ -ne 'stage:drivers' })
+                $r = switch ($Mode) {
+                    'RetryFailed' { Invoke-WdvRetry $dcfg -AllFailed -IncludePermanent:$IncludePermanent -RequestedBy $identity.Name }
+                    'Retry' { $(if ($named.Count) { Invoke-WdvRetry $dcfg -Operations $named -IncludePermanent:$IncludePermanent -RequestedBy $identity.Name } else { @{ Outcome = 'NothingToDo'; Accepted = @(); Refused = @() } }) }
+                    'Resume' { @{ Outcome = 'NothingToDo'; Accepted = @(); Refused = @() } }
+                }
+                if ($r.Outcome -eq 'Busy') { return @{ Outcome = 'Busy'; Message = $r.Message; Accepted = @(); Refused = @() } }
+                $accepted += @($r.Accepted); $refused += @($r.Refused)
+                $snapD = Get-WddStageSnapshot $drvStage $Paths $state
+                $needsTask = ($r.Outcome -eq 'Accepted') -or ($driverOps -contains 'stage:drivers') -or ($Mode -eq 'Resume' -and $snapD.state -ne 'Final' -and -not (Get-WddTask $drvStage.task.path $drvStage.task.name))
+                if ($needsTask) {
+                    $code = $null
+                    try { $code = Invoke-WdrDriverInstaller $Paths } catch { $notes += "Driver task: $($_.Exception.Message)" }
+                    $rec = $(if ($state.stages.ContainsKey('drivers')) { $state.stages['drivers'] } else { @{ attempts = 0 } })
+                    $rec.launchResult = $(if (Get-WddTask $drvStage.task.path $drvStage.task.name) { 'Launched' } else { 'LaunchFailed' })
+                    $rec.launchedUtc = (Get-WddNow).ToString('o'); $rec.exitCode = $code; $rec.user = 'SYSTEM'
+                    $rec.message = $(if ($rec.launchResult -eq 'Launched') { "Restarted by the recovery tool ($Mode)." } else { "The recovery tool could not register the driver task (exit code $code)." })
+                    $state.stages['drivers'] = $rec
+                    $notes += "Driver stage: $($rec.message)"
+                    if ($rec.launchResult -eq 'Launched' -and $r.Outcome -ne 'Accepted') { $accepted += 'stage:drivers' }
+                    elseif ($rec.launchResult -ne 'Launched') { $refused += @{ operationId = 'stage:drivers'; reason = $rec.message } }
+                }
+            }
+        } elseif ($driverOps.Count) {
+            foreach ($x in $driverOps) { $refused += @{ operationId = $x; reason = 'the driver stage is not part of this deployment' } }
+        }
+
         $reopen = ($accepted.Count -gt 0) -or ($Mode -eq 'Resume')
         if ($reopen) {
             $stamp = (Get-WddNow).ToString('yyyyMMddHHmmss')
@@ -324,6 +397,35 @@ function Invoke-WdrRecovery {
     } finally {
         Exit-WddMutex $mutex
     }
+}
+
+<#
+    Phase 8: technician-supplied INF driver packages (for example a network driver when the computer
+    has no network). The staged package is verified first; the packages are validated by the driver
+    engine of that package (Microsoft-signed INF only, every file hashed), copied into its protected
+    folder, and the driver stage runs again for what is unresolved. Nothing is installed here.
+#>
+function Invoke-WdrAddDrivers {
+    param([hashtable] $Manifest, [hashtable] $Paths, [string] $DriverPath)
+    Initialize-WddLogging $Paths
+    $identity = Get-WddIdentity
+    if (-not $identity.IsAdmin) { return @{ Outcome = 'NotElevated'; Message = 'Run the recovery tool as administrator.'; Accepted = @(); Refused = @() } }
+    $drvStage = Get-WddStage $Manifest 'drivers'
+    if (-not ($drvStage -and $drvStage.enabled -and $drvStage['launcher'])) { return @{ Outcome = 'Refused'; Message = 'The driver stage is not part of this deployment; install the driver with Device Manager or pnputil.'; Accepted = @(); Refused = @() } }
+    if (-not $DriverPath -or -not (Test-Path -LiteralPath $DriverPath -PathType Container)) { return @{ Outcome = 'Refused'; Message = "Driver folder not found: $DriverPath"; Accepted = @(); Refused = @() } }
+    $read = Read-WddDeploymentState $Paths
+    if (-not $read.State) { return @{ Outcome = 'NoState'; Message = 'No deployment has been started on this computer.'; Accepted = @(); Refused = @() } }
+    $check = Test-WddFiles $Paths.Package $Manifest 'Text' @($read.State.stagedFiles)
+    if (-not $check.Ok) { return @{ Outcome = 'IntegrityFailed'; Message = 'The staged package was modified or is incomplete; nothing was added.'; Accepted = @(); Refused = @() } }
+    $dcfg = Get-WdrDriverConfig $Paths
+    if (-not $dcfg) { return @{ Outcome = 'Refused'; Message = 'The driver engine is not part of the staged package.'; Accepted = @(); Refused = @() } }
+    $a = Add-WdvTechnicianPackages $dcfg $DriverPath $identity.Name
+    Write-WddLog "Recovery (AddDrivers) by $($identity.Name): $($a.Outcome). $($a.Message)"
+    if ($a.Outcome -eq 'Busy') { return @{ Outcome = 'Busy'; Message = $a.Message; Accepted = @(); Refused = @() } }
+    $refusedPk = @($a.Refused | ForEach-Object { @{ operationId = "package:$($_.inf)"; reason = $_.reason } })
+    if ($a.Outcome -ne 'Accepted') { return @{ Outcome = 'Refused'; Message = "No package was usable. $(($a.Refused | ForEach-Object { "$($_.inf): $($_.reason)" }) -join '; ')"; Accepted = @(); Refused = $refusedPk } }
+    $r = Invoke-WdrRecovery $Manifest $Paths 'Retry' -Operations @('stage:drivers')
+    return @{ Outcome = $r.Outcome; Message = "$($a.Message) $($r.Message)"; Accepted = @(@($a.Added) + @($r.Accepted)); Refused = @($refusedPk + @($r.Refused)) }
 }
 
 <#
@@ -390,6 +492,8 @@ $script:DiagnosticFiles = @(
     'Applications\logs\*.log', 'Applications\logs\*.log.1', 'Applications\logs\attempts.jsonl', 'Applications\logs\packages\*.log', 'Applications\history\*.json',
     'Updates\state.json', 'Updates\status.json', 'Updates\result.json', 'Updates\policy-result.json', 'Updates\logs\*.log',
     'Network\wifi-result.json', 'Network\*.log',
+    'Drivers\state.json', 'Drivers\state.json.bak', 'Drivers\status.json', 'Drivers\result.json', 'Drivers\inventory-*.json', 'Drivers\logs\*.log', 'Drivers\logs\attempts.jsonl', 'reports\drivers.json',
+    'Package\scripts\drivers\drivers-config.json',
     'Package\deployment-manifest.json', 'Package\config\orchestration.json', 'Package\scripts\applications\applications-config.json', 'Package\scripts\windows-update\config.json'
 )
 
@@ -453,8 +557,13 @@ function Export-WdrDiagnostics {
 # ------------------------------------------------------------------------------------------------
 
 function Invoke-WdrAction {
-    param([hashtable] $Manifest, [hashtable] $Paths, [string] $Action, [string[]] $Operation = @(), [switch] $IncludePermanent, [switch] $Json, [string] $OutputPath = '', [string] $BackupPath = '')
+    param([hashtable] $Manifest, [hashtable] $Paths, [string] $Action, [string[]] $Operation = @(), [switch] $IncludePermanent, [switch] $Json, [string] $OutputPath = '', [string] $BackupPath = '', [string] $DriverPath = '')
     switch ($Action) {
+        'AddDrivers' {
+            $r = Invoke-WdrAddDrivers $Manifest $Paths $DriverPath
+            $text = $(if ($Json) { [pscustomobject]$r | ConvertTo-Json -Depth 6 } else { "AddDrivers: $($r.Outcome). $($r.Message)" })
+            return @{ Text = $text; Exit = [int] $script:RecoveryExit[$r.Outcome] }
+        }
         'RestoreSettings' {
             $r = Invoke-WdrRestoreSettings $Manifest $Paths $BackupPath
             $text = $(if ($Json) { [pscustomobject]$r | ConvertTo-Json -Depth 6 } else { "RestoreSettings: $($r.Outcome). $($r.Message)" })
@@ -492,6 +601,7 @@ function Show-WdrMenu {
         Write-Output '  2  Retry failed operations   5  Resume interrupted provisioning'
         Write-Output '  3  View pending actions      6  Export diagnostic report'
         Write-Output '  7  Restore application settings from a backup folder'
+        Write-Output '  8  Add driver packages from a folder (for example a network driver)'
         Write-Output '  0  Exit'
         $c = Read-Host 'Choose'
         $r = switch ($c) {
@@ -506,8 +616,9 @@ function Show-WdrMenu {
             '5' { Invoke-WdrAction $Manifest $Paths 'Resume' }
             '6' { Invoke-WdrAction $Manifest $Paths 'ExportDiagnostics' }
             '7' { Invoke-WdrAction $Manifest $Paths 'RestoreSettings' -BackupPath (Read-Host 'Backup folder or .zip (for example E:\WindowsDeployment\backups\WDB-AppBackup-...)') }
+            '8' { Invoke-WdrAction $Manifest $Paths 'AddDrivers' -DriverPath (Read-Host 'Folder with INF driver packages (for example E:\Drivers\Network)') }
             '0' { return }
-            default { @{ Text = 'Choose 0-7.'; Exit = 0 } }
+            default { @{ Text = 'Choose 0-8.'; Exit = 0 } }
         }
         if ($r) { Write-Output ''; Write-Output $r.Text }
     }
@@ -529,7 +640,7 @@ if ($script:RecoveryMain) {
         Show-WdrMenu $manifest $paths
         exit 0
     }
-    $r = Invoke-WdrAction $manifest $paths $a.Action -Operation $a.Operation -IncludePermanent:$a.IncludePermanent -Json:$a.Json -OutputPath $a.OutputPath -BackupPath $a.BackupPath
+    $r = Invoke-WdrAction $manifest $paths $a.Action -Operation $a.Operation -IncludePermanent:$a.IncludePermanent -Json:$a.Json -OutputPath $a.OutputPath -BackupPath $a.BackupPath -DriverPath $a.DriverPath
     Write-Output $r.Text
     exit $r.Exit
 }

@@ -47,6 +47,8 @@ From the verified staging copy of the ZIP (never the ZIP itself):
 <drive>\wdb-media-state.json                  preparation journal
 <drive>\wdb-media-report.txt                  readiness report
 <drive>\WDB-previous\<time>\                  a replaced deployment, kept
+<drive>\WindowsDeployment\drivers\<folder>\   Phase 8 offline driver bundle, only when pinned
+<drive>\$WinPEDriver$\<folder>\                Phase 8 Setup-critical drivers (loaded by Windows Setup)
 ```
 
 A drive prepared this way passes the deployment's own `Stage-Deployment.ps1` verification (tested).

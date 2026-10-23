@@ -606,6 +606,11 @@ export function renderWizard(ctx: WizardContext): WizardHandle {
             ['Afterwards', s.updates.ongoing],
             ['When it applies', s.updates.timing],
           ], [], 'review-updates'),
+          section('Hardware & drivers', 'chip', { label: 'Edit in Advanced', run: () => ctx.openAdvanced('section-drivers') }, [
+            ['Drivers', s.drivers.summary],
+            ['How', s.drivers.detail],
+            ['Offline drivers', s.drivers.offline],
+          ], [], 'review-drivers'),
           section('Privacy', 'lock', { label: 'Edit in Advanced', run: () => ctx.openAdvanced('section-privacy') }, [
             ['Privacy settings', s.privacy.usesDefaults ? 'Owner defaults' : `${s.privacy.changes.length} change${s.privacy.changes.length === 1 ? '' : 's'} from the owner defaults`],
             ['Changed', s.privacy.changes.length ? s.privacy.changes.map((x) => x.label).join('; ') : null],

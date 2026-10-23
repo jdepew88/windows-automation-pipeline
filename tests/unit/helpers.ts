@@ -14,10 +14,12 @@ export function profile(mutate?: (p: Profile) => void, name = 'Alex'): Profile {
 
 /**
  * The Phase 4 owner default had an empty application selection; since Phase 4.2 Core Essentials
- * is selected. Tests about the engines-off / Milestone 1 output use this to clear it again.
+ * is selected. Tests about the engines-off / Milestone 1 output use this to clear it again. Those
+ * earlier owner defaults had no driver stage either (on by default since Phase 8), so it is off too.
  */
 export function noApps(p: Profile): void {
   p.applications.selection.selectedProfiles = [];
+  p.drivers.enabled = false;
 }
 
 export function generateOk(p: Profile): GenerateResult & { xml: string; root: XElement } {

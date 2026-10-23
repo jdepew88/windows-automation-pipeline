@@ -1,12 +1,14 @@
 import { z } from 'zod';
 import assistantSource from './scripts/WdbMediaAssistant.ps1?raw';
 import migrationSource from '../migration/scripts/WdbMigration.ps1?raw';
+import driverEngineSource from '../drivers/scripts/DriverEngine.ps1?raw';
 import releasesJson from '../../data/windows-releases.json';
 import { lookup } from '../../data';
 import type { Profile } from '../schema/profile';
 import { settingsRestoreActive } from '../migration/plan';
 import { sha256, utf8 } from '../deployment/sha256';
 import { createZip } from '../deployment/zip';
+import { DRIVER_ENGINE_FILE, DRIVER_SOURCES_FILE, DRIVER_SOURCE_DATA, MEDIA_DRIVERS_DIR, MEDIA_WINPE_DRIVERS_DIR, driverMediaBlock } from '../drivers';
 
 /**
  * Phase 7: the USB Preparation Assistant. The website decides what is installed and produces the
@@ -44,6 +46,9 @@ export const MEDIA_LAYOUT = {
   answerFile: 'autounattend.xml',
   packageDir: 'WindowsDeployment',
   backupsDir: 'WindowsDeployment/backups',
+  /** Phase 8: the pinned offline driver bundle and the Setup-critical drivers Windows Setup loads. */
+  driversDir: MEDIA_DRIVERS_DIR,
+  setupDriversDir: MEDIA_WINPE_DRIVERS_DIR,
 } as const;
 
 const ReleaseSchema = z
@@ -90,6 +95,7 @@ export function mediaBlock(p: Profile, answerFileName: string, answerFileBytes: 
     answerFile: { fileName: answerFileName, size: answerFileBytes.length, sha256: sha256(answerFileBytes) },
     requirements: mediaRequirements(p),
     backup: settingsRestoreActive(p) ? { backupId: m.backup!.backupId, manifestSha256: m.backup!.manifestSha256, folderName: m.backup!.folderName, location: `${MEDIA_LAYOUT.backupsDir}/${m.backup!.folderName}` } : null,
+    ...(driverMediaBlock(p) ? { drivers: driverMediaBlock(p) } : {}),
     usbRequiredAfterSetup: false,
   };
 }
@@ -116,7 +122,7 @@ Start: double-click Prepare-InstallationUSB.cmd and follow the steps. Or run the
 
   .\\${ASSISTANT_SCRIPT} -Mode Discover                    list drives and whether each can be used
   .\\${ASSISTANT_SCRIPT} -Mode Inspect -Target E:          read-only look at a drive (or -Iso <file>)
-  .\\${ASSISTANT_SCRIPT} -Mode Plan -Workflow Update -Package <zip> -Target E: [-Backup <folder>]
+  .\\${ASSISTANT_SCRIPT} -Mode Plan -Workflow Update -Package <zip> -Target E: [-Backup <folder>] [-Drivers <folder>]
   .\\${ASSISTANT_SCRIPT} -Mode Plan -Workflow Create -Package <zip> -Iso <file> -Disk <number> [-IsoSha256 <hash>]
   .\\${ASSISTANT_SCRIPT} -Mode Apply -PlanPath <plan.json> [-ConfirmErase <code from the plan>]
   .\\${ASSISTANT_SCRIPT} -Mode Verify -Target E: -Package <zip>
@@ -131,7 +137,12 @@ Workflows
            Ventoy drives never are. You must type the confirmation code shown for that exact drive.
   Inspect  Read-only report of a drive or ISO.
 
+Driver bundle (only when the deployment pins one): -Drivers <WDB-Drivers-... folder>. It is copied to
+WindowsDeployment\\drivers\\<folder>; storage drivers Windows Setup needs go to $WinPEDriver$\\<folder>,
+where Setup loads them. The Windows image itself is never modified.
+
 Files: ${ASSISTANT_SCRIPT} (the assistant), WdbMigration.ps1 (verifies Phase 6 settings backups),
+${DRIVER_ENGINE_FILE} and ${DRIVER_SOURCES_FILE} (verify Phase 8 driver bundles),
 windows-releases.json (Microsoft release information cached ${WINDOWS_RELEASES.verifiedUtc}, used to say how current
 the Windows image is), Prepare-InstallationUSB.cmd (starts the wizard).
 
@@ -148,6 +159,8 @@ export function assistantFiles(): { path: string; content: string }[] {
   return [
     { path: ASSISTANT_SCRIPT, content: crlf(assistantSource) },
     { path: 'WdbMigration.ps1', content: crlf(migrationSource) },
+    { path: DRIVER_ENGINE_FILE, content: crlf(driverEngineSource) },
+    { path: DRIVER_SOURCES_FILE, content: crlf(JSON.stringify(DRIVER_SOURCE_DATA, null, 2) + '\n') },
     { path: 'Prepare-InstallationUSB.cmd', content: crlf(LAUNCHER) },
     { path: 'windows-releases.json', content: crlf(JSON.stringify(WINDOWS_RELEASES, null, 2) + '\n') },
     { path: 'README-USB-Assistant.txt', content: crlf(assistantReadme()) },

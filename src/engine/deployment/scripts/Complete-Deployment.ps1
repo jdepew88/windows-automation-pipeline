@@ -47,6 +47,7 @@ function New-WddReport {
     $system = try { Get-WddSystemInfo } catch { [ordered]@{ computerName = $env:COMPUTERNAME; error = $_.Exception.Message } }
     $wu = @($Snapshot.stages | Where-Object { $_.id -eq 'windowsUpdate' }) | Select-Object -First 1
     $apps = @($Snapshot.stages | Where-Object { $_.id -eq 'applications' }) | Select-Object -First 1
+    $drv = @($Snapshot.stages | Where-Object { $_.id -eq 'drivers' }) | Select-Object -First 1
     $remaining = @(); $errors = @(); $incomplete = @()
     $wuReport = $null
     if ($wu) {
@@ -88,7 +89,30 @@ function New-WddReport {
         if (-not $policy) { $remaining += 'Ongoing Windows Update policy: not applied. Set it under Settings > Windows Update or re-run the deployment.' }
         elseif ($policy.status -notin 'Applied', 'AlreadyApplied') { $remaining += "Ongoing Windows Update policy: $($policy.status). $($policy.message)" }
     }
-    $remaining += 'Manufacturer drivers: not part of this deployment (driver stage not implemented). Install chipset, graphics and OEM drivers manually if Windows Update did not provide them.'
+    # Phase 8: the driver stage's own result (reports\drivers.json); without it, say plainly that nothing handled drivers.
+    $driversReport = $null
+    $drvStage = Get-WddStage $Manifest 'drivers'
+    $drvPolicy = $(if ($Manifest.ContainsKey('drivers') -and $Manifest.drivers -is [hashtable] -and $Manifest.drivers.ContainsKey('policy')) { $Manifest.drivers.policy } else { $null })
+    if ($drv) {
+        $dr = Read-WddJson (Join-Path $Paths.Root 'reports\drivers.json')
+        $listUnresolved = -not ($drvPolicy -and $drvPolicy.ContainsKey('reportUnresolved') -and -not $drvPolicy.reportUnresolved)
+        $driversReport = [ordered]@{ state = $drv.state; status = $drv.status; reason = $drv.detail; reboots = $drv.reboots
+                                     health = $(if ($dr) { $dr['health'] } else { $null }); summary = $(if ($dr) { $dr['summary'] } else { $null })
+                                     installed = @(if ($dr) { @($dr['operations']) | Where-Object { $_ -and $_['status'] -eq 'Succeeded' } | ForEach-Object { [ordered]@{ device = $_['device']; source = $_['source']; package = $_['package'] } } })
+                                     manualActions = @(if ($dr) { @($dr['manualActions']) | Where-Object { $_ } })
+                                     optionalApplications = @(if ($dr) { @($dr['optionalApplications']) | Where-Object { $_ } | ForEach-Object { $_['name'] } })
+                                     networkBootstrap = $(if ($dr) { $dr['networkBootstrap'] } else { $null }); report = (Join-Path $Paths.Root 'reports\drivers.json') }
+        if ($dr -and $listUnresolved) {
+            foreach ($m in @($dr['manualActions']) | Where-Object { $_ }) { $remaining += "Driver: $($m['text'])$(if ($m['url']) { " ($($m['url']))" })" }
+            foreach ($o in @($dr['operations']) | Where-Object { $_ -and $_['status'] -eq 'WaitingForReboot' }) { $remaining += "Driver: $($o['device']): restart the computer to start the new driver." }
+        }
+        if ($drv.state -ne 'Final') { $incomplete += "Hardware & drivers ($($drv.state))" }
+        elseif ($drv.status -eq 'Failed') { $errors += "Driver setup failed: $($drv.detail)" }
+    } elseif ($drvStage -and $drvStage['implemented']) {
+        $remaining += 'Manufacturer drivers: hardware-aware driver provisioning was not part of this deployment. Install chipset, graphics and OEM drivers manually if Windows Update did not provide them.'
+    } else {
+        $remaining += 'Manufacturer drivers: not part of this deployment (driver stage not implemented). Install chipset, graphics and OEM drivers manually if Windows Update did not provide them.'
+    }
     # Phase 5: what is still open and how to recover it, kept after the deployment ends.
     $tool = Join-Path $Paths.Package 'scripts\recovery\DeploymentRecovery.ps1'
     $hasTool = Test-Path -LiteralPath $tool
@@ -104,6 +128,18 @@ function New-WddReport {
         }
     } elseif ($apps -and $apps.state -ne 'Final') {
         $outstanding += [ordered]@{ operationId = 'stage:applications'; name = 'Applications'; lifecycle = 'Pending'; failureClass = ''; retryable = $true; action = 'resume'; message = "The application stage is $($apps.state)." }
+    }
+    if ($drv -and $drv.result -and $drv.result.ContainsKey('outstanding')) {
+        foreach ($x in @($drv.result.outstanding) | Where-Object { $_ }) {
+            $how = switch ([string] $x.status) {
+                'FailedRetryable' { 'retry (RetryFailed)' } 'WaitingForNetwork' { 'resume when the network is back' } 'Pending' { 'resume' }
+                'FailedPermanent' { $(if ([string] $x.failureClass -in 'Integrity', 'Signature') { 'replace the package with a correctly signed, unmodified one' } else { 'correct the cause, then retry with -IncludePermanent' }) }
+                'ManualActionRequired' { 'install the driver by hand (see the device in drivers.json) or supply one with -Action AddDrivers' } 'WaitingForReboot' { 'restart the computer' } 'Unsupported' { 'check the device' } default { 'check' }
+            }
+            $outstanding += [ordered]@{ operationId = $x.operationId; name = $x.name; lifecycle = $x.status; failureClass = $x.failureClass; retryable = ($x.status -eq 'FailedRetryable'); action = $how; message = $x.message }
+        }
+    } elseif ($drv -and $drv.state -ne 'Final') {
+        $outstanding += [ordered]@{ operationId = 'stage:drivers'; name = 'Hardware & drivers'; lifecycle = 'Pending'; failureClass = ''; retryable = $true; action = 'resume'; message = "The driver stage is $($drv.state)." }
     }
     if ($wu -and $wu.state -eq 'Final' -and $wu.status -in 'CompletedWithFailures', 'Failed', 'Offline') {
         $outstanding += [ordered]@{ operationId = 'stage:windowsUpdate'; name = 'Windows Update'; lifecycle = 'FailedRetryable'; failureClass = $(if ($wu.status -eq 'Offline') { 'Network' } else { 'Transient' }); retryable = $true; action = 'retry the update stage (installed updates are never offered again)'; message = [string] $wu.detail }
@@ -144,14 +180,14 @@ function New-WddReport {
         applications       = $appsReport
         updatePolicy       = $policy
         wifi               = $wifi
-        drivers            = [ordered]@{ state = 'NotImplemented'; note = 'No driver was installed or changed by this deployment.' }
-        restarts           = [ordered]@{ windowsUpdate = $(if ($wu) { $wu.reboots } else { 0 }); applications = $(if ($apps) { $apps.reboots } else { 0 }) }
+        drivers            = $(if ($driversReport) { $driversReport } elseif ($drvStage -and $drvStage['implemented']) { [ordered]@{ state = 'NotPartOfDeployment'; note = 'Hardware-aware driver provisioning was off; no driver was installed or changed by this deployment.' } } else { [ordered]@{ state = 'NotImplemented'; note = 'No driver was installed or changed by this deployment.' } })
+        restarts           = [ordered]@{ windowsUpdate = $(if ($wu) { $wu.reboots } else { 0 }); applications = $(if ($apps) { $apps.reboots } else { 0 }); drivers = $(if ($drv) { $drv.reboots } else { 0 }) }
         incompleteStages   = $incomplete
         errors             = $errors
         remainingTasks     = $remaining
         outstanding        = $outstanding
         recoveries         = @(if ($State.ContainsKey('recoveries')) { @($State.recoveries) })
-        logs               = [ordered]@{ deployment = $Paths.Log; windowsUpdate = (Join-Path $Paths.Root 'Updates\logs\engine.log'); applications = (Join-Path $Paths.Root 'Applications\logs\engine.log'); attempts = (Join-Path $Paths.Root 'Applications\logs\attempts.jsonl') }
+        logs               = $(if ($drv) { [ordered]@{ deployment = $Paths.Log; windowsUpdate = (Join-Path $Paths.Root 'Updates\logs\engine.log'); applications = (Join-Path $Paths.Root 'Applications\logs\engine.log'); attempts = (Join-Path $Paths.Root 'Applications\logs\attempts.jsonl'); drivers = (Join-Path $Paths.Root 'Drivers\logs\engine.log') } } else { [ordered]@{ deployment = $Paths.Log; windowsUpdate = (Join-Path $Paths.Root 'Updates\logs\engine.log'); applications = (Join-Path $Paths.Root 'Applications\logs\engine.log'); attempts = (Join-Path $Paths.Root 'Applications\logs\attempts.jsonl') } })
         recovery           = "$(if ($hasTool) { "Recovery tool (as administrator; status, retry, resume, diagnostics): $($recoveryCommands.status). " })Resume only: powershell.exe -ExecutionPolicy Bypass -File `"$(Join-Path $Paths.Package 'scripts\orchestrator\Resume-Deployment.ps1')`""
         recoveryCommands   = $(if ($hasTool) { $recoveryCommands } else { $null })
         restoration        = $restorationReport
@@ -202,8 +238,21 @@ function Format-WddReport {
         $l.Add("  $($Report.wifi.status) ($($Report.wifi.profileName)). $($Report.wifi.message)")
         $l.Add('')
     }
-    $l.Add('Manufacturer drivers')
-    $l.Add('  Not implemented in this version; nothing was installed or changed.')
+    $l.Add('Hardware & drivers')
+    $d = $Report.drivers
+    if ($d -and $d.Contains('status')) {
+        $l.Add("  Result: $($d.status) ($($d.state)). $($d.reason)")
+        if ($d.health) { $l.Add("  Health: $($d.health.status)") }
+        if ($d.summary) { $l.Add(('  Devices: {0}, healthy {1}, basic driver {2}, missing {3}, not working {4}, restart pending {5}, possible hardware issue {6}' -f $d.summary.devices, $d.summary.healthy, $d.summary.basicDriver, $d.summary.driverMissing, $d.summary.malfunctioning, $d.summary.restartPending, $d.summary.hardwareIssue)) }
+        foreach ($x in @($d.installed)) { $l.Add("  INSTALLED  $($x.device) ($($x.source)$(if ($x.package) { " $($x.package.provider) $($x.package.version)" }))") }
+        foreach ($x in @($d.manualActions)) { $l.Add("  MANUAL     $($x.text)") }
+        if (@($d.optionalApplications).Count) { $l.Add("  Optional vendor applications (not installed by the driver stage): $(@($d.optionalApplications) -join ', ')") }
+        $l.Add("  Details: $($d.report)")
+    } elseif ($d -and $d.state -eq 'NotPartOfDeployment') {
+        $l.Add('  Not part of this deployment; nothing was installed or changed.')
+    } else {
+        $l.Add('  Not implemented in this version; nothing was installed or changed.')
+    }
     $l.Add('')
     $l.Add('Incomplete stages')
     if (@($Report.incompleteStages).Count) { foreach ($x in $Report.incompleteStages) { $l.Add("  - $x") } } else { $l.Add('  None.') }
