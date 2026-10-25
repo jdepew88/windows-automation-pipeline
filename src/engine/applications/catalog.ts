@@ -53,6 +53,7 @@ export const APP_KINDS = ['application', 'launcher', 'runtime', 'system', 'drive
 export type AppKind = (typeof APP_KINDS)[number];
 /** normal: ordinary removal; caution: an extra confirmation; blocked: never offered for removal. */
 export const REMOVAL_SAFETY = ['normal', 'caution', 'blocked'] as const;
+export type RemovalSafety = (typeof REMOVAL_SAFETY)[number];
 /** winget: `winget upgrade` covers it; explicit: only when named (RequireExplicitUpgrade); manual: no package. */
 export const UPGRADE_METHODS = ['winget', 'explicit', 'manual'] as const;
 export type CatalogCategory = keyof typeof CATALOG_CATEGORIES;

@@ -163,6 +163,8 @@ const header = h(
         icon('exportIcon'),
         h('span', { class: 'btn-text' }, 'Export profile…'),
       ),
+      // Phase 10: the standalone manager for computers that are already set up (its own page).
+      h('a', { class: 'btn', href: 'manager.html', 'data-action': 'open-manager', 'aria-label': 'Application Manager', title: 'Install, update and remove applications on a computer that is already set up' }, icon('grid'), h('span', { class: 'btn-text' }, 'Application Manager')),
       h('label', { class: 'check-inline', for: 'include-secrets' }, includeSecrets, h('span', {}, 'Include passwords')),
     ),
     h(
