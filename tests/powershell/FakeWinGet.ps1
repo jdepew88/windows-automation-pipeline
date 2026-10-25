@@ -15,10 +15,16 @@ $st = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 | ConvertFrom-Json
 $installed = @{}; foreach ($p in $st.installed.PSObject.Properties) { $installed[$p.Name] = [string] $p.Value }
 $available = @{}; foreach ($p in $st.available.PSObject.Properties) { $available[$p.Name] = [string] $p.Value }
 $calls = @($st.calls) + @($args -join ' ')
-$save = { [IO.File]::WriteAllText($statePath, (@{ installed = $installed; available = $available; calls = $calls } | ConvertTo-Json -Depth 4), (New-Object Text.UTF8Encoding($false))) }
+$save = { [IO.File]::WriteAllText($statePath, (@{ installed = $installed; available = $available; names = $names; calls = $calls } | ConvertTo-Json -Depth 4), (New-Object Text.UTF8Encoding($false))) }
+# As winget.exe: no Source column when the command names a source; Available only when a row has one.
+$named = $args -contains '--source'
+$names = @{}; if ($st.PSObject.Properties.Name -contains 'names') { foreach ($p in $st.names.PSObject.Properties) { $names[$p.Name] = [string] $p.Value } }
+$nameOf = { param($id) if ($names.ContainsKey($id)) { $names[$id] } else { $id.Split('.')[-1] } }
 $table = {
     param($rows, [switch] $NoAvailable)
-    $cols = $(if ($NoAvailable) { 'Name', 'Id', 'Version', 'Source' } else { 'Name', 'Id', 'Version', 'Available', 'Source' })
+    $cols = @('Name', 'Id', 'Version')
+    if (-not $NoAvailable) { $cols += 'Available' }
+    if (-not $named) { $cols += 'Source' }
     $w = @{}; foreach ($c in $cols) { $w[$c] = [Math]::Max($c.Length, (@($rows | ForEach-Object { ([string] $_[$c]).Length }) + 0 | Measure-Object -Maximum).Maximum) }
     $line = { param($r) (@($cols | ForEach-Object { ([string] $r[$_]).PadRight($w[$_]) }) -join ' ').TrimEnd() }
     $head = & $line @{ Name = 'Name'; Id = 'Id'; Version = 'Version'; Available = 'Available'; Source = 'Source' }
@@ -34,10 +40,16 @@ switch ([string] $args[0]) {
     }
     'source' { Write-Output 'Updating all sources...'; Write-Output 'Done' }
     'show' { if ($available.ContainsKey($id)) { Write-Output "Found $id [$id]"; Write-Output "Version: $($available[$id])" } else { Write-Output 'No package found matching input criteria.'; $code = -1978335212 } }
-    'list' { if ($installed.ContainsKey($id)) { & $table @(@{ Name = $id; Id = $id; Version = $installed[$id]; Source = 'winget' }) -NoAvailable } else { Write-Output 'No installed package found matching input criteria.'; $code = -1978335212 } }
+    'list' {
+        if (-not $id) {
+            $rows = @($installed.Keys | Sort-Object | ForEach-Object { @{ Name = (& $nameOf $_); Id = $_; Version = $installed[$_]; Available = $(if ($available.ContainsKey($_) -and $available[$_] -ne $installed[$_]) { $available[$_] } else { '' }); Source = 'winget' } })
+            & $table $rows -NoAvailable:(-not @($rows | Where-Object { $_.Available }).Count)
+        } elseif ($installed.ContainsKey($id)) { & $table @(@{ Name = (& $nameOf $id); Id = $id; Version = $installed[$id] }) -NoAvailable }
+        else { Write-Output 'No installed package found matching input criteria.'; $code = -1978335212 }
+    }
     'upgrade' {
         if (-not $id) {
-            $rows = @($installed.Keys | Sort-Object | Where-Object { $available.ContainsKey($_) -and $available[$_] -ne $installed[$_] } | ForEach-Object { @{ Name = $_.Split('.')[-1]; Id = $_; Version = $installed[$_]; Available = $available[$_]; Source = 'winget' } })
+            $rows = @($installed.Keys | Sort-Object | Where-Object { $available.ContainsKey($_) -and $available[$_] -ne $installed[$_] } | ForEach-Object { @{ Name = (& $nameOf $_); Id = $_; Version = $installed[$_]; Available = $available[$_]; Source = 'winget' } })
             if ($rows.Count) { & $table $rows; Write-Output "$($rows.Count) upgrades available." } else { Write-Output 'No installed package found matching input criteria.' }
         } elseif ($installed.ContainsKey($id) -and $available.ContainsKey($id)) { $installed[$id] = $available[$id]; Write-Output 'Successfully installed' }
         else { Write-Output 'No applicable upgrade found.'; $code = -1978335189 }

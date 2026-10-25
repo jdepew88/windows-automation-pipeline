@@ -58,7 +58,7 @@ function state(m: Mock) {
     agent: { version: '1.0.0', started: '2026-10-25T12:00:00Z', user: 'PC\\owner', elevated: false, winget: 'C:\\winget.exe', online: m.online },
     settings: { dryRun: m.dryRun, forcedDryRun: false, acceptSourceAgreements: false },
     busy: false, running: '',
-    inventory: { scannedUtc: '2026-10-25T12:00:00Z', method: 'winget export', note: '', packages: Object.entries(m.installed).map(([id, version]) => ({ id, version, source: 'winget' })), programs: [{ name: 'Contoso Field Tool', version: '4.1', publisher: 'Contoso', scope: 'machine' }] },
+    inventory: { scannedUtc: '2026-10-25T12:00:00Z', method: 'winget export', note: '', packages: Object.entries(m.installed).map(([id, version]) => ({ id, version, source: 'winget' })), programs: [{ name: 'Contoso Field Tool', version: '4.1', publisher: 'Contoso', scope: 'machine' }], listing: 'ok', listed: [{ name: 'Contoso Field Tool', id: 'ARP\\Machine\\X64\\Contoso', version: '4.1', source: '', truncated: false }] },
     updates: m.updates ? { checkedUtc: 'c', finishedUtc: '2026-10-25T12:05:00Z', status: m.online ? 'ok' : 'networkUnavailable', exitCode: '0x00000000', note: m.online ? '' : 'No network: updates cannot be checked now. Installed applications are not affected.', items: m.updates.map((u) => ({ source: 'winget', explicit: false, truncated: false, ...u })) } : null,
     validation: m.validation, batch: m.batch, messages: [],
   };
@@ -324,7 +324,8 @@ test('installed and removal: runtimes are protected, security software is remove
   await expect(t.locator('[data-installed="Contoso.Tool"]')).toContainText('Extra confirmation');
   await expect(t.locator('[data-remove-pick="Microsoft.VCRedist.2015+.x64"]')).toBeDisabled();
   await expect(t.locator('[data-installed="Microsoft.VCRedist.2015+.x64"]')).toContainText('Protected');
-  await expect(page.getByTestId('mgr-programs')).toContainText('Contoso Field Tool');
+  await expect(t.locator('[data-kind="other"]')).toContainText('Contoso Field Tool');
+  await expect(t.locator('[data-kind="other"] input')).toHaveCount(0);
   // Bulk: VLC with a VPN is refused.
   await t.locator('[data-remove-pick="VideoLAN.VLC"]').check();
   await t.locator('[data-remove-pick="PrivateInternetAccess.PrivateInternetAccess"]').check();

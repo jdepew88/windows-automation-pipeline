@@ -36,7 +36,7 @@ test.beforeAll(async ({ request }) => {
     mkdirSync(dirname(to), { recursive: true });
     writeFileSync(to, e.data);
   }
-  writeFileSync(statePath(), JSON.stringify({ installed: { 'Google.Chrome': '130.0.1', 'VideoLAN.VLC': '3.0.21' }, available: { 'Google.Chrome': '131.0.2', 'VideoLAN.VLC': '3.0.21', 'Git.Git': '2.47.0' }, calls: [] }));
+  writeFileSync(statePath(), JSON.stringify({ installed: { 'Google.Chrome': '130.0.1', 'VideoLAN.VLC': '3.0.21' }, available: { 'Google.Chrome': '131.0.2', 'VideoLAN.VLC': '3.0.21', 'Git.Git': '2.47.0' }, names: { 'Google.Chrome': 'Google Chrome', 'VideoLAN.VLC': 'VLC media player' }, calls: [] }));
   agent = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', join(dir, 'AppManager', 'AppManager.ps1'), '-NoBrowser', '-IdleMinutes', '5', '-DataRoot', join(dir, 'data'), '-WinGet', fakeWinGet], {
     env: { ...process.env, WDB_FAKE_WINGET_STATE: statePath() },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -97,7 +97,21 @@ test('the packaged manager: served by its agent with a strict CSP, scans, instal
   // Update check: read-only, Chrome listed with both versions.
   await page.locator('.mgr-tab[data-tab="updates"]').click();
   await page.locator('[data-action="mgr-check-updates"]').click();
-  await expect(page.getByTestId('mgr-updates').locator('[data-update="Google.Chrome"]')).toContainText('131.0.2', { timeout: 60_000 });
+  // Phase 10 fix: "winget upgrade --source winget" prints no Source column; the new version is read as Available.
+  const chrome = page.getByTestId('mgr-updates').locator('[data-update="Google.Chrome"]');
+  await expect(chrome.locator('[data-col="available"]')).toHaveText('131.0.2', { timeout: 60_000 });
+  await expect(chrome.locator('[data-col="installed"]')).toHaveText('130.0.1');
+  await expect(chrome.locator('[data-col="source"]')).toHaveText('winget');
+  await expect(chrome).toHaveAttribute('data-eligible', 'true');
+  await expect(page.locator('[data-action="mgr-update-all"]')).toHaveText('Update All Eligible Applications (1)…');
+  expect(wingetState().calls).toContain('upgrade --source winget --disable-interactivity');
+  // Installed: WinGet packages with their names from "winget list", and this computer's other programs (read-only).
+  await page.locator('.mgr-tab[data-tab="installed"]').click();
+  await expect(page.getByTestId('mgr-installed').locator('tr[data-installed="Google.Chrome"]')).toHaveAttribute('data-kind', 'catalog');
+  await expect(page.getByTestId('mgr-installed').locator('tr[data-installed="Git.Git"]')).toHaveAttribute('data-kind', 'catalog');
+  await expect(page.getByTestId('mgr-inst-count')).toHaveText(/^Showing (\d+) of \1\.$/);
+  expect(wingetState().calls).toContain('list --disable-interactivity');
+  await page.locator('.mgr-tab[data-tab="updates"]').click();
   expect(wingetState().calls.filter((c) => /^upgrade --id/.test(c))).toEqual([]);
   // The history has both operations.
   await page.locator('.mgr-tab[data-tab="history"]').click();

@@ -8,8 +8,8 @@ import { allProfiles, expandProfile, resolveSelection, type SelectionResult } fr
 import { packageKey } from '../engine/applications/ids';
 import {
   AVAILABILITY_LABELS, MANAGER_NAME, MANAGER_PROFILES_FORMAT, RESULT_LABELS, STATE_LABELS, bulkRemovable, catalogEntryForPackage, commandLine, installPreview, isSuccess,
-  matchInventory, queueReady, removalPreview, summarize, uncataloged, wingetArguments,
-  type AgentState, type InstallPreview, type Match, type OperationRecord, type RemovalPreview, type UpdateItem,
+  bulkEligible, compareVersions, installedView, matchInventory, queueReady, removalPreview, summarize, updateIssue, updateReason, wingetArguments,
+  type AgentState, type InstallPreview, type InstalledKind, type InstalledView, type Match, type OperationRecord, type RemovalPreview, type UpdateItem,
 } from '../engine/manager';
 import { appLogo } from '../ui/app-icon';
 import { download, h, render } from '../ui/dom';
@@ -56,6 +56,8 @@ const ui = {
   review: null as Review | null,
   picked: new Set<string>(),
   removePick: new Set<string>(),
+  instGroup: 'all' as 'all' | InstalledKind,
+  instQ: '',
   history: [] as OperationRecord[],
   notice: null as { kind: 'info' | 'warn' | 'error'; text: string } | null,
   newProfileName: '',
@@ -67,9 +69,11 @@ const root = document.getElementById('mgr')!;
 let plan: SelectionResult = resolveSelection(ui.sel);
 let matches: Map<string, Match> = matchInventory(null, null);
 
+let installedCache: InstalledView = installedView(null, matches);
 function recompute(): void {
   plan = resolveSelection(ui.sel);
   matches = matchInventory(ui.agent?.inventory ?? null, ui.agent?.updates ?? null);
+  installedCache = installedView(ui.agent?.inventory ?? null, matches);
 }
 
 const say = (kind: 'info' | 'warn' | 'error', text: string) => {
@@ -77,12 +81,32 @@ const say = (kind: 'info' | 'warn' | 'error', text: string) => {
   draw();
 };
 
+/**
+ * Fetches the agent's state. Requests can overlap (the poll, and a refresh after an action), so a
+ * response is applied only if no later request's response was applied before it: an older state
+ * never replaces a newer one. Returns whether the state changed (an unchanged state is not redrawn).
+ */
+let stateSeq = 0;
+let appliedSeq = 0;
+let lastState = '';
+async function fetchState(): Promise<boolean> {
+  const seq = ++stateSeq;
+  const s = await api.state();
+  if (seq < appliedSeq) return false;
+  appliedSeq = seq;
+  const json = JSON.stringify(s);
+  if (json === lastState) return false;
+  lastState = json;
+  ui.agent = s;
+  recompute();
+  return true;
+}
+
 /** Runs a request, then shows the agent's new state at once (queued work is then polled every second). */
 async function refresh(f: () => Promise<unknown>): Promise<boolean> {
   return attempt(async () => {
     await f();
-    ui.agent = await api.state();
-    recompute();
+    await fetchState();
     draw();
   });
 }
@@ -125,27 +149,34 @@ async function loadSaved(): Promise<void> {
 // Polling the agent
 // ------------------------------------------------------------------------------------------------
 
+let failures = 0;
 async function poll(): Promise<void> {
   if (ui.conn === 'unauthorized' || ui.conn === 'none') return;
+  let changedState = false;
   try {
     const first = ui.conn === 'connecting';
-    ui.agent = await api.state();
+    changedState = await fetchState();
+    failures = 0;
     if (first) {
       ui.conn = 'connected';
       await loadSaved();
-      if (!ui.agent.inventory) await api.scan('inventory');
+      if (!ui.agent?.inventory && !ui.agent?.scanning) await api.scan('inventory');
+      changedState = true;
     }
-    const b = ui.agent.batch;
+    const b = ui.agent?.batch;
     if (b && b.jobs.every((j) => j.state === 'Done' || j.state === 'Cancelled') && ui.rescanFor === b.id) {
       ui.rescanFor = '';
       if (!b.dryRun) await api.scan('inventory');
       if (ui.tab === 'history') ui.history = (await api.history()).records;
     }
   } catch (e) {
-    ui.conn = e instanceof Unauthorized ? 'unauthorized' : ui.conn === 'connected' ? 'none' : 'none';
+    // A single failed poll keeps the last state on screen; repeated failures mean the agent stopped.
+    failures++;
+    changedState = true;
+    if (e instanceof Unauthorized) ui.conn = 'unauthorized';
+    else if (ui.conn !== 'connected' || failures >= 3) ui.conn = 'none';
   }
-  recompute();
-  draw();
+  if (changedState) draw();
   if (ui.conn === 'connected') setTimeout(() => void poll(), ui.agent?.busy ? 1000 : 4000);
 }
 
@@ -227,7 +258,7 @@ function header(): HTMLElement {
               disabled: a.settings.forcedDryRun || busy(),
               onchange: (ev: Event) => void attempt(async () => {
                 await api.settings({ dryRun: (ev.target as HTMLInputElement).checked });
-                ui.agent = await api.state();
+                await fetchState();
                 draw();
               }),
             }),
@@ -316,7 +347,7 @@ async function startBatch(action: 'install' | 'upgrade' | 'uninstall', items: Pa
     const r = await api.operate(action, items, confirm);
     ui.rescanFor = r.batchId;
     ui.review = null;
-    ui.agent = await api.state();
+    await fetchState();
   });
   if (ok) {
     ui.notice = null;
@@ -483,42 +514,73 @@ function installReview(r: Extract<Review, { kind: 'install' }>): HTMLElement {
 // Installed
 // ------------------------------------------------------------------------------------------------
 
+/**
+ * Everything the inventory found, from installedView: catalog applications, other WinGet packages,
+ * and other programs Windows lists. Phase 10 fix: the other programs used to sit in a <details>
+ * element whose "open" state the next background refresh removed (the list vanished), and only
+ * the first 500 were drawn. Now every row is drawn, the group and search are page state, and a
+ * refresh keeps the last list on screen until a complete new one arrives.
+ */
 function installed(): (HTMLElement | null)[] {
   const inv = ui.agent?.inventory;
-  const scan = btn(inv ? 'Scan again' : 'Scan this computer', { 'data-action': 'mgr-scan', disabled: !connected() || ui.agent?.running === 'inventory', onclick: () => void refresh(() => api.scan('inventory')) });
-  if (!inv) return [h('p', {}, connected() ? (ui.agent?.running === 'inventory' ? 'Scanning…' : 'Not scanned yet.') : 'Start the Application Manager on this computer to see what is installed.'), scan];
-  const catalogRows = CATALOG.filter((e) => ['installed', 'updateAvailable', 'uncertain'].includes(matches.get(e.id)?.state ?? '')).map((e) => {
-    const m = matches.get(e.id)!;
-    return { key: m.installedId || e.id, name: e.displayName, catalogId: e.id, id: m.installedId, version: m.version, publisher: e.publisher ?? '', source: m.matchedBy === 'name' ? 'Windows (not WinGet)' : 'winget', m, removable: m.matchedBy !== 'name' };
-  });
-  const extra = uncataloged(inv).map((p) => ({ key: p.id, name: p.id, catalogId: '', id: p.id, version: p.version, publisher: '', source: p.source, m: undefined as Match | undefined, removable: true }));
-  const rows = [...catalogRows, ...extra];
-  const matchedNames = new Set(CATALOG.flatMap((e) => (matches.get(e.id)?.matchedBy === 'name' ? e.detectNames ?? [] : [])).map((n) => n.toLowerCase()));
-  const programs = inv.programs.filter((p) => !matchedNames.has(p.name.toLowerCase()));
-  const picked = rows.filter((r) => ui.removePick.has(r.key));
+  const scanning = !!ui.agent?.scanning;
+  const scan = btn(scanning ? 'Scanning…' : inv ? 'Scan again' : 'Scan this computer', { 'data-action': 'mgr-scan', disabled: !connected() || scanning, onclick: () => void refresh(() => api.scan('inventory')) });
+  if (!inv)
+    return [h('p', { 'data-testid': 'mgr-inv-status', role: 'status' }, connected() ? (scanning ? 'Scanning this computer… (WinGet and the Windows uninstall records)' : 'Not scanned yet.') : 'Start the Application Manager on this computer to see what is installed.'), scan];
+  const view = installedCache;
+  const q = ui.instQ.trim().toLowerCase();
+  const shown = view.rows.filter((r) => (ui.instGroup === 'all' || r.kind === ui.instGroup) && (!q || `${r.name} ${r.id} ${r.publisher}`.toLowerCase().includes(q)));
+  const picked = view.rows.filter((r) => ui.removePick.has(r.key) && r.id);
+  const groups: [typeof ui.instGroup, string, number][] = [
+    ['all', 'All', view.counts.total],
+    ['catalog', 'In the catalog', view.counts.catalog],
+    ['winget', 'Other WinGet packages', view.counts.winget],
+    ['other', 'Other programs', view.counts.other],
+  ];
+  const updatesById = new Map((ui.agent?.updates?.items ?? []).map((u) => [u.id.toLowerCase(), u]));
   return [
-    h('div', { class: 'mgr-toolbar' }, h('p', { class: 'muted grow', 'data-testid': 'mgr-inv-meta' }, `Scanned ${new Date(inv.scannedUtc).toLocaleString()} with ${inv.method}. ${inv.note}`), scan),
+    h(
+      'div',
+      { class: 'mgr-toolbar' },
+      h('p', { class: 'muted grow', 'data-testid': 'mgr-inv-meta', role: 'status' }, `Scanned ${new Date(inv.scannedUtc).toLocaleString()} (${inv.method}).`, scanning ? h('strong', { 'data-testid': 'mgr-inv-rescanning' }, ' Scanning again… this list stays until the new scan is complete.') : null),
+      scan,
+    ),
+    inv.note ? h('p', { class: 'mgr-banner warn', 'data-testid': 'mgr-inv-note' }, inv.note) : null,
+    h(
+      'p',
+      { class: 'muted', 'data-testid': 'mgr-inv-summary' },
+      `${view.counts.catalog + view.counts.winget} packages WinGet reports as installed (${view.counts.catalog} in the catalog, ${view.counts.winget} others) and ${view.counts.other} other programs Windows lists. `,
+      'Only WinGet packages can be updated or removed here; other programs need their own installer or Settings > Apps.',
+      view.linked ? null : ' Programs could not be linked to WinGet packages in this scan, so some may be listed twice.',
+    ),
+    h(
+      'div',
+      { class: 'mgr-toolbar' },
+      h('div', { class: 'mgr-seg', role: 'group', 'aria-label': 'Show' }, groups.map(([g, label, n]) => h('button', { type: 'button', class: 'btn sm', 'data-inst-group': g, 'aria-pressed': String(ui.instGroup === g), onclick: () => { ui.instGroup = g; draw(); } }, `${label} (${n})`))),
+      h('label', { class: 'mgr-field grow' }, h('span', {}, 'Search installed'), h('input', { type: 'search', 'data-testid': 'mgr-inst-search', value: ui.instQ, placeholder: 'Name, publisher or WinGet ID', oninput: (ev: Event) => { ui.instQ = (ev.target as HTMLInputElement).value; draw(); } })),
+    ),
+    h('p', { class: 'muted', 'data-testid': 'mgr-inst-count' }, `Showing ${shown.length} of ${view.counts.total}.`),
     h(
       'table',
       { class: 'mgr-table', 'data-testid': 'mgr-installed' },
-      h('thead', {}, h('tr', {}, ['', 'Application', 'Version', 'Publisher', 'WinGet ID', 'Update', 'Source', 'Removal'].map((t) => h('th', { scope: 'col' }, t)))),
+      h('thead', {}, h('tr', {}, ['', 'Application', 'Version', 'Publisher', 'WinGet ID', 'Update', 'Found by', 'Removal'].map((t) => h('th', { scope: 'col' }, t)))),
       h(
         'tbody',
         {},
-        rows.map((r) => {
-          const pol = r.removable ? removalPreview({ id: r.id, version: r.version, source: r.source }, matches) : null;
-          const up = r.m?.update ?? ui.agent?.updates?.items.find((u) => u.id.toLowerCase() === r.id.toLowerCase());
+        shown.map((r) => {
+          const pol = r.id ? removalPreview({ id: r.id, version: r.version, source: r.source }, matches) : null;
+          const up = r.id ? updatesById.get(r.id.toLowerCase()) : undefined;
           return h(
             'tr',
-            { 'data-installed': r.key },
+            { 'data-installed': r.key, 'data-kind': r.kind },
             h('td', {}, pol ? h('input', { type: 'checkbox', 'aria-label': `Select ${r.name} for removal`, 'data-remove-pick': r.key, checked: ui.removePick.has(r.key), disabled: !pol.allowed, title: pol.allowed ? '' : pol.reason, onchange: (ev: Event) => { if ((ev.target as HTMLInputElement).checked) ui.removePick.add(r.key); else ui.removePick.delete(r.key); draw(); } }) : null),
-            h('td', {}, r.catalogId ? appLogo(r.catalogId, r.name, undefined, 'sm') : null, ' ', r.name, r.m?.state === 'uncertain' ? badge('Detected by name', 'warn', { title: 'Not matched to a WinGet package: updates and removal may need the program\'s own tools.' }) : null),
+            h('td', {}, r.catalogId ? appLogo(r.catalogId, r.name, undefined, 'sm') : null, ' ', r.name, r.match?.state === 'uncertain' ? badge('Detected by name', 'warn', { title: 'Not matched to a WinGet package: updates and removal may need the program\'s own tools.' }) : null),
             h('td', {}, r.version || '—'),
             h('td', {}, r.publisher || '—'),
             h('td', {}, r.id ? h('code', {}, r.id) : '—'),
-            h('td', {}, up ? `${up.available}${up.eligible ? '' : ' (individually)'}` : ui.agent?.updates ? 'None listed' : 'Not checked'),
-            h('td', {}, r.source),
-            h('td', {}, pol ? badge(pol.level === 'blocked' ? 'Protected' : pol.level === 'caution' ? 'Extra confirmation' : 'Removable', pol.level === 'blocked' ? 'err' : pol.level === 'caution' ? 'warn' : '', { title: pol.reason }) : 'Use its own uninstaller'),
+            h('td', {}, !r.id ? '—' : up ? `${up.available}${bulkEligible(up) ? '' : ' (individually)'}` : ui.agent?.updates ? 'None listed' : 'Not checked'),
+            h('td', {}, r.origin),
+            h('td', {}, pol ? badge(pol.level === 'blocked' ? 'Protected' : pol.level === 'caution' ? 'Extra confirmation' : 'Removable', pol.level === 'blocked' ? 'err' : pol.level === 'caution' ? 'warn' : '', { title: pol.reason }) : 'Its own uninstaller'),
           );
         }),
       ),
@@ -535,13 +597,6 @@ function installed(): (HTMLElement | null)[] {
           window.scrollTo({ top: 0 });
         },
       }),
-    ),
-    h(
-      'details',
-      { class: 'mgr-programs', 'data-testid': 'mgr-programs' },
-      h('summary', {}, `${programs.length} other programs listed by Windows`),
-      h('p', { class: 'muted' }, 'Programs WinGet did not list by identifier in this scan. They may still have a WinGet package: search for them in Browse or with "winget search". They are never removed from here.'),
-      h('ul', {}, programs.slice(0, 500).map((p) => h('li', {}, `${p.name}${p.version ? ` ${p.version}` : ''}${p.publisher ? ` · ${p.publisher}` : ''} (${p.scope})`))),
     ),
   ];
 }
@@ -600,28 +655,32 @@ function uninstallReview(r: Extract<Review, { kind: 'uninstall' }>): HTMLElement
 // Updates
 // ------------------------------------------------------------------------------------------------
 
-const selectable = (u: UpdateItem) => u.eligible || (u.explicit && !u.truncated && !/^(unknown|<)/i.test(u.installed));
+/** Can be chosen for an individual update: read consistently, a known installed version, a newer one available. */
+const selectable = (u: UpdateItem) => !updateIssue(u) && !u.truncated && !!u.available && !/^(unknown|<)/i.test(u.installed) && compareVersions(u.available, u.installed) > 0;
 
 function updates(): (HTMLElement | null)[] {
   const up = ui.agent?.updates;
-  const checking = ui.agent?.running === 'updates' || ui.agent?.running === 'sourceUpdate';
+  const checking = !!ui.agent?.checking;
   const items = up?.items ?? [];
-  const eligible = items.filter((u) => u.eligible);
+  // Phase 10 fix: eligibility is the agent's decision confirmed by the page's own rules (bulkEligible).
+  const eligible = items.filter(bulkEligible);
   const picked = items.filter((u) => ui.picked.has(u.id) && selectable(u));
   return [
     h(
       'div',
       { class: 'mgr-explain' },
       h('p', {}, 'Like "apt update" then "apt upgrade": first refresh the package source and list what has a newer version (nothing changes), then choose what to update. ', h('strong', {}, 'WinGet is not APT: '), 'it can only update programs it matches to a package, it cannot always tell the installed version, and each publisher\'s installer does the work. The manager never updates anything because it was opened.'),
-      h('p', { class: 'muted' }, 'Updates run one package at a time ("winget upgrade --id … --exact"), so each result is recorded. Packages with an unknown installed version, a shortened identifier, or whose publisher asks to update them only on their own are left out of "Update all eligible".'),
+      h('p', { class: 'muted' }, 'Updates run one package at a time ("winget upgrade --id … --exact"), so each result is recorded. Packages with an unknown installed version, a shortened identifier, WinGet itself, or whose publisher asks to update them only on their own are left out of "Update all eligible".'),
     ),
     h(
       'div',
       { class: 'mgr-toolbar' },
       btn(checking ? 'Checking…' : 'Check for updates', { class: 'btn primary', 'data-action': 'mgr-check-updates', disabled: !connected() || checking || busy(), onclick: () => void refresh(() => api.scan('updates')) }),
-      up ? h('span', { class: 'muted grow', 'data-testid': 'mgr-updates-meta' }, `Last checked ${new Date(up.finishedUtc).toLocaleString()}. ${up.note}`) : h('span', { class: 'muted grow' }, 'Not checked yet.'),
+      up ? h('span', { class: 'muted grow', 'data-testid': 'mgr-updates-meta' }, `Last checked ${new Date(up.finishedUtc).toLocaleString()}.`, checking ? ' Checking again… the list below is from the last check.' : '') : h('span', { class: 'muted grow' }, checking ? 'Checking…' : 'Not checked yet.'),
     ),
-    up && up.status !== 'ok' ? h('p', { class: 'mgr-banner warn', 'data-testid': 'mgr-updates-status' }, up.note) : null,
+    up && up.status !== 'ok'
+      ? h('div', { class: 'mgr-banner warn', 'data-testid': 'mgr-updates-status', role: 'status' }, h('p', {}, up.note), up.problems?.length ? h('ul', {}, up.problems.slice(0, 5).map((t) => h('li', {}, t))) : null)
+      : null,
     items.length
       ? h(
           'table',
@@ -630,18 +689,20 @@ function updates(): (HTMLElement | null)[] {
           h(
             'tbody',
             {},
-            items.map((u) =>
-              h(
+            items.map((u) => {
+              const ok = bulkEligible(u);
+              const why = updateReason(u);
+              return h(
                 'tr',
-                { 'data-update': u.id, 'data-eligible': String(u.eligible) },
+                { 'data-update': u.id, 'data-eligible': String(ok), 'data-readable': String(!updateIssue(u)) },
                 h('td', {}, h('input', { type: 'checkbox', 'aria-label': `Select ${u.name}`, 'data-update-pick': u.id, checked: ui.picked.has(u.id), disabled: !selectable(u), onchange: (ev: Event) => { if ((ev.target as HTMLInputElement).checked) ui.picked.add(u.id); else ui.picked.delete(u.id); draw(); } })),
                 h('td', {}, u.name, ' ', h('code', {}, u.id)),
-                h('td', {}, u.installed),
-                h('td', {}, u.available),
-                h('td', {}, u.source),
-                h('td', {}, u.eligible ? badge('Yes', 'ok') : badge(u.explicit && selectable(u) ? 'Only on its own' : 'No', 'warn', { title: u.reason }), u.eligible ? null : h('span', { class: 'muted' }, ` ${u.reason}`)),
-              ),
-            ),
+                h('td', { 'data-col': 'installed' }, u.installed),
+                h('td', { 'data-col': 'available' }, u.available || '—'),
+                h('td', { 'data-col': 'source' }, u.source),
+                h('td', {}, ok ? badge('Yes', 'ok') : badge(updateIssue(u) ? 'Could not read' : selectable(u) ? 'Only on its own' : 'No', updateIssue(u) ? 'err' : 'warn', { title: why }), ok ? null : h('span', { class: 'muted' }, ` ${why}`)),
+              );
+            }),
           ),
         )
       : up && up.status === 'ok'
@@ -658,14 +719,14 @@ function updates(): (HTMLElement | null)[] {
 
 function upgradeReview(r: Extract<Review, { kind: 'upgrade' }>): HTMLElement {
   const sim = !!ui.agent?.settings.dryRun;
-  const left = r.all ? (ui.agent?.updates?.items ?? []).filter((u) => !u.eligible) : [];
+  const left = r.all ? (ui.agent?.updates?.items ?? []).filter((u) => !bulkEligible(u)) : [];
   return h(
     'section',
     { class: 'mgr-review', 'data-testid': 'mgr-review-upgrade' },
     h('h2', {}, `Review: ${r.all ? 'update all eligible' : 'update selected'} — ${r.items.length} application(s)${sim ? ' (simulation)' : ''}`),
     h('p', {}, 'Each package is updated on its own with its publisher\'s installer. Close the applications first; an installer may restart one that is open. One failure does not stop the others.'),
     h('ol', { class: 'mgr-queue' }, r.items.map((u) => h('li', { 'data-upgrade': u.id }, h('strong', {}, u.name), ` ${u.installed} → ${u.available}`, h('code', { class: 'mgr-cmd' }, commandLine(wingetArguments('upgrade', u.id, u.source === 'msstore' ? 'msstore' : 'winget', { acceptSourceAgreements: ui.agent?.settings.acceptSourceAgreements })))))),
-    left.length ? h('div', { 'data-testid': 'mgr-upgrade-excluded' }, h('h3', {}, 'Not included'), h('ul', {}, left.map((u) => h('li', {}, `${u.name}: ${u.reason}`)))) : null,
+    left.length ? h('div', { 'data-testid': 'mgr-upgrade-excluded' }, h('h3', {}, 'Not included'), h('ul', {}, left.map((u) => h('li', {}, `${u.name}: ${updateReason(u)}`)))) : null,
     h(
       'div',
       { class: 'mgr-actions' },

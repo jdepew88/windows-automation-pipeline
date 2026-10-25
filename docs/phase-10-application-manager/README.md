@@ -10,7 +10,7 @@ a computer that is already set up: it needs no USB drive and no reinstallation.
 | 10B | Standalone manager: local agent, launcher, browsing, inventory, installation queue, profiles | Done |
 | 10C | Update check, Update All Eligible, removal, history, reports, offline states | Done |
 
-Deferred items are listed at the end.
+Deferred items are listed at the end. Fixes after the first real-world test (version 1.0.1): [fixes-2026-10-25.md](fixes-2026-10-25.md).
 
 ## Why a local agent plus a page
 

@@ -44,8 +44,8 @@ function Assert-True($Value, [string] $Message) { if (-not $Value) { throw "ASSE
 $script:E = @{ NotFound = 0x8A150014; Network = 0x8A150008; SourceOpen = 0x8A150045; Agreement = 0x8A150041; Cancelled = 0x8A15010C; Reboot = 0x8A150109; Hash = 0x8A150011; UacDeclined = -2147023673 }
 
 function Reset-Sim {
-    param([hashtable] $Installed = @{}, [hashtable] $Available = @{}, [hashtable] $Behavior = @{}, [string[]] $Explicit = @(), [bool] $Online = $true, [object[]] $Programs = @(), [hashtable] $Sources = @{})
-    $script:Sim = @{ Installed = $Installed.Clone(); Available = $Available.Clone(); Behavior = $Behavior.Clone(); Explicit = $Explicit; Online = $Online; Programs = $Programs; Sources = $Sources.Clone(); Calls = New-Object System.Collections.Generic.List[string]; Now = [DateTime]::new(2026, 10, 25, 12, 0, 0, [DateTimeKind]::Utc) }
+    param([hashtable] $Installed = @{}, [hashtable] $Available = @{}, [hashtable] $Behavior = @{}, [string[]] $Explicit = @(), [bool] $Online = $true, [object[]] $Programs = @(), [hashtable] $Sources = @{}, [hashtable] $Names = @{})
+    $script:Sim = @{ Names = $Names.Clone(); Installed = $Installed.Clone(); Available = $Available.Clone(); Behavior = $Behavior.Clone(); Explicit = $Explicit; Online = $Online; Programs = $Programs; Sources = $Sources.Clone(); Calls = New-Object System.Collections.Generic.List[string]; Now = [DateTime]::new(2026, 10, 25, 12, 0, 0, [DateTimeKind]::Utc) }
     $paths = Get-WamPaths (Join-Path $script:Temp ("data-" + [Guid]::NewGuid().ToString('N')))
     Initialize-WamStore $paths
     $script:S = New-WamState $paths
@@ -62,15 +62,26 @@ function Stop-WamProcess { param($Handle) }
 
 function Get-SimSource { param([string] $Id) if ($script:Sim.Sources.ContainsKey($Id)) { $script:Sim.Sources[$Id] } else { 'winget' } }
 
+<#
+    WinGet's table layout, as winget.exe prints it: the titles, a line of dashes, one row per package,
+    each column padded (by console cells) to its widest value and separated by one space. The Source
+    column is left out when the command names a source (--source), and Available appears only when a
+    row has one, exactly as WinGet does (the first agent missed this and read Available as Source).
+#>
 function Format-SimTable {
-    param([object[]] $Rows, [switch] $NoAvailable)
-    $cols = $(if ($NoAvailable) { 'Name', 'Id', 'Version', 'Source' } else { 'Name', 'Id', 'Version', 'Available', 'Source' })
+    param([object[]] $Rows, [switch] $NoAvailable, [switch] $NoSource)
+    $cols = @('Name', 'Id', 'Version')
+    if (-not $NoAvailable) { $cols += 'Available' }
+    if (-not $NoSource) { $cols += 'Source' }
+    $cw = { param([string] $s) (Get-WamCells $s)[$s.Length] }
     $w = @{}
-    foreach ($c in $cols) { $w[$c] = [Math]::Max($c.Length, (@($Rows | ForEach-Object { ([string] $_[$c]).Length }) + 0 | Measure-Object -Maximum).Maximum) }
-    $line = { param($r) (@($cols | ForEach-Object { ([string] $r[$_]).PadRight($w[$_]) }) -join ' ').TrimEnd() }
+    foreach ($c in $cols) { $w[$c] = [Math]::Max($c.Length, (@($Rows | ForEach-Object { & $cw ([string] $_[$c]) }) + 0 | Measure-Object -Maximum).Maximum) }
+    $line = { param($r) (@($cols | ForEach-Object { $v = [string] $r[$_]; $v + (' ' * ($w[$_] - (& $cw $v))) }) -join ' ').TrimEnd() }
     $head = & $line @{ Name = 'Name'; Id = 'Id'; Version = 'Version'; Available = 'Available'; Source = 'Source' }
-    @($head, ('-' * ($head.Length + 2))) + @($Rows | ForEach-Object { & $line $_ })
+    @($head, ('-' * (& $cw $head))) + @($Rows | ForEach-Object { & $line $_ })
 }
+
+function Get-SimName { param([string] $Id) if ($script:Sim.Names.ContainsKey($Id)) { $script:Sim.Names[$Id] } else { $Id.Split('.')[-1] } }
 
 function Get-SimResponse {
     param([string[]] $A)
@@ -95,19 +106,30 @@ function Get-SimResponse {
             return @{ ExitCode = 0; Output = "Found $id [$id]`nVersion: $($sim.Available[$id])`nPublisher: Example$agree" }
         }
         'list' {
-            if ($sim.Installed.ContainsKey($id)) { return @{ ExitCode = 0; Output = ((Format-SimTable @(@{ Name = $id; Id = $id; Version = $sim.Installed[$id]; Source = 'winget' }) -NoAvailable) -join "`n") } }
+            if (-not $id) {
+                # Everything installed: packages with their source, other programs with none (as WinGet shows ARP entries).
+                $rows = @($sim.Installed.Keys | Sort-Object | ForEach-Object { @{ Name = (Get-SimName $_); Id = $_; Version = $sim.Installed[$_]; Available = $(if ($sim.Available.ContainsKey($_) -and $sim.Available[$_] -ne $sim.Installed[$_]) { $sim.Available[$_] } else { '' }); Source = (Get-SimSource $_) } })
+                $names = @($rows | ForEach-Object { $_.Name })
+                $rows += @($sim.Programs | Where-Object { $names -notcontains $_.displayName } | ForEach-Object { @{ Name = $_.displayName; Id = "ARP\Machine\X64\$($_.displayName -replace '\s', '')"; Version = $_.displayVersion; Available = ''; Source = '' } })
+                return @{ ExitCode = 0; Output = ((@("   - `r") + (Format-SimTable $rows -NoAvailable:(-not @($rows | Where-Object { $_.Available }).Count))) -join "`r`n") }
+            }
+            if ($sim.Installed.ContainsKey($id)) {
+                $up = $sim.Available.ContainsKey($id) -and $sim.Available[$id] -ne $sim.Installed[$id]
+                return @{ ExitCode = 0; Output = ((Format-SimTable @(@{ Name = (Get-SimName $id); Id = $id; Version = $sim.Installed[$id]; Available = $(if ($up) { $sim.Available[$id] } else { '' }) }) -NoAvailable:(-not $up) -NoSource) -join "`r`n") }
+            }
             return @{ ExitCode = $script:E.NotFound; Output = 'No installed package found matching input criteria.' }
         }
         'upgrade' {
             if (-not $id) {
                 $src = $A[2]
                 if ($offline) { return @{ ExitCode = $script:E.SourceOpen; Output = "Failed when searching source: $src" } }
-                $rows = @($sim.Installed.Keys | Sort-Object | Where-Object { (Get-SimSource $_) -eq $src -and $sim.Available.ContainsKey($_) -and $sim.Available[$_] -ne $sim.Installed[$_] } | ForEach-Object { @{ Name = $_.Split('.')[-1]; Id = $_; Version = $sim.Installed[$_]; Available = $sim.Available[$_]; Source = $src } })
+                $rows = @($sim.Installed.Keys | Sort-Object | Where-Object { (Get-SimSource $_) -eq $src -and $sim.Available.ContainsKey($_) -and $sim.Available[$_] -ne $sim.Installed[$_] } | ForEach-Object { @{ Name = (Get-SimName $_); Id = $_; Version = $sim.Installed[$_]; Available = $sim.Available[$_] } })
                 $normal = @($rows | Where-Object { $sim.Explicit -notcontains $_.Id })
                 $explicit = @($rows | Where-Object { $sim.Explicit -contains $_.Id })
                 if (-not $rows.Count) { return @{ ExitCode = 0; Output = 'No installed package found matching input criteria.' } }
-                $out = @("   - `r   \ `r") + (Format-SimTable $normal) + @("$($normal.Count) upgrades available.")
-                if ($explicit.Count) { $out += @('', 'The following packages have an upgrade available, but require explicit targeting for upgrade:') + (Format-SimTable $explicit) }
+                # "--source" given: no Source column, as winget.exe prints it.
+                $out = @("   - `r   \ `r") + (Format-SimTable $normal -NoSource) + @("$($normal.Count) upgrades available.")
+                if ($explicit.Count) { $out += @('', 'The following packages have an upgrade available, but require explicit targeting for upgrade:') + (Format-SimTable $explicit -NoSource) }
                 return @{ ExitCode = 0; Output = ($out -join "`r`n") }
             }
             return (Invoke-SimChange $id 'upgrade')
@@ -206,14 +228,15 @@ $tests['versions and eligibility: unknown, "<" and not-newer versions, shortened
     Assert-Equal (Compare-WamVersion '1.0' '1.0.0') 0 'trailing zeros'
     Assert-Equal (Compare-WamVersion '150-93' '150-97') -1 'dash versions'
     $pol = @{ 'slack.slack' = @{ upgrade = 'explicit' } }
+    $inst = @{ 'git.git' = $true; 'slack.slack' = $true }
     $row = { param($v, $a, [bool] $t = $false, [bool] $x = $false, [string] $id = 'Git.Git') @{ id = $id; version = $v; available = $a; truncated = $t; explicit = $x; source = 'winget' } }
-    Assert-Equal (Get-WamEligibility (& $row '2.45.1' '2.47.0') $pol) '' 'eligible'
-    Assert-True (Get-WamEligibility (& $row 'Unknown' '2.47.0') $pol) 'unknown version'
-    Assert-True (Get-WamEligibility (& $row '< 2.0' '2.47.0') $pol) 'less-than version'
-    Assert-True (Get-WamEligibility (& $row '2.47.0' '2.47.0') $pol) 'not newer'
-    Assert-True (Get-WamEligibility (& $row '1.0' '2.0' $true) $pol) 'shortened id'
-    Assert-True (Get-WamEligibility (& $row '1.0' '2.0' $false $true) $pol) 'explicit table'
-    Assert-True (Get-WamEligibility (& $row '1.0' '2.0' $false $false 'Slack.Slack') $pol) 'explicit by catalog policy'
+    Assert-Equal (Get-WamEligibility (& $row '2.45.1' '2.47.0') $pol $inst) '' 'eligible'
+    Assert-True (Get-WamEligibility (& $row 'Unknown' '2.47.0') $pol $inst) 'unknown version'
+    Assert-True (Get-WamEligibility (& $row '< 2.0' '2.47.0') $pol $inst) 'less-than version'
+    Assert-True (Get-WamEligibility (& $row '2.47.0' '2.47.0') $pol $inst) 'not newer'
+    Assert-True (Get-WamEligibility (& $row '1.0' '2.0' $true) $pol $inst) 'shortened id'
+    Assert-True (Get-WamEligibility (& $row '1.0' '2.0' $false $true) $pol $inst) 'explicit table'
+    Assert-True (Get-WamEligibility (& $row '1.0' '2.0' $false $false 'Slack.Slack') $pol $inst) 'explicit by catalog policy'
 }
 
 $tests['inventory: winget export plus Windows uninstall records; nothing changed'] = {
@@ -231,6 +254,9 @@ $tests['inventory: winget export plus Windows uninstall records; nothing changed
 
 $tests['update check: source update, then a read-only list; explicit and unknown versions not eligible; cached'] = {
     $S = Reset-Sim -Installed @{ 'Git.Git' = '2.45.1'; 'Parsec.Parsec' = '150-93'; 'Contoso.Tool' = 'Unknown'; 'VideoLAN.VLC' = '3.0.21' } -Available @{ 'Git.Git' = '2.47.0'; 'Parsec.Parsec' = '150-97'; 'Contoso.Tool' = '2.0'; 'VideoLAN.VLC' = '3.0.21' } -Explicit @('Parsec.Parsec')
+    Start-WamInventory $S
+    Invoke-Pump $S
+    $script:Sim.Calls.Clear()
     $S.UpdateCheckId = 'check-1'
     Start-WamUpdateCheck $S
     Invoke-Pump $S
@@ -244,6 +270,155 @@ $tests['update check: source update, then a read-only list; explicit and unknown
     Assert-True (-not ($items | Where-Object { $_.id -eq 'Contoso.Tool' }).eligible) 'unknown version not eligible'
     Assert-True (Test-Path -LiteralPath $S.Paths.Updates) 'cached'
     Assert-Equal (@($script:Sim.Calls | Where-Object { $_ -match '^(install|uninstall) |^upgrade --id' }).Count) 0 'nothing changed'
+}
+
+# ------------------------------------------------------------------------------------------------
+# Phase 10 fix: the first real-world test (2026-10-25)
+# ------------------------------------------------------------------------------------------------
+
+$script:Fixture = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'fixtures\winget-upgrade-source-winget.txt'), [Text.Encoding]::UTF8)
+function Get-FixtureInstalled { $h = @{}; foreach ($r in @((Read-WamTable $script:Fixture).Rows)) { $h[$r.id] = $r.version }; $h }
+
+$tests['REGRESSION (real output): "winget upgrade --source winget" has no Source column; available versions are read as Available, not Source'] = {
+    $p = Read-WamTable $script:Fixture
+    Assert-Equal $p.Tables 2 'two tables (ordinary and explicit)'
+    Assert-Equal @($p.Problems).Count 0 "no problems: $(@($p.Problems) -join '; ')"
+    $rows = @{}; foreach ($r in @($p.Rows)) { $rows[$r.id] = $r }
+    Assert-Equal $rows.Count 17 'all rows'
+    foreach ($c in @(@('7zip.7zip', '25.01', '26.05'), @('VideoLAN.VLC', '3.0.21', '3.0.24'), @('Google.Chrome', '155.0.8059.86', '156.0.8078.48'), @('WiresharkFoundation.Wireshark', '4.4.3', '4.6.9'))) {
+        $r = $rows[$c[0]]
+        Assert-Equal "$($r.version) -> $($r.available) [$($r.source)]" "$($c[1]) -> $($c[2]) []" "$($c[0]): versions in Version and Available, no source column"
+    }
+    Assert-Equal $rows['Zoom.Zoom.EXE'].version '7.1.9 (48550)' 'a version with a space'
+    Assert-Equal $rows['Zoom.Zoom.EXE'].available '7.2.1 (48556)' 'an available version with a space'
+    Assert-Equal $rows['Microsoft.VCRedist.2015+.x64'].name 'Microsoft Visual C++ 2015-2022 Redistributable (x64) - 14.51.36231' 'a long name intact'
+    Assert-True ($rows.ContainsKey('Notepad++.Notepad++') -and $rows.ContainsKey('CodecGuide.K-LiteCodecPack.Full')) 'identifiers with + and - kept exactly'
+    Assert-True $rows['Discord.Discord'].explicit 'second table: explicit'
+}
+
+$tests['REGRESSION (real output): the same packages are eligible end to end; "<" versions and explicit packages are not'] = {
+    $S = Reset-Sim -Installed (Get-FixtureInstalled)
+    Start-WamInventory $S
+    Invoke-Pump $S
+    $S.UpdateCheckId = 'fixture'
+    Complete-WamUpdates $S @{ source = 'winget' } @{ ExitCode = 0; Output = $script:Fixture }
+    Assert-Equal $S.Updates.status 'ok' 'readable'
+    $items = @{}; foreach ($i in @($S.Updates.items)) { $items[$i.id] = $i }
+    foreach ($id in '7zip.7zip', 'VideoLAN.VLC', 'Google.Chrome', 'WiresharkFoundation.Wireshark', 'Zoom.Zoom.EXE', 'Spotify.Spotify', 'PostgreSQL.PostgreSQL.18', 'ElementLabs.LMStudio') {
+        Assert-True $items[$id].eligible "$id eligible: $($items[$id].reason)"
+        Assert-Equal $items[$id].source 'winget' "$id source"
+    }
+    Assert-True (-not $items['Ubisoft.Connect'].eligible -and $items['Ubisoft.Connect'].reason -match 'unknown') 'version "< 174..." never in bulk'
+    Assert-True (-not $items['Discord.Discord'].eligible -and $items['Discord.Discord'].reason -match 'on its own') 'explicit table'
+    Assert-Equal @($S.Updates.items | Where-Object { $_.eligible }).Count 15 'fifteen of seventeen eligible'
+    $log = Join-Path $S.Paths.Logs 'last-update-check-winget.txt'
+    Assert-True ((Test-Path -LiteralPath $log) -and ([IO.File]::ReadAllText($log) -match 'Wireshark')) 'raw output kept for diagnosis'
+}
+
+$tests['columns by title, not by count: upgrade and list, with and without Source and Available'] = {
+    $up = (Format-SimTable @(@{ Name = 'Git'; Id = 'Git.Git'; Version = '2.45.1'; Available = '2.47.0' }) -NoSource) -join "`n"
+    $r = @(ConvertFrom-WamTable $up)[0]
+    Assert-Equal "$($r.version)|$($r.available)|$($r.source)" '2.45.1|2.47.0|' 'Name Id Version Available'
+    $all = (Format-SimTable @(@{ Name = 'Git'; Id = 'Git.Git'; Version = '2.45.1'; Available = '2.47.0'; Source = 'winget' })) -join "`n"
+    $r = @(ConvertFrom-WamTable $all)[0]
+    Assert-Equal "$($r.version)|$($r.available)|$($r.source)" '2.45.1|2.47.0|winget' 'Name Id Version Available Source'
+    $list = (Format-SimTable @(@{ Name = 'Git'; Id = 'Git.Git'; Version = '2.47.0'; Source = 'winget' }) -NoAvailable) -join "`n"
+    $r = @(ConvertFrom-WamTable $list)[0]
+    Assert-Equal "$($r.version)|$($r.available)|$($r.source)" '2.47.0||winget' 'Name Id Version Source'
+    $bare = (Format-SimTable @(@{ Name = 'Git'; Id = 'Git.Git'; Version = '2.47.0' }) -NoAvailable -NoSource) -join "`n"
+    $r = @(ConvertFrom-WamTable $bare)[0]
+    Assert-Equal "$($r.version)|$($r.available)|$($r.source)" '2.47.0||' 'Name Id Version'
+}
+
+$tests['another display language: Version, Available and Source are told apart by content, never by count'] = {
+    $five = "Name Id      Version Verfuegbar Quelle`n------------------------------------`nGit  Git.Git 2.45.1  2.47.0     winget"
+    $r = @(ConvertFrom-WamTable $five)[0]
+    Assert-Equal "$($r.id)|$($r.version)|$($r.available)|$($r.source)" 'Git.Git|2.45.1|2.47.0|winget' 'five columns'
+    $four = "Nom Identifiant Version Disponible`n----------------------------------`nGit Git.Git     2.45.1  2.47.0"
+    $r = @(ConvertFrom-WamTable $four)[0]
+    Assert-Equal "$($r.id)|$($r.version)|$($r.available)|$($r.source)" 'Git.Git|2.45.1|2.47.0|' 'four columns, the last one versions: Available'
+    $src = "Nom Identifiant Version Source`n------------------------------`nGit Git.Git     2.47.0  winget"
+    $r = @(ConvertFrom-WamTable $src)[0]
+    Assert-Equal "$($r.id)|$($r.version)|$($r.available)|$($r.source)" 'Git.Git|2.47.0||winget' 'four columns, the last one source names: Source'
+}
+
+$tests['wide characters, truncated names and identifiers, notes and summary lines'] = {
+    $cjk = [string]::new([char[]] @(0x5FAE, 0x4FE1)) + ' WeChat'
+    $rows = @(@{ Name = $cjk; Id = 'Tencent.WeChat'; Version = '3.9.12'; Available = '4.1.0' }, @{ Name = ('Microsoft Visual C++ 2015-2022 Redistrib' + [char]0x2026); Id = ('Microsoft.VCRedist.2015+' + [char]0x2026); Version = '14.51.36231.0'; Available = '14.51.36247.0' }, @{ Name = 'VLC media player'; Id = 'VideoLAN.VLC'; Version = '3.0.21'; Available = '3.0.24' })
+    $text = ((Format-SimTable $rows -NoSource) + @('3 upgrades available.', '1 package(s) have version numbers that cannot be determined. Use --include-unknown to see all results.')) -join "`r`n"
+    $p = Read-WamTable $text
+    Assert-Equal @($p.Rows).Count 3 "three rows, notes ignored: $(@($p.Problems) -join '; ')"
+    $w = @($p.Rows)[0]
+    Assert-Equal "$($w.name)|$($w.id)|$($w.version)|$($w.available)" "$cjk|Tencent.WeChat|3.9.12|4.1.0" 'columns after two-cell characters'
+    Assert-True @($p.Rows)[1].truncated 'shortened identifier marked'
+    Assert-Equal @($p.Rows)[2].available '3.0.24' 'row after a shortened one'
+    # A shortened identifier matching two installed packages is not resolved, and not eligible.
+    $S = Reset-Sim -Installed @{ 'Microsoft.VCRedist.2015+.x64' = '14.51.36231.0'; 'Microsoft.VCRedist.2015+.x86' = '14.51.36231.0'; 'VideoLAN.VLC' = '3.0.21'; 'Tencent.WeChat' = '3.9.12' }
+    Start-WamInventory $S
+    Invoke-Pump $S
+    $S.UpdateCheckId = 'c'
+    Complete-WamUpdates $S @{ source = 'winget' } @{ ExitCode = 0; Output = $text }
+    $vc = @($S.Updates.items | Where-Object { $_.truncated })[0]
+    Assert-True ($vc -and -not $vc.eligible) 'ambiguous shortened identifier not eligible'
+    Assert-True (@($S.Updates.items | Where-Object { $_.id -eq 'Tencent.WeChat' })[0].eligible) 'WeChat eligible'
+}
+
+$tests['unreadable output is reported as such: nothing eligible, the raw output kept'] = {
+    $S = Reset-Sim -Installed @{ 'Git.Git' = '2.45.1' }
+    Start-WamInventory $S
+    Invoke-Pump $S
+    $S.UpdateCheckId = 'c'
+    # A layout where the version column holds source names (what the first agent produced).
+    $bad = "Name Id      Version Available`n-----------------------------`nGit  Git.Git 2.45.1  winget"
+    Complete-WamUpdates $S @{ source = 'winget' } @{ ExitCode = 0; Output = $bad }
+    Assert-Equal $S.Updates.status 'parseError' 'status'
+    Assert-True ($S.Updates.note -match 'could not be read reliably') 'explained'
+    Assert-True (-not @($S.Updates.items | Where-Object { $_.eligible }).Count) 'nothing eligible'
+    Assert-True (@($S.Updates.problems).Count -ge 1) 'problems listed'
+    # A table whose rows cannot be read at all.
+    Complete-WamUpdates $S @{ source = 'winget' } @{ ExitCode = 0; Output = "Name Id Version Available`n--------------------------`nthis is not a row of the table at all" }
+    Assert-Equal $S.Updates.status 'parseError' 'table without readable rows'
+    Assert-True ([IO.File]::ReadAllText((Join-Path $S.Paths.Logs 'last-update-check-winget.txt')) -match 'not a row') 'raw output kept'
+}
+
+$tests['eligibility needs the exact identifier in WinGet''s installed list; WinGet''s own package is never updated in bulk'] = {
+    $inst = @{ 'git.git' = $true; 'microsoft.appinstaller' = $true }
+    $row = { param($id) @{ id = $id; version = '1.0'; available = '2.0'; truncated = $false; explicit = $false; source = 'winget'; problem = '' } }
+    Assert-Equal (Get-WamEligibility (& $row 'Git.Git') @{} $inst) '' 'installed and verified'
+    Assert-True (Get-WamEligibility (& $row 'Other.App') @{} $inst) 'not in the installed list'
+    Assert-True ((Get-WamEligibility (& $row 'Git.Git') @{} $null) -match 'scanned') 'no inventory yet'
+    Assert-True ((Get-WamEligibility (& $row 'Microsoft.AppInstaller') @{} $inst) -match 'WinGet') 'App Installer on its own'
+    Assert-True (Get-WamEligibility (& $row 'ARP\Machine\X64\Foo') @{} $inst) 'not a package identifier'
+}
+
+$tests['caches from the first parser are not shown; caches from this one are'] = {
+    $paths = Get-WamPaths (Join-Path $script:Temp ("cache-" + [Guid]::NewGuid().ToString('N')))
+    Initialize-WamStore $paths
+    Write-WddJson $paths.Updates @{ checkedUtc = 'x'; status = 'ok'; items = @(@{ id = '7zip.7zip'; installed = '25.01'; available = ''; source = '26.05' }) }
+    Write-WddJson $paths.Inventory @{ scannedUtc = 'x'; packages = @(); programs = @() }
+    $S = New-WamState $paths
+    Assert-True ($null -eq $S.Updates -and $null -eq $S.Inventory) 'old caches ignored'
+    Write-WddJson $paths.Updates @{ parser = $script:WamParser; checkedUtc = 'x'; status = 'ok'; items = @() }
+    Assert-True ($null -ne (New-WamState $paths).Updates) 'current cache read'
+}
+
+$tests['inventory: export and list are published together; programs are linked to packages by "winget list"'] = {
+    $S = Reset-Sim -Installed @{ '7zip.7zip' = '25.01'; 'Git.Git' = '2.47.1' } -Names @{ '7zip.7zip' = '7-Zip 25.01 (x64)' } -Programs @(@{ displayName = '7-Zip 25.01 (x64)'; displayVersion = '25.01'; publisher = 'Igor Pavlov'; scope = 'machine' }, @{ displayName = 'Contoso Field Tool'; displayVersion = '4.1'; publisher = 'Contoso'; scope = 'user' })
+    $old = [ordered]@{ parser = $script:WamParser; scannedUtc = 'earlier'; packages = @(); programs = @(); listed = @(); listing = 'ok'; method = 'winget export'; note = '' }
+    $S.Inventory = $old
+    Start-WamInventory $S
+    for ($i = 0; $i -lt 3; $i++) { Step-WamQueue $S }
+    Assert-True ([object]::ReferenceEquals($S.Inventory, $old)) 'the previous inventory stays until the new one is complete'
+    Assert-True ((Get-WamPublicState $S).scanning) 'scanning is shown'
+    Invoke-Pump $S
+    Assert-Equal $S.Inventory.listing 'ok' 'listed'
+    Assert-Equal @($S.Inventory.packages).Count 2 'packages'
+    Assert-Equal @($S.Inventory.programs).Count 2 'programs'
+    $l = @($S.Inventory.listed)
+    Assert-Equal (@($l | Where-Object { $_.id -eq '7zip.7zip' })[0].name) '7-Zip 25.01 (x64)' 'name linked to the identifier'
+    Assert-True (@($l | Where-Object { $_.name -eq 'Contoso Field Tool' -and -not $_.source }).Count) 'a program WinGet does not match has no source'
+    Assert-True (-not (Get-WamPublicState $S).scanning) 'done'
+    Assert-True (@($script:Sim.Calls) -contains 'list --disable-interactivity') 'read-only list'
 }
 
 $tests['offline: update check reports the network, not missing packages; validation never says "removed"'] = {
@@ -549,6 +724,9 @@ if ($Out) {
         $cases += , @{ action = $c[0]; id = $c[1]; source = $c[2]; scope = $c[3]; version = $c[4]; acceptPackageAgreements = $c[5]; acceptSourceAgreements = $c[6]; args = (Get-WamArguments $c[0] $c[1] $c[2] $c[3] $c[4] -AcceptPackageAgreements:$c[5] -AcceptSourceAgreements:$c[6]) }
     }
     [IO.File]::WriteAllText((Join-Path $Out 'args.json'), (ConvertTo-Json @($cases) -Depth 4), (New-Object Text.UTF8Encoding($false)))
+    $vc = @(@('25.01', '26.05'), @('3.0.21', '3.0.24'), @('155.0.8059.86', '156.0.8078.48'), @('4.4.3', '4.6.9'), @('7.1.9 (48550)', '7.2.1 (48556)'), @('1.3.4.258.gc60b10b0946a', '1.3.6.1921.g7086c071a617'), @('0.4.20+1', '0.4.26+4'), @('18.4-2', '18.6-5'), @('10.0', '9.9'), @('1.0', '1.0.0'), @('150-93', '150-97'), @('2.0b', '2.0a'), @('1.2.3', '1.2.3.1'), @('12345678901234567890', '12345678901234567891'))
+    [IO.File]::WriteAllText((Join-Path $Out 'versions.json'), (ConvertTo-Json @($vc | ForEach-Object { , @($_[0], $_[1], (Compare-WamVersion $_[0] $_[1])) }) -Depth 3), (New-Object Text.UTF8Encoding($false)))
+    [IO.File]::WriteAllText((Join-Path $Out 'nobulk.json'), (ConvertTo-Json @($script:WamNoBulkUpdate)), (New-Object Text.UTF8Encoding($false)))
     [IO.File]::WriteAllText((Join-Path $Out 'protected.json'), (ConvertTo-Json @($script:WamProtected)), (New-Object Text.UTF8Encoding($false)))
 }
 

@@ -9,7 +9,7 @@ import { CATALOG, catalogEntryById, catalogRef, entryKey } from '../../src/engin
 import { addPackage, toggleProfile } from '../../src/engine/applications/profiles';
 import { resolveSelection } from '../../src/engine/applications/selection';
 import {
-  PROTECTED_PATTERNS, bulkRemovable, catalogPolicy, installPreview, matchInventory, queueReady, removalPolicy, removalPreview, summarize, uncataloged, validSpec, wingetArguments,
+  NO_BULK_UPDATE, PROTECTED_PATTERNS, bulkRemovable, compareVersions, catalogPolicy, installPreview, matchInventory, queueReady, removalPolicy, removalPreview, summarize, uncataloged, validSpec, wingetArguments,
   type Inventory, type OperationRecord, type Updates,
 } from '../../src/engine/manager';
 import { profile } from './helpers';
@@ -167,6 +167,12 @@ describe.skipIf(!onWindows)('Application Manager agent (PowerShell, simulated Wi
       for (const c of cases) expect(wingetArguments(c.action, c.id, c.source, c), `${c.action} ${c.id}`).toEqual(c.args);
       const prot = JSON.parse(strip(readFileSync(join(dir, 'protected.json'), 'utf8'))) as string[];
       expect(prot.map((p) => new RegExp(p, 'i').source)).toEqual(PROTECTED_PATTERNS.map((r) => r.source));
+      // Phase 10 fix: the page's second check of updates uses the agent's version order and bulk exclusions.
+      const versions = JSON.parse(strip(readFileSync(join(dir, 'versions.json'), 'utf8'))) as [string, string, number][];
+      expect(versions.length).toBe(14);
+      for (const [a, b, r] of versions) expect(compareVersions(a, b), `${a} vs ${b}`).toBe(r);
+      const nobulk = JSON.parse(strip(readFileSync(join(dir, 'nobulk.json'), 'utf8'))) as string[];
+      expect(nobulk.map((p) => new RegExp(p, 'i').source)).toEqual(NO_BULK_UPDATE.map((r) => r.source));
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

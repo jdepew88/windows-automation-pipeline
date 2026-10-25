@@ -172,3 +172,6 @@ body.mgr-body {
   .mgr-table tr { padding: 8px 0; border-top: 1px solid var(--border); }
   .mgr-table td { border: 0; padding: 2px 0; }
 }
+
+.mgr-seg { display: flex; flex-wrap: wrap; gap: 6px; }
+.mgr-seg .btn[aria-pressed='true'] { border-color: var(--accent); background: var(--accent-soft); color: var(--text); }

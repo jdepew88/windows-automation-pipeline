@@ -16,7 +16,7 @@ import type { PlannedPackage } from '../applications/selection';
  */
 
 export const MANAGER_NAME = 'Windows Deployment — Application Manager';
-export const MANAGER_VERSION = '1.0.0';
+export const MANAGER_VERSION = '1.0.1';
 export const POLICY_FORMAT = 'windows-deployment-builder/app-manager-policy';
 export const HISTORY_FORMAT = 'windows-deployment-builder/app-manager-operation';
 export const MANAGER_PROFILES_FORMAT = 'windows-deployment-builder/app-manager-selection';
@@ -65,14 +65,27 @@ export function catalogPolicy(entries: readonly CatalogEntry[] = CATALOG) {
 
 export interface InventoryPackage { id: string; version: string; source: string }
 export interface InventoryProgram { name: string; version: string; publisher: string; scope: string }
-export interface Inventory { scannedUtc: string; method: string; note: string; packages: InventoryPackage[]; programs: InventoryProgram[] }
+/** A row of "winget list": what WinGet reports as installed, with the name Windows shows. Source is empty for programs WinGet does not match to a package. */
+export interface ListedProgram { name: string; id: string; version: string; source: string; truncated: boolean }
+export interface Inventory {
+  scannedUtc: string;
+  method: string;
+  note: string;
+  packages: InventoryPackage[];
+  programs: InventoryProgram[];
+  /** Absent in inventories from before the Phase 10 fix. */
+  listed?: ListedProgram[];
+  listing?: 'ok' | 'failed' | 'pending';
+}
 
 export interface UpdateItem {
   id: string; name: string; installed: string; available: string; source: string;
   eligible: boolean; reason: string; explicit: boolean; truncated: boolean;
+  /** Set by the agent when the row could not be read reliably (absent in older agents). */
+  problem?: string;
 }
-export type CheckStatus = 'ok' | 'networkUnavailable' | 'sourceUnavailable';
-export interface Updates { checkedUtc: string; finishedUtc: string; status: CheckStatus; exitCode: string; items: UpdateItem[]; note: string }
+export type CheckStatus = 'ok' | 'networkUnavailable' | 'sourceUnavailable' | 'parseError';
+export interface Updates { checkedUtc: string; finishedUtc: string; status: CheckStatus; exitCode: string; items: UpdateItem[]; note: string; problems?: string[] }
 
 export type Availability = 'checking' | 'available' | 'notFound' | 'networkUnavailable' | 'sourceUnavailable' | 'agreementRequired' | 'invalid';
 export interface ValidationResult { status: Availability; version?: string; agreements?: boolean; exitCode?: string; detail: string }
@@ -91,6 +104,9 @@ export interface AgentState {
   settings: { dryRun: boolean; forcedDryRun: boolean; acceptSourceAgreements: boolean };
   busy: boolean;
   running: string;
+  /** An inventory scan or update check is queued or running (the last result stays shown meanwhile). */
+  scanning?: boolean;
+  checking?: boolean;
   inventory: Inventory | null;
   updates: Updates | null;
   validation: Record<string, ValidationResult>;
@@ -372,4 +388,179 @@ export function summarize(records: readonly OperationRecord[]) {
     if (r.restartRequired) c.restart = true;
   }
   return c;
+}
+
+// ------------------------------------------------------------------------------------------------
+// Updates: a second check of what the agent reports (Phase 10 fix)
+// ------------------------------------------------------------------------------------------------
+
+const SOURCES = ['winget', 'msstore'];
+/** Never updated in bulk (same list as $script:WamNoBulkUpdate): WinGet's own package. */
+export const NO_BULK_UPDATE: readonly RegExp[] = [/^Microsoft\.AppInstaller$/i, /^Microsoft\.DesktopAppInstaller$/i];
+
+/** Compare-WamVersion: numeric parts as numbers, other parts as case-insensitive text; missing parts are 0. */
+export function compareVersions(a: string, b: string): number {
+  const x = a.split(/[^0-9A-Za-z]+/).filter(Boolean);
+  const y = b.split(/[^0-9A-Za-z]+/).filter(Boolean);
+  for (let i = 0; i < Math.max(x.length, y.length); i++) {
+    const p = x[i] ?? '0';
+    const q = y[i] ?? '0';
+    if (/^\d+$/.test(p) && /^\d+$/.test(q)) {
+      const d = BigInt(p) - BigInt(q);
+      if (d !== 0n) return d > 0n ? 1 : -1;
+    } else {
+      const l = p.toLowerCase();
+      const r = q.toLowerCase();
+      if (l !== r) return l > r ? 1 : -1;
+    }
+  }
+  return 0;
+}
+
+/**
+ * Whether a listed update is consistent ('' when it is). The page refuses a row whose values cannot
+ * be right (an available version that is a source name, a source that is a version, a missing
+ * version), whatever the agent says: the defect fixed here showed every available version in the
+ * Source column.
+ */
+export function updateIssue(u: UpdateItem): string {
+  if (u.problem) return `WinGet's output for this package could not be read reliably (${u.problem}).`;
+  if (!u.installed) return 'No installed version was read.';
+  if (SOURCES.includes(u.available.toLowerCase())) return `"${u.available}" was read as a version.`;
+  if (u.source && !SOURCES.includes(u.source.toLowerCase())) return `"${u.source}" was read as a source.`;
+  return '';
+}
+
+/** "Update all eligible" takes a package only when the agent and these rules both allow it. */
+export function bulkEligible(u: UpdateItem): boolean {
+  return (
+    u.eligible && !updateIssue(u) && !u.truncated && !u.explicit && !!u.available && !/^(unknown|<)/i.test(u.installed) &&
+    compareVersions(u.available, u.installed) > 0 && !NO_BULK_UPDATE.some((r) => r.test(u.id)) && (WINGET_ID.test(u.id) || STORE_ID.test(u.id))
+  );
+}
+
+/** Why a package is not in "Update all eligible" (this page's check first, then the agent's reason). */
+export function updateReason(u: UpdateItem): string {
+  if (bulkEligible(u)) return '';
+  return updateIssue(u) || u.reason || 'Not consistent with the rules for bulk updates; update it individually.';
+}
+
+// ------------------------------------------------------------------------------------------------
+// Installed applications: catalog, other WinGet packages, other programs (Phase 10 fix)
+// ------------------------------------------------------------------------------------------------
+
+export type InstalledKind = 'catalog' | 'winget' | 'other';
+
+export interface InstalledRow {
+  key: string;
+  kind: InstalledKind;
+  name: string;
+  version: string;
+  publisher: string;
+  /** The exact WinGet identifier ('' for programs WinGet does not match to a package). */
+  id: string;
+  source: string;
+  /** How the program was found. */
+  origin: string;
+  catalogId?: string;
+  match?: Match;
+}
+
+export interface InstalledView {
+  rows: InstalledRow[];
+  counts: Record<InstalledKind | 'total', number>;
+  /** Windows programs could be linked to WinGet packages ("winget list" was read). */
+  linked: boolean;
+}
+
+export const INSTALLED_KIND_LABELS: Record<InstalledKind, string> = {
+  catalog: 'In the catalog',
+  winget: 'Other WinGet package',
+  other: 'Other program (not a WinGet package)',
+};
+
+const ELLIPSIS = String.fromCharCode(0x2026);
+
+/**
+ * Everything the inventory found, once each:
+ *   - catalog applications WinGet reports as installed (or, uncertain, found by their Apps & Features name);
+ *   - other packages WinGet reports as installed, by their exact identifier;
+ *   - every other program Windows lists (uninstall records, MSIX packages WinGet does not match).
+ * A Windows program is the same as a WinGet package when "winget list" shows that package under the
+ * program's name; it is then listed once, with the package. Nothing is dropped, and nothing outside
+ * WinGet is presented as manageable through it.
+ */
+export function installedView(inv: Inventory | null, matches: Map<string, Match>, entries: readonly CatalogEntry[] = CATALOG): InstalledView {
+  const counts = { catalog: 0, winget: 0, other: 0, total: 0 };
+  if (!inv) return { rows: [], counts, linked: false };
+  const pkgs = new Map(inv.packages.map((p) => [lower(p.id), p]));
+  // Names Windows shows for WinGet packages, from "winget list" (truncated names match by prefix).
+  const nameToId = new Map<string, string>();
+  const prefixes: { prefix: string; id: string }[] = [];
+  const pkgName = new Map<string, string>();
+  for (const l of inv.listed ?? []) {
+    if (!SOURCES.includes(lower(l.source))) continue;
+    let id = lower(l.id);
+    if (id.endsWith(ELLIPSIS)) {
+      const pre = id.slice(0, -1);
+      const hits = [...pkgs.keys()].filter((k) => k.startsWith(pre));
+      if (hits.length !== 1) continue;
+      id = hits[0]!;
+    }
+    if (!pkgs.has(id)) continue;
+    const n = lower(l.name);
+    if (n.endsWith(ELLIPSIS)) prefixes.push({ prefix: n.slice(0, -1), id });
+    else nameToId.set(n, id);
+    if (!pkgName.has(id) && !n.endsWith(ELLIPSIS)) pkgName.set(id, l.name);
+  }
+  const rows: InstalledRow[] = [];
+  const byId = new Map<string, InstalledRow>();
+  const claimedNames = new Set<string>();
+  for (const e of entries) {
+    const m = matches.get(e.id);
+    if (!m || !['installed', 'updateAvailable', 'uncertain'].includes(m.state)) continue;
+    if (m.matchedBy === 'name') {
+      for (const n of e.detectNames ?? []) claimedNames.add(lower(n));
+      rows.push({ key: `catalog:${e.id}`, kind: 'catalog', name: e.displayName, version: m.version, publisher: e.publisher ?? '', id: '', source: 'Windows', origin: 'Found by its Apps & Features name, not by WinGet', catalogId: e.id, match: m });
+      continue;
+    }
+    const pkg = pkgs.get(lower(m.installedId));
+    const row: InstalledRow = { key: m.installedId, kind: 'catalog', name: e.displayName, version: m.version, publisher: e.publisher ?? '', id: m.installedId, source: pkg?.source ?? 'winget', origin: 'WinGet', catalogId: e.id, match: m };
+    rows.push(row);
+    byId.set(lower(m.installedId), row);
+  }
+  for (const p of inv.packages) {
+    if (byId.has(lower(p.id))) continue;
+    const row: InstalledRow = { key: p.id, kind: 'winget', name: pkgName.get(lower(p.id)) ?? p.id, version: p.version, publisher: '', id: p.id, source: p.source, origin: 'WinGet' };
+    rows.push(row);
+    byId.set(lower(p.id), row);
+  }
+  // Windows programs: once per name and version.
+  const seen = new Set<string>();
+  for (const prog of inv.programs) {
+    const n = lower(prog.name);
+    const k = `${n}|${lower(prog.version)}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    const id = nameToId.get(n) ?? prefixes.find((x) => n.startsWith(x.prefix))?.id;
+    const owner = id ? byId.get(id) : undefined;
+    if (owner) {
+      if (!owner.publisher) owner.publisher = prog.publisher;
+      continue;
+    }
+    if (claimedNames.has(n)) continue;
+    rows.push({ key: `program:${k}`, kind: 'other', name: prog.name, version: prog.version, publisher: prog.publisher, id: '', source: 'Windows', origin: `Windows uninstall record (${prog.scope || 'unknown scope'})` });
+  }
+  // MSIX packages WinGet lists but cannot match to a source (they have no uninstall record).
+  for (const l of inv.listed ?? []) {
+    if (l.source || !/^MSIX[\\/]/i.test(l.id)) continue;
+    const k = `msix:${lower(l.id)}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    rows.push({ key: k, kind: 'other', name: l.name, version: l.version, publisher: '', id: '', source: 'Windows', origin: 'MSIX package (not matched to a WinGet source)' });
+  }
+  rows.sort((a, b) => a.name.localeCompare(b.name, 'en', { sensitivity: 'base' }) || a.key.localeCompare(b.key));
+  for (const r of rows) counts[r.kind]++;
+  counts.total = rows.length;
+  return { rows, counts, linked: inv.listing === 'ok' };
 }

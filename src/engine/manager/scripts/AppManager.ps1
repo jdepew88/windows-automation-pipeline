@@ -52,7 +52,7 @@ if (-not (Get-Command ConvertFrom-WdaExitCode -ErrorAction SilentlyContinue)) { 
 if (-not (Get-Command Get-WdhUninstallEntries -ErrorAction SilentlyContinue)) { . (Join-Path $lib 'DeploymentHealth.ps1') -Mode Library }
 Set-StrictMode -Version 2.0
 
-$script:WamVersion = '1.0.0'
+$script:WamVersion = '1.0.1'
 $script:WamFormat = 'windows-deployment-builder/app-manager-operation'
 $script:WamActions = @('install', 'upgrade', 'uninstall')
 $script:WamSources = @('winget', 'msstore')
@@ -196,48 +196,129 @@ function Get-WamArguments {
 }
 
 <# The last state of each line (progress bars rewrite lines with carriage returns). #>
-function ConvertFrom-WamOutput { param([string] $Text) @(($Text -replace "`r`n", "`n") -split "`n" | ForEach-Object { ($_ -split "`r")[-1].TrimEnd() }) }
+function ConvertFrom-WamOutput { param([string] $Text) @(($Text -replace "`r`n", "`n") -split "`n" | ForEach-Object { ($_.TrimEnd("`r") -split "`r")[-1].TrimEnd() }) }
 
 <#
-    WinGet's tables (winget upgrade, winget list): columns are found from the header above the line
-    of dashes, so localized headers do not matter. The first table lists ordinary upgrades; a later
-    table lists packages WinGet upgrades only when named ("explicit"). Truncated identifiers end
-    with an ellipsis and are marked.
+    WinGet's tables (winget upgrade, winget list).
+
+    WinGet prints a header row, a line of dashes and one row per package, each column padded to its
+    width and separated by a space. The columns are NOT always the same:
+      winget upgrade                  Name Id Version Available Source
+      winget upgrade --source winget  Name Id Version Available          (no Source column)
+      winget list                     Name Id Version [Available] Source
+      winget list --source winget     Name Id Version [Available]
+    so a column is identified by its title (WinGet's English titles), never by how many columns
+    there are. When the titles are not WinGet's English ones (another display language), the first
+    three columns are Name, Id and Version, and a later column is Source only if every value in it
+    is a source name; any other is Available. (Phase 10 fix: the agent assigned columns by count and
+    read every available version of "winget upgrade --source winget" as the source.)
+
+    Columns are cut by console cells, as WinGet aligns them: East Asian wide characters take two
+    cells. A later table in "winget upgrade" lists the packages WinGet updates only when named
+    ("explicit"). Values cut short by WinGet end with an ellipsis and are marked truncated. Summary
+    and note lines end a table. Anything that cannot be read is reported, never guessed.
 #>
-function ConvertFrom-WamTable {
+$script:WamParser = 2
+$script:WamTitles = @{ name = 'name'; id = 'id'; version = 'version'; available = 'available'; source = 'source'; match = 'match' }
+# Characters that do not take exactly one console cell (wide, combining, zero-width, surrogates).
+$script:WamNotSingleCell = '[' + ((@(@(0x0300, 0x036F), @(0x200B, 0x200F), @(0x1100, 0x115F), @(0x2E80, 0x303E), @(0x3040, 0xA4CF), @(0xAC00, 0xD7A3), @(0xD800, 0xDFFF), @(0xF900, 0xFAFF), @(0xFE30, 0xFE4F), @(0xFF00, 0xFF60), @(0xFFE0, 0xFFE6)) | ForEach-Object { '\u{0:X4}-\u{1:X4}' -f $_[0], $_[1] }) -join '') + ']'
+
+function Get-WamCharWidth {
+    param([int] $C)
+    if (($C -ge 0x0300 -and $C -le 0x036F) -or ($C -ge 0x200B -and $C -le 0x200F) -or ($C -ge 0xDC00 -and $C -le 0xDFFF)) { return 0 }
+    if (($C -ge 0xD800 -and $C -le 0xDBFF) -or ($C -ge 0x1100 -and $C -le 0x115F) -or ($C -ge 0x2E80 -and $C -le 0x303E) -or ($C -ge 0x3040 -and $C -le 0xA4CF) -or ($C -ge 0xAC00 -and $C -le 0xD7A3) -or ($C -ge 0xF900 -and $C -le 0xFAFF) -or ($C -ge 0xFE30 -and $C -le 0xFE4F) -or ($C -ge 0xFF00 -and $C -le 0xFF60) -or ($C -ge 0xFFE0 -and $C -le 0xFFE6)) { return 2 }
+    return 1
+}
+
+<# The cell where each character of a line starts (one extra entry: the line's width). #>
+function Get-WamCells {
+    param([string] $Line)
+    $pos = New-Object int[] ($Line.Length + 1)
+    if ($Line -notmatch $script:WamNotSingleCell) { for ($i = 0; $i -le $Line.Length; $i++) { $pos[$i] = $i }; return , $pos }
+    $p = 0
+    for ($i = 0; $i -lt $Line.Length; $i++) { $pos[$i] = $p; $p += Get-WamCharWidth ([int] $Line[$i]) }
+    $pos[$Line.Length] = $p
+    return , $pos
+}
+
+<# The text between two cells ($To = -1: to the end of the line). #>
+function Get-WamSlice {
+    param([string] $Line, [int[]] $Pos, [int] $From, [int] $To)
+    $a = 0
+    while ($a -lt $Line.Length -and $Pos[$a] -lt $From) { $a++ }
+    $b = $a
+    while ($b -lt $Line.Length -and ($To -lt 0 -or $Pos[$b] -lt $To)) { $b++ }
+    return $Line.Substring($a, $b - $a).Trim()
+}
+
+<# The character that occupies a cell, or '' (beyond the line or inside a wide character). #>
+function Get-WamCellChar {
+    param([string] $Line, [int[]] $Pos, [int] $Cell)
+    for ($i = 0; $i -lt $Line.Length; $i++) { if ($Pos[$i] -eq $Cell) { return [string] $Line[$i] }; if ($Pos[$i] -gt $Cell) { return '' } }
+    return ''
+}
+
+<#
+    Reads every table in WinGet's output: @{ Rows; Problems; Tables }. Each row: name, id, version,
+    available, source, truncated, explicit, problem ('' when the row was read cleanly).
+#>
+function Read-WamTable {
     param([string] $Text)
     $lines = @(ConvertFrom-WamOutput $Text)
-    $rows = @()
+    $rows = New-Object System.Collections.Generic.List[object]
+    $problems = New-Object System.Collections.Generic.List[string]
     $table = 0
+    $ellipsis = [string][char]0x2026
     for ($i = 1; $i -lt $lines.Count; $i++) {
         if ($lines[$i] -notmatch '^-{10,}\s*$') { continue }
         $table++
         $head = $lines[$i - 1]
-        $starts = @(0)
-        # WinGet separates columns with at least one space; its column titles are single words.
-        for ($c = 1; $c -lt $head.Length; $c++) { if ($head[$c] -ne ' ' -and $head[$c - 1] -eq ' ') { $starts += $c } }
-        if ($starts.Count -lt 3) { continue }
+        $hp = Get-WamCells $head
+        $starts = New-Object System.Collections.Generic.List[int]
+        for ($c = 0; $c -lt $head.Length; $c++) { if ($head[$c] -ne ' ' -and ($c -eq 0 -or $head[$c - 1] -eq ' ')) { $starts.Add($hp[$c]) } }
+        if ($starts.Count -lt 3 -or $starts[0] -ne 0) { $problems.Add("table $table has an unreadable header: '$($head.Trim())'"); continue }
+        $titles = @(for ($k = 0; $k -lt $starts.Count; $k++) { Get-WamSlice $head $hp $starts[$k] $(if ($k + 1 -lt $starts.Count) { $starts[$k + 1] } else { -1 }) })
+        $cells = New-Object System.Collections.Generic.List[object]
         for ($j = $i + 1; $j -lt $lines.Count; $j++) {
             $l = $lines[$j]
             if (-not $l.Trim() -or $l -match '^-{10,}') { break }
-            if ($l.Length -le $starts[1]) { break }
-            # A row has a space before every column; a sentence running across the columns does not.
-            if (@($starts | Select-Object -Skip 1 | Where-Object { $_ -lt $l.Length -and $l[$_ - 1] -ne ' ' }).Count) { break }
-            $cols = @()
-            for ($k = 0; $k -lt $starts.Count; $k++) {
-                $from = $starts[$k]
-                $to = $(if ($k + 1 -lt $starts.Count) { $starts[$k + 1] } else { $l.Length })
-                $cols += $(if ($from -lt $l.Length) { $l.Substring($from, [Math]::Min($to, $l.Length) - $from).Trim() } else { '' })
+            $lp = Get-WamCells $l
+            $width = $lp[$l.Length]
+            if ($width -le $starts[1]) { break }
+            # A row has a space in the cell before every column it reaches; a sentence across the columns does not.
+            $isRow = $true
+            for ($k = 1; $k -lt $starts.Count; $k++) { if ($starts[$k] -lt $width -and (Get-WamCellChar $l $lp ($starts[$k] - 1)) -ne ' ') { $isRow = $false; break } }
+            if (-not $isRow) { break }
+            $vals = @(for ($k = 0; $k -lt $starts.Count; $k++) { Get-WamSlice $l $lp $starts[$k] $(if ($k + 1 -lt $starts.Count) { $starts[$k + 1] } else { -1 }) })
+            if (-not $vals[1] -or $vals[1] -match '\s') { break }
+            $cells.Add($vals)
+        }
+        # Column roles: WinGet's titles, or (another display language) position and content.
+        $roles = @($titles | ForEach-Object { $script:WamTitles[$_.ToLowerInvariant()] })
+        if (@($roles | Where-Object { -not $_ }).Count) {
+            $roles = @('name', 'id', 'version')
+            for ($k = 3; $k -lt $starts.Count; $k++) {
+                $values = @($cells | ForEach-Object { $_[$k] } | Where-Object { $_ })
+                $roles += $(if ($values.Count -and -not @($values | Where-Object { $_ -notin $script:WamSources }).Count) { 'source' } elseif ($roles -notcontains 'available') { 'available' } else { 'other' })
             }
-            $id = $cols[1]
-            # Summary lines ("3 upgrades available.") and notes end the table.
-            if (-not $id -or $id -match '\s') { break }
-            $rows += , @{ name = $cols[0]; id = $id; version = $(if ($cols.Count -gt 2) { $cols[2] } else { '' }); available = $(if ($cols.Count -gt 4) { $cols[3] } else { '' })
-                          source = $(if ($cols.Count -gt 4) { $cols[4] } elseif ($cols.Count -gt 3) { $cols[3] } else { '' }); truncated = ($id.EndsWith([string][char]0x2026) -or $cols[0].EndsWith([string][char]0x2026)); explicit = ($table -gt 1) }
+        }
+        if ($roles -notcontains 'id' -or $roles -notcontains 'version') { $problems.Add("table $table has no Id or Version column: '$($head.Trim())'"); continue }
+        foreach ($v in $cells) {
+            $r = @{ name = ''; id = ''; version = ''; available = ''; source = ''; explicit = ($table -gt 1); problem = '' }
+            for ($k = 0; $k -lt $roles.Count; $k++) { if ($roles[$k] -and $roles[$k] -ne 'match' -and $roles[$k] -ne 'other') { $r[$roles[$k]] = [string] $v[$k] } }
+            $r.truncated = ($r.id.EndsWith($ellipsis) -or $r.name.EndsWith($ellipsis))
+            if (-not $r.version) { $r.problem = 'no installed version in the row' }
+            elseif ($r.available -in $script:WamSources) { $r.problem = "'$($r.available)' was read as a version" }
+            elseif ($r.source -and $r.source -notin $script:WamSources) { $r.problem = "'$($r.source)' was read as a source" }
+            if ($r.problem) { $problems.Add("$($r.id): $($r.problem)") }
+            $rows.Add($r)
         }
     }
-    return $rows
+    return @{ Rows = $rows.ToArray(); Problems = $problems.ToArray(); Tables = $table }
 }
+
+<# The rows only (see Read-WamTable). #>
+function ConvertFrom-WamTable { param([string] $Text) (Read-WamTable $Text).Rows }
 
 function ConvertFrom-WamExport {
     param($Doc)
@@ -250,7 +331,7 @@ function ConvertFrom-WamExport {
     return $out
 }
 
-<# Version comparison for upgrade eligibility: numeric parts first; "Unknown" or "<" versions are never eligible. #>
+<# Version comparison for upgrade eligibility: numeric parts first; "Unknown" or "<" versions are never eligible. Mirrored by compareVersions in TypeScript. #>
 function Compare-WamVersion {
     param([string] $A, [string] $B)
     $x = @($A -split '[^0-9A-Za-z]+' | Where-Object { $_ }); $y = @($B -split '[^0-9A-Za-z]+' | Where-Object { $_ })
@@ -262,15 +343,29 @@ function Compare-WamVersion {
     return 0
 }
 
+# Never updated in bulk whatever WinGet lists: WinGet's own package (updating it ends the running WinGet).
+$script:WamNoBulkUpdate = @('^Microsoft\.AppInstaller$', '^Microsoft\.DesktopAppInstaller$')
+
+<#
+    Why a listed update is not eligible for "Update all eligible" ('' = eligible). Needs the package
+    identity verified (an exact identifier WinGet reports as installed), a known installed version, a
+    newer available version, and no policy against bulk updates. Mirrored by updateIssue in TypeScript.
+#>
 function Get-WamEligibility {
-    param($Row, [hashtable] $Policy)
+    param($Row, [hashtable] $Policy, $Installed = $null)
     $id = ([string] $Row.id).ToLowerInvariant()
+    $problem = $(if ($Row -is [System.Collections.IDictionary] -and $Row.Contains('problem')) { [string] $Row['problem'] } else { '' })
+    if ($problem) { return "WinGet's output for this package could not be read reliably ($problem); it is not updated from this list." }
     if ($Row.truncated) { return 'The identifier is shortened in WinGet''s output; update it individually after checking it.' }
-    if (-not $Row.version -or $Row.version -match '^(Unknown|<)' -or $Row.version.StartsWith('<')) { return 'The installed version is unknown to WinGet; it is never updated in bulk.' }
-    if (-not $Row.available) { return 'No newer version is listed.' }
+    if ([string] $Row.id -notmatch $script:WamWinGetId -and [string] $Row.id -notmatch $script:WamStoreId) { return 'Not a WinGet package identifier; use the program''s own updater.' }
+    if ($null -eq $Installed) { return 'Installed applications have not been scanned yet; scan, then check again.' }
+    if (-not $Installed.ContainsKey($id)) { return 'WinGet''s installed-package list does not include this identifier; update it individually after checking it.' }
+    if (-not $Row.version -or $Row.version -match '^(Unknown|<)') { return 'The installed version is unknown to WinGet; it is never updated in bulk.' }
+    if (-not $Row.available) { return 'WinGet lists no newer version.' }
     if ((Compare-WamVersion $Row.available $Row.version) -le 0) { return 'The listed version is not newer.' }
     if ($Row.explicit) { return 'The publisher asks for this package to be updated only on its own.' }
     if ($Policy.ContainsKey($id) -and [string] $Policy[$id]['upgrade'] -eq 'explicit') { return 'The publisher asks for this package to be updated only on its own.' }
+    foreach ($p in $script:WamNoBulkUpdate) { if ([string] $Row.id -match $p) { return 'WinGet''s own package: update it on its own, when nothing else is running.' } }
     if ([string] $Row.source -notin $script:WamSources) { return "Source '$($Row.source)' is not managed here." }
     return ''
 }
@@ -294,6 +389,13 @@ function Get-WamRemovalPolicy {
 # State, jobs and the operation queue (one WinGet process at a time)
 # ------------------------------------------------------------------------------------------------
 
+function Read-WamCache {
+    param([string] $Path)
+    $c = Read-WddJson $Path
+    if ($c -is [System.Collections.IDictionary] -and $c.ContainsKey('parser') -and [int] $c['parser'] -eq $script:WamParser) { return $c }
+    return $null
+}
+
 function New-WamState {
     param([hashtable] $Paths, [bool] $ForceDryRun = $false)
     $settings = Read-WamSettings $Paths
@@ -301,7 +403,8 @@ function New-WamState {
     @{
         Paths = $Paths; Settings = $settings; ForcedDryRun = $ForceDryRun; Policy = (Read-WamPolicy)
         Identity = (Get-WamIdentity); WinGet = ''; Started = (Get-WamNow).ToString('o')
-        Inventory = (Read-WddJson $Paths.Inventory); Updates = (Read-WddJson $Paths.Updates)
+        # Caches written by an older parser are not shown (the first agent misread "winget upgrade --source").
+        Inventory = (Read-WamCache $Paths.Inventory); Updates = (Read-WamCache $Paths.Updates); PendingInventory = $null
         Validation = @{}; Jobs = New-Object System.Collections.Generic.List[object]; Current = $null
         Batch = $null; Messages = New-Object System.Collections.Generic.List[string]; LastRequest = (Get-WamNow); Stop = $false
     }
@@ -355,8 +458,16 @@ function Start-WamInventory {
     if ($S.Settings.acceptSourceAgreements) { $a += '--accept-source-agreements' }
     $a += '--disable-interactivity'
     Add-WamJob $S @{ id = (New-WamId); kind = 'inventory'; handler = 'Inventory'; args = $a; exportFile = $exp }
+    # "winget list" (read-only) links the names Windows shows to WinGet identifiers.
+    $l = @('list')
+    if ($S.Settings.acceptSourceAgreements) { $l += '--accept-source-agreements' }
+    Add-WamJob $S @{ id = (New-WamId); kind = 'inventory'; handler = 'List'; args = @($l + '--disable-interactivity') }
 }
 
+<#
+    The inventory is built in two steps (export, then list) and published only when both are done,
+    so the page never sees a half-built list; until then it keeps showing the previous one.
+#>
 function Complete-WamInventory {
     param($S, $Job, $R)
     $pk = @()
@@ -368,7 +479,23 @@ function Complete-WamInventory {
         Remove-Item -LiteralPath $Job.exportFile -Force -ErrorAction SilentlyContinue
     } else { $note = "WinGet could not list the installed packages (exit code $(Format-WdaHResult $R.ExitCode)). Installed programs are listed from Windows only." ; $method = 'Windows only' }
     $reg = @(Get-WdhUninstallEntries $S.Identity.Sid | Where-Object { $_.displayName } | ForEach-Object { @{ name = [string] $_.displayName; version = [string] $_.displayVersion; publisher = [string] $_.publisher; scope = [string] $_.scope } })
-    $S.Inventory = [ordered]@{ scannedUtc = (Get-WamNow).ToString('o'); method = $method; note = $note; packages = $pk; programs = $reg }
+    $S.PendingInventory = [ordered]@{ parser = $script:WamParser; scannedUtc = (Get-WamNow).ToString('o'); method = $method; note = $note; packages = $pk; programs = $reg; listed = @(); listing = 'pending' }
+}
+
+function Complete-WamList {
+    param($S, $Job, $R)
+    $inv = $S.PendingInventory
+    if (-not $inv) { return }
+    $parsed = Read-WamTable $R.Output
+    if ($R.ExitCode -eq 0 -and $parsed.Tables -and @($parsed.Rows).Count) {
+        $inv.listed = @($parsed.Rows | ForEach-Object { [ordered]@{ name = $_.name; id = $_.id; version = $_.version; source = $_.source; truncated = [bool] $_.truncated } })
+        $inv.listing = 'ok'
+    } else {
+        $inv.listing = 'failed'
+        $inv.note = (("$($inv.note) " + "WinGet's list of installed programs could not be read (exit code $(Format-WdaHResult $R.ExitCode)), so programs from Windows are not linked to WinGet packages.").Trim())
+    }
+    $S.Inventory = $inv
+    $S.PendingInventory = $null
     Write-WddJson $S.Paths.Inventory $S.Inventory
 }
 
@@ -388,12 +515,18 @@ function Complete-WamSourceUpdate {
 function Complete-WamUpdates {
     param($S, $Job, $R)
     $src = $(if ($Job.ContainsKey('source')) { [string] $Job.source } else { 'winget' })
-    $rows = @(ConvertFrom-WamTable $R.Output)
+    $parsed = Read-WamTable $R.Output
+    $rows = @($parsed.Rows)
+    # The raw output of the last check is kept for diagnosis (WinGet prints no secrets here).
+    try { [IO.File]::WriteAllText((Join-Path $S.Paths.Logs "last-update-check-$src.txt"), [string] $R.Output, (New-Object Text.UTF8Encoding($false))) } catch { }
     $c = ConvertFrom-WdaExitCode $R.ExitCode
     $failed = $R.ExitCode -ne 0 -and -not $rows.Count
-    $status = $(if (-not $failed) { 'ok' } elseif ($c.Class -eq 'Network' -or -not (Test-WamOnline)) { 'networkUnavailable' } else { 'sourceUnavailable' })
+    # Output with a table that yields no readable rows, or rows read inconsistently, is reported, not guessed.
+    $unreadable = ($parsed.Tables -gt 0 -and -not $rows.Count) -or @($parsed.Problems).Count
+    $status = $(if ($failed) { if ($c.Class -eq 'Network' -or -not (Test-WamOnline)) { 'networkUnavailable' } else { 'sourceUnavailable' } } elseif ($unreadable) { 'parseError' } else { 'ok' })
     $known = @{}
-    if ($S.Inventory -and $S.Inventory['packages']) { foreach ($p in @($S.Inventory['packages'])) { $known[([string] $p['id']).ToLowerInvariant()] = [string] $p['id'] } }
+    $installed = $null
+    if ($S.Inventory -and $S.Inventory['packages']) { $installed = @{}; foreach ($p in @($S.Inventory['packages'])) { $known[([string] $p['id']).ToLowerInvariant()] = [string] $p['id']; $installed[([string] $p['id']).ToLowerInvariant()] = $true } }
     $items = @(foreach ($row in $rows) {
         if ($row.truncated) {
             $prefix = $row.id.TrimEnd([char]0x2026).ToLowerInvariant()
@@ -401,12 +534,17 @@ function Complete-WamUpdates {
             if ($m.Count -eq 1) { $row.id = $known[$m[0]]; $row.truncated = $false }
         }
         if (-not $row.source) { $row.source = $src }
-        $why = Get-WamEligibility $row $S.Policy
-        [ordered]@{ id = $row.id; name = $row.name; installed = $row.version; available = $row.available; source = $row.source; eligible = (-not $why); reason = $why; explicit = [bool] $row.explicit; truncated = [bool] $row.truncated }
+        $why = Get-WamEligibility $row $S.Policy $installed
+        [ordered]@{ id = $row.id; name = $row.name; installed = $row.version; available = $row.available; source = $row.source; eligible = (-not $why); reason = $why; explicit = [bool] $row.explicit; truncated = [bool] $row.truncated; problem = [string] $row.problem }
     })
     $prev = $(if ($S.Updates -and $S.Updates['checkedUtc'] -eq $S.UpdateCheckId) { @($S.Updates['items']) } else { @() })
-    $S.Updates = [ordered]@{ checkedUtc = $S.UpdateCheckId; finishedUtc = (Get-WamNow).ToString('o'); status = $status; exitCode = (Format-WdaHResult $R.ExitCode); items = @(@($prev | Where-Object { $_['source'] -ne $src }) + $items)
-                             note = $(switch ($status) { 'networkUnavailable' { 'No network: updates cannot be checked now. Installed applications are not affected.' } 'sourceUnavailable' { "The $src source could not be read now. This does not mean any package was removed from it." } default { '' } }) }
+    $S.Updates = [ordered]@{ parser = $script:WamParser; checkedUtc = $S.UpdateCheckId; finishedUtc = (Get-WamNow).ToString('o'); status = $status; exitCode = (Format-WdaHResult $R.ExitCode); items = @(@($prev | Where-Object { $_['source'] -ne $src }) + $items)
+                             problems = @($parsed.Problems | Select-Object -First 20)
+                             note = $(switch ($status) {
+                                 'networkUnavailable' { 'No network: updates cannot be checked now. Installed applications are not affected.' }
+                                 'sourceUnavailable' { "The $src source could not be read now. This does not mean any package was removed from it." }
+                                 'parseError' { "WinGet's output could not be read reliably, so nothing from it is eligible for updating. The raw output is in last-update-check-$src.txt in the manager's logs folder." }
+                                 default { '' } }) }
     Write-WddJson $S.Paths.Updates $S.Updates
 }
 
@@ -644,6 +782,9 @@ function Get-WamPublicState {
         settings = [ordered]@{ dryRun = [bool] $S.Settings.dryRun; forcedDryRun = [bool] $S.ForcedDryRun; acceptSourceAgreements = [bool] $S.Settings.acceptSourceAgreements }
         busy = [bool] (@($S.Jobs | Where-Object { $_.state -ne 'Done' }).Count)
         running = $(if ($S.Current) { [string] $S.Current.kind } else { '' })
+        # Queued or running, so the page can say "scanning" while it keeps showing the last result.
+        scanning = [bool] (@($S.Jobs | Where-Object { $_.state -ne 'Done' -and $_.kind -eq 'inventory' }).Count)
+        checking = [bool] (@($S.Jobs | Where-Object { $_.state -ne 'Done' -and $_.kind -in 'sourceUpdate', 'updates' }).Count)
         inventory = $S.Inventory; updates = $S.Updates; validation = $S.Validation
         batch = $(if ($S.Batch) { [ordered]@{ id = $S.Batch.id; action = $S.Batch.action; dryRun = $S.Batch.dryRun; startedUtc = $S.Batch.startedUtc; jobs = $jobs } } else { $null })
         messages = @($S.Messages | Select-Object -Last 10)
