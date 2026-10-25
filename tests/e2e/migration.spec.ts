@@ -128,14 +128,14 @@ test('import an inventory, review matches, confirm a guess, and save a named pro
   await expect(page.getByTestId('mig-create')).toBeEnabled();
   await row('Contoso Field Tool').getByTestId('mig-decision').selectOption('manual');
   await expect(page.getByTestId('mig-base')).toHaveValue('network-engineer');
-  await page.getByTestId('mig-profile-name').fill('Personal Workstation');
+  await page.getByTestId('mig-profile-name').fill('Alex Workstation');
   await page.getByTestId('mig-create').click();
-  await expect(page.getByTestId('mig-review-status')).toContainText('Created profile "Personal Workstation" and ticked it');
+  await expect(page.getByTestId('mig-review-status')).toContainText('Created profile "Alex Workstation" and ticked it');
   await expect(page.getByTestId('mig-review-status')).toContainText('The base profile itself is unchanged.');
   await expect(page.getByTestId('mig-followups')).toContainText('nvm-windows');
   await expect(page.locator('input[name="migration.enabled"]')).toBeChecked();
   await go(page, 'section-applications');
-  await expect(page.locator('[data-profile]').filter({ hasText: 'Personal Workstation' })).toBeVisible();
+  await expect(page.locator('[data-profile]').filter({ hasText: 'Alex Workstation' })).toBeVisible();
   await expect(page.locator('input[name="applications.profile.network-engineer"]')).not.toBeChecked();
   await go(page, 'section-additionalSoftware');
   await expect(page.locator('[data-additional-index]').filter({ hasText: 'Contoso Field Tool' })).toBeVisible();

@@ -270,14 +270,17 @@ const appBox = (page: Page, id: string) => page.locator(`[data-app="${id}"] inpu
 const showAll = (page: Page) => page.getByTestId('app-filter').locator('[data-filter="all"]').click();
 const planIds = async (page: Page) => page.getByTestId('app-order').locator('li[data-package]').evaluateAll((els) => els.map((e) => e.getAttribute('data-package')));
 
-test('application provisioning: Core Essentials by default; RustDesk is an honest manual follow-up', async ({ page }) => {
+test('application provisioning: Core Essentials by default; RustDesk is recommended and, when ticked, an honest manual follow-up', async ({ page }) => {
   await setName(page, 'Alex');
   await go(page, 'applications');
   await expect(checkbox(page, 'applications.enabled')).toBeChecked();
   await expect(checkbox(page, 'applications.profile.core')).toBeChecked();
   for (const id of ['everyday', 'gaming', 'developer', 'network-engineer', 'music', 'laptop', 'touch']) await expect(checkbox(page, `applications.profile.${id}`)).not.toBeChecked();
-  await expect(page.getByTestId('app-count')).toHaveText('7 to install, 1 manual');
+  await expect(page.getByTestId('app-count')).toHaveText('7 to install');
   for (const id of ['chrome', 'vlc', '7zip', 'teracopy', 'bitwarden', 'vcredist-x64', 'vcredist-x86']) await expect(appBox(page, id)).toBeChecked();
+  await expect(appBox(page, 'rustdesk')).not.toBeChecked();
+  await appBox(page, 'rustdesk').check();
+  await expect(page.getByTestId('app-count')).toHaveText('7 to install, 1 manual');
   await expect(page.locator('[data-app="rustdesk"]')).toContainText('Manual follow-up');
   await expect(page.getByTestId('app-manual-list')).toContainText('RustDesk');
   await expect(page.getByTestId('summary')).toContainText('7 package(s) via WinGet from Core Essentials, 1 manual follow-up');
@@ -310,7 +313,7 @@ test('quick start: Gaming, untick a launcher, add a PDF reader, download the USB
   expect(cfg.packages.map((p: { packageIdentifier: string }) => p.packageIdentifier)).toEqual(expect.arrayContaining(['Valve.Steam', 'Adobe.Acrobat.Reader.64-bit', 'Google.Chrome']));
   expect(cfg.packages.map((p: { packageIdentifier: string }) => p.packageIdentifier)).not.toContain('EpicGames.EpicGamesLauncher');
   expect(cfg.deselected.map((p: { packageIdentifier: string }) => p.packageIdentifier)).toEqual(['EpicGames.EpicGamesLauncher']);
-  expect(cfg.manual.map((m: { key: string }) => m.key)).toEqual(['catalog:rustdesk']);
+  expect(cfg.manual).toEqual([]);
   expect(cfg.packages.map((p: { key: string }) => p.key)).toEqual(ids);
 });
 
@@ -431,7 +434,7 @@ test('application provisioning: WinGet import adds a profile without overwriting
   await expect(checkbox(page, 'applications.profile.imported-office')).toBeChecked();
   await expect(checkbox(page, 'applications.profile.core')).toBeChecked();
   // Git is new; VLC was already in Core Essentials and is installed once.
-  await expect(page.getByTestId('app-count')).toHaveText('8 to install, 1 manual');
+  await expect(page.getByTestId('app-count')).toHaveText('8 to install');
 
   const [dl] = await Promise.all([page.waitForEvent('download'), page.locator('[data-action="app-export-winget"]').click()]);
   expect(dl.suggestedFilename()).toBe('winget-packages.json');
@@ -444,7 +447,7 @@ test('application provisioning: WinGet import adds a profile without overwriting
 
   await page.getByTestId('app-import-input').setInputFiles({ name: 'evil.json', mimeType: 'application/json', buffer: Buffer.from('{"Sources":[{"SourceDetails":{"Name":"winget"},"Packages":[]}]}') });
   await expect(page.getByTestId('app-import-status')).toContainText('Could not import evil.json');
-  await expect(page.getByTestId('app-count')).toHaveText('8 to install, 1 manual');
+  await expect(page.getByTestId('app-count')).toHaveText('8 to install');
 });
 
 test('application provisioning (Advanced): package IDs, install order with dependencies, custom IDs, policies and validation', async ({ page }) => {

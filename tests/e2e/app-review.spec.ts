@@ -102,14 +102,13 @@ test.describe('Quick Deployment: profile previews', () => {
     const all = await names(combined);
     expect(all.filter((n) => n === 'Git')).toHaveLength(1);
     expect(new Set(all).size).toBe(all.length);
-    // Core Essentials + Gaming + Network Engineer (incl. Developer and WSL); RustDesk is manual.
-    await expect(combined).toHaveAttribute('data-total', String(8 + 2 + 29));
-    await expect(wiz(page).getByTestId('wiz-combined-manual')).toContainText('RustDesk');
-    await expect(wiz(page).getByTestId('wiz-combined-auto')).not.toContainText('RustDesk');
+    // Core Essentials + Gaming + Network Engineer (incl. Developer and WSL). RustDesk is only recommended (Phase 10).
+    await expect(combined).toHaveAttribute('data-total', String(7 + 2 + 29));
+    await expect(combined).not.toContainText('RustDesk');
     await expect(combined.locator('[data-key="winget:git.git"]')).toHaveAttribute('title', /General Developer, Network Engineer/);
     // Unticking a profile updates the combined view immediately.
     await card(page, 'gaming').locator('input').uncheck();
-    await expect(combined).toHaveAttribute('data-total', String(8 + 29));
+    await expect(combined).toHaveAttribute('data-total', String(7 + 29));
     await expect(combined).not.toContainText('Steam');
   });
 
@@ -163,18 +162,18 @@ test.describe('Quick Deployment: Final Review application summary', () => {
     await toReview(page);
     const s = summary(page);
     await expect(s).toBeVisible();
-    await expect(wiz(page).getByTestId('review-app-summary-count')).toHaveText('10 applications selected: 9 installed automatically, 1 manual follow-up.');
-    expect(await names(wiz(page).getByTestId('review-app-summary-manual'))).toEqual(['RustDesk']);
+    await expect(wiz(page).getByTestId('review-app-summary-count')).toHaveText('9 applications selected: 9 installed automatically.');
+    expect(await names(wiz(page).getByTestId('review-app-summary-manual'))).toEqual([]);
     const auto = await names(wiz(page).getByTestId('review-app-summary-auto'));
     expect(auto).toHaveLength(9);
     expect(auto).toEqual(expect.arrayContaining(['Google Chrome', 'Steam', 'Epic Games Launcher']));
     // Never the whole catalog: unselected apps are absent.
     expect(auto).not.toContain('Discord');
-    await expect(s.locator('.app-sum-item')).toHaveCount(10);
+    await expect(s.locator('.app-sum-item')).toHaveCount(9);
     await expect(wiz(page).locator('[data-testid="review-apps"] [data-action="review-edit"]')).toBeVisible();
     const cfg = await readConfig(page);
     expect(cfg.packages.map((x) => x.displayName).sort()).toEqual([...auto].sort());
-    expect(cfg.manual.map((x) => x.displayName)).toEqual(['RustDesk']);
+    expect(cfg.manual).toEqual([]);
   });
 
   test('changes made in Advanced reach the summary through the shared selection', async ({ page }) => {

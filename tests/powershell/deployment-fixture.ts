@@ -15,7 +15,8 @@ import { importDriverBundleManifest } from '../../src/engine/drivers';
 /**
  * Builds the fixture Deployment.Tests.ps1 runs against: the real deployment ZIP produced by the
  * generator, extracted into <dir>\usb exactly as a user would put it on a USB drive. The profile
- * is owner defaults (Windows Update on, Core Essentials, which includes the manual RustDesk entry)
+ * is owner defaults (Windows Update on, Core Essentials) plus the manual RustDesk entry (optional in
+ * Core Essentials since Phase 10)
  * plus an iPhone (Apple Devices from the Microsoft Store), the portable Rufus, Git, and a test-only
  * identifier with a non-ASCII name (exercises the code-page path of the answer-file extraction).
  * So the package carries every installation method: WinGet, Store, portable and manual.
@@ -28,6 +29,7 @@ export function writeDeploymentFixture(dir: string): { packageId: string; files:
   p.drivers.enabled = false;
   p.applications.selection.devices.phone = 'iphone';
   p.applications.selection.added.push(catalogRef(catalogEntryById('rufus')!)!);
+  p.applications.selection.added.push(catalogRef(catalogEntryById('rustdesk')!)!);
   p.applications.selection.added.push(
     { packageIdentifier: 'Git.Git', source: 'winget', displayName: 'Git', version: '', scope: '' },
     // Test-only identifier (not in the catalog) so the non-ASCII display name reaches the engine config.
@@ -52,15 +54,14 @@ export function writeDeploymentFixture(dir: string): { packageId: string; files:
 
 /**
  * Phase 9 fixture (<dir>/health): a new deployment as the owner defaults make it (account "owner",
- * Windows Update, the driver stage and verification on), Core Essentials without its manual
- * RustDesk entry so a perfect computer can be "Ready", plus Git, an iPhone (Apple Devices from the
+ * Windows Update, the driver stage and verification on), Core Essentials (no manual entry since
+ * Phase 10, so a perfect computer can be "Ready"), plus Git, an iPhone (Apple Devices from the
  * Microsoft Store) and the portable Rufus. VLC is marked optional for delivery.
  */
 export function writeHealthFixture(dir: string): { packageId: string } {
   rmSync(dir, { recursive: true, force: true });
   const p = ownerDefaults();
   p.applications.selection.devices.phone = 'iphone';
-  p.applications.selection.removed.push('catalog:rustdesk');
   p.applications.selection.added.push(catalogRef(catalogEntryById('rufus')!)!);
   p.applications.selection.added.push({ packageIdentifier: 'Git.Git', source: 'winget', displayName: 'Git', version: '', scope: '' });
   p.health.optionalApps = ['winget:videolan.vlc'];
@@ -146,6 +147,8 @@ export function writeMigrationFixture(dir: string): { packageId: string; manifes
   p.accounts.personName = 'Alex';
   p.windowsUpdate.enabled = false;
   p.drivers.enabled = false;
+  // The manual RustDesk entry (optional in Core Essentials since Phase 10) keeps a catalog follow-up in this package.
+  p.applications.selection.added.push(catalogRef(catalogEntryById('rustdesk')!)!);
   const items = matchInventory(inventory);
   const decisions = defaultDecisions(items);
   decisions.set('app-000000000003', { decision: 'manual', confirmed: false });

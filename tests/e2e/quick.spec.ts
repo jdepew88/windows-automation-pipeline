@@ -114,7 +114,8 @@ test('Journey A: ordinary home user, defaults throughout, exact ZIP', async ({ p
   await expect(review.getByTestId('review-computer')).toContainText('Windows 11 Pro');
   await expect(review.getByTestId('review-network')).toContainText('Not configured');
   await expect(review.getByTestId('review-updates')).toContainText('ask before installing');
-  await expect(review.getByTestId('review-apps')).toContainText('RustDesk');
+  // Phase 10: RustDesk is a Core Essentials recommendation, not a default.
+  await expect(review.getByTestId('review-apps')).not.toContainText('RustDesk');
   await expect(review.locator('[data-consideration="generic-key"]')).toContainText('does not license or activate');
   await expect(review.locator('[data-consideration="wifi-secret"]')).toHaveCount(0);
   // The empty-password administrator needs one confirmation.
@@ -128,7 +129,7 @@ test('Journey A: ordinary home user, defaults throughout, exact ZIP', async ({ p
   expect(zip.manifest.windows.architectures).toEqual(['amd64']);
   expect(zip.manifest.updatePolicy.values).toEqual({ NoAutoUpdate: 0, AUOptions: 3 });
   expect(ids(zip.config.packages)).toEqual(expect.arrayContaining(['Google.Chrome', 'VideoLAN.VLC', '7zip.7zip', 'CodeSector.TeraCopy', 'Bitwarden.Bitwarden', 'Microsoft.VCRedist.2015+.x64', 'Microsoft.VCRedist.2015+.x86']));
-  expect(zip.config.manual.map((m: { key: string }) => m.key)).toEqual(['catalog:rustdesk']);
+  expect(zip.config.manual).toEqual([]);
   expect(zip.xml).not.toMatch(/<File path="[^"]*(Wifi\.xml|Add-WifiProfile\.ps1)"/);
   // The acknowledgement is remembered for this session.
   await wiz(page).locator('[data-wiz="top-back"]').click();
@@ -181,7 +182,7 @@ test('Journey C: technician workstation; logo grid, detailed list, search, overr
   await expect(tile(page, 'wireshark')).toHaveAttribute('aria-label', 'Wireshark');
   await wiz(page).locator('[data-view-mode="detailed"]').click();
   await wiz(page).getByTestId('app-search').fill('Wireshark');
-  await expect(wiz(page).locator('[data-app="wireshark"]')).toContainText('Selected by Network Engineer / Developer / Technician');
+  await expect(wiz(page).locator('[data-app="wireshark"]')).toContainText('Selected by Network Engineer / Technician');
   await tile(page, 'wireshark').uncheck();
   await wiz(page).getByTestId('app-search').fill('nmap');
   await tile(page, 'nmap').check();
@@ -334,8 +335,8 @@ test('catalog: logos load from bundled files and fall back to an initials tile; 
   await expect(tile(page, 'git')).toBeChecked();
   await expect(wiz(page).locator('[data-app="git"]')).toHaveClass(/\bon\b/);
   await expect(wiz(page).getByTestId('app-selected')).toContainText('selected');
-  await expect(wiz(page).getByTestId('app-catalog-size')).toContainText('115');
-  await expect(wiz(page).getByTestId('app-manual-count')).toContainText('1');
+  await expect(wiz(page).getByTestId('app-catalog-size')).toContainText('190');
+  await expect(wiz(page).getByTestId('app-manual-count')).toContainText('0');
 });
 
 test('region pages and laptop location map onto the Advanced settings', async ({ page }) => {

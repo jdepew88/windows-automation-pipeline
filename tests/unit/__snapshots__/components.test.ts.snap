@@ -7491,14 +7491,7 @@ exit 1
     }
   ],
   "unresolved": [],
-  "manual": [
-    {
-      "key": "catalog:rustdesk",
-      "displayName": "RustDesk",
-      "instructions": "Download the signed Windows installer from RustDesk's official GitHub releases and install it. Leave unattended access off: do not set a permanent password; the customer approves each session.",
-      "url": "https://github.com/rustdesk/rustdesk/releases/latest"
-    }
-  ],
+  "manual": [],
   "deselected": [],
   "additionalSoftware": []
 }
@@ -11830,25 +11823,6 @@ if ($script:WdhMain) {
         "signIn": false,
         "instructions": "",
         "url": ""
-      },
-      {
-        "key": "catalog:rustdesk",
-        "operationId": "app:catalog:rustdesk",
-        "name": "RustDesk",
-        "names": [
-          "RustDesk"
-        ],
-        "source": "catalog",
-        "packageIdentifier": "",
-        "method": "manual",
-        "kind": "manual",
-        "required": false,
-        "scope": "unknown",
-        "version": "",
-        "shortcut": "",
-        "signIn": false,
-        "instructions": "Download the signed Windows installer from RustDesk's official GitHub releases and install it. Leave unattended access off: do not set a permanent password; the customer approves each session.",
-        "url": "https://github.com/rustdesk/rustdesk/releases/latest"
       }
     ],
     "deselected": []
@@ -12335,7 +12309,7 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
   "format": "windows-deployment-builder/deployment-manifest",
   "manifestVersion": 1,
   "packageVersion": "1.1.0",
-  "packageId": "B8B922783FE3365A",
+  "packageId": "299306FE684A71FC",
   "scope": "answerFile",
   "generator": {
     "name": "Windows Deployment Builder",
@@ -12570,19 +12544,6 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
           "core"
         ],
         "requiresAttention": false
-      },
-      {
-        "displayName": "RustDesk",
-        "packageIdentifier": "rustdesk",
-        "source": "catalog",
-        "method": "manual",
-        "version": "",
-        "scope": "",
-        "resolution": "manual",
-        "origins": [
-          "core"
-        ],
-        "requiresAttention": true
       }
     ],
     "removedFromProfiles": [],
@@ -12891,9 +12852,9 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
     {
       "path": "scripts/health/health-config.json",
       "role": "configuration",
-      "size": 9027,
-      "sha256": "A7CDBC817CD50BEAD97CF26072645CAEEAFBCEA1E8841990E3A6B2B44E24E7ED",
-      "textSha256": "8DA0D423AB8270BB90963C8FCF043174A132B901270D046C2918209984B4B870",
+      "size": 8297,
+      "sha256": "6F19585C43C9A5C6CA12B1AE5A6BE4BD9C23993E61AA498AFCDC2421778A0B6A",
+      "textSha256": "B1DBFC615A7EC88DB387B3DD4321EDA60338260BB5475AC7CE885E835793B7FE",
       "embedded": "Deployment\\\\scripts\\\\health\\\\health-config.json"
     },
     {
@@ -12931,9 +12892,9 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
     {
       "path": "scripts/applications/applications-config.json",
       "role": "configuration",
-      "size": 4058,
-      "sha256": "87781839B801D85DAA7A1C82FA2296C65549B6F0E02A40EC8D0440FDE0C91339",
-      "textSha256": "50C56DDC589CAFC21C0C61B924E393FFC3C0685A237A202E0FA643CE9E976D09",
+      "size": 3684,
+      "sha256": "D74D4D31173B935884B1333C8C4C8714BB11699469CC810F3D50E26A4FB3C866",
+      "textSha256": "3755CCACB7250368E95311FF22164D1E686A129703677385D9CA377DAC770CFB",
       "embedded": "Applications\\\\applications-config.json"
     },
     {

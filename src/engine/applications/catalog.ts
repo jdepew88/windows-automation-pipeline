@@ -13,27 +13,48 @@ import { CATALOG_SOURCE, MSSTORE_ID, WINGET_ID, packageKey } from './ids';
  * written for version 1 stay valid: without `method`, an entry installs from its source.
  */
 
+/**
+ * What an application does. Profiles (profiles.json) say who gets it: the two are independent, so a
+ * category never names a profile and an application is listed once whatever profiles select it.
+ */
 export const CATALOG_CATEGORIES = {
-  browsers: 'Browsers',
-  essentials: 'Everyday Essentials',
+  browsers: 'Web Browsers',
   communication: 'Communication',
-  documents: 'Documents, PDF & notes',
-  media: 'Photos & imaging',
-  music: 'Music & Media',
-  gaming: 'Gaming',
+  documents: 'Documents, PDF & Notes',
+  books: 'Books & E-readers',
+  media: 'Photos & Imaging',
+  music: 'Music & Streaming',
+  video: 'Media Players & Video',
+  creative: 'Audio & Video Production',
+  gaming: 'Gaming Platforms & Tools',
   development: 'Developer Tools',
+  ai: 'AI Assistants & Local Models',
   virtualization: 'Virtualization',
-  networking: 'Networking',
-  remote: 'Remote Access',
+  networking: 'Network Tools & Diagnostics',
+  remote: 'Remote Access & Streaming',
+  downloads: 'Downloads & Transfers',
   files: 'File Management',
-  usb: 'USB & Deployment Tools',
-  utilities: 'System utilities & diagnostics',
+  storage: 'Disk & Storage Utilities',
+  usb: 'USB & Imaging Tools',
+  utilities: 'System Utilities & Diagnostics',
   cloud: 'Cloud & Device Integration',
-  security: 'Security',
+  security: 'Security, Passwords & VPN',
+  peripherals: 'Peripherals, RGB & Device Control',
   runtimes: 'Runtimes',
-  hardware: 'Battery & manufacturer utilities',
-  touch: 'Pen, touch & handwriting',
+  hardware: 'Battery & Manufacturer Utilities',
+  touch: 'Pen, Touch & Handwriting',
 } as const;
+
+/**
+ * What kind of software an entry is (Phase 10). Runtimes, system components and drivers are never
+ * offered as ordinary recommendations, and the application manager protects them from removal.
+ */
+export const APP_KINDS = ['application', 'launcher', 'runtime', 'system', 'driver', 'manufacturer', 'service', 'sdk'] as const;
+export type AppKind = (typeof APP_KINDS)[number];
+/** normal: ordinary removal; caution: an extra confirmation; blocked: never offered for removal. */
+export const REMOVAL_SAFETY = ['normal', 'caution', 'blocked'] as const;
+/** winget: `winget upgrade` covers it; explicit: only when named (RequireExplicitUpgrade); manual: no package. */
+export const UPGRADE_METHODS = ['winget', 'explicit', 'manual'] as const;
 export type CatalogCategory = keyof typeof CATALOG_CATEGORIES;
 
 /**
@@ -95,6 +116,17 @@ const CatalogEntrySchema = z
       .object({ reason: z.string().min(1).max(300), instructions: z.string().min(1).max(400), url: z.string().url().startsWith('https://').optional() })
       .strict()
       .optional(),
+    /** Phase 10 metadata (optional, so catalogs written before it stay valid). */
+    publisher: z.string().max(120).optional(),
+    kind: z.enum(APP_KINDS).optional(),
+    removal: z.enum(REMOVAL_SAFETY).optional(),
+    upgrade: z.enum(UPGRADE_METHODS).optional(),
+    /** Hardware the application is only useful with; the manager shows it, it never installs because of it. */
+    hardware: z.object({ requirement: z.string().min(1).max(200), vendors: z.array(z.string().max(40)).max(10) }).strict().optional(),
+    /** Other verified WinGet identifiers of the same product (recognised as installed, never installed). */
+    alternateIds: z.array(z.string().regex(WINGET_ID)).max(5).optional(),
+    /** "Apps & features" names from the package manifest, used to recognise installations made outside WinGet. */
+    detectNames: z.array(z.string().max(100)).max(10).optional(),
     validation: z
       .object({
         status: z.enum(['verified', 'unverified', 'unresolved', 'manual']),

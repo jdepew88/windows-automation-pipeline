@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { catalogEntryById, catalogRef } from '../../src/engine/applications/catalog';
 import { validateProfile } from '../../src/engine/validation/validate';
 import { errorsOf, profile } from './helpers';
 
@@ -114,8 +115,10 @@ describe('cross-field validation (field-level messages, no output)', () => {
     expect(issues.filter((i) => i.path !== 'applications.selection')).toEqual([expect.objectContaining({ severity: 'warning', path: 'wifi.mode' })]);
   });
 
-  it('owner default with a name has no issues except the RustDesk manual follow-up (Phase 4.2)', () => {
-    // RustDesk is a Core Essentials default but has no WinGet or Store package: reported, never hidden.
-    expect(validateProfile(profile()).issues).toEqual([expect.objectContaining({ severity: 'warning', path: 'applications.selection', message: expect.stringMatching(/^RustDesk: no unattended installation/) })]);
+  it('owner default with a name has no issues; a selected RustDesk is reported as a manual follow-up', () => {
+    // Phase 10: RustDesk is optional in Core Essentials. When ticked it has no WinGet or Store package: reported, never hidden.
+    expect(validateProfile(profile()).issues).toEqual([]);
+    const withRustDesk = profile((p) => p.applications.selection.added.push(catalogRef(catalogEntryById('rustdesk')!)!));
+    expect(validateProfile(withRustDesk).issues).toEqual([expect.objectContaining({ severity: 'warning', path: 'applications.selection', message: expect.stringMatching(/^RustDesk: no unattended installation/) })]);
   });
 });

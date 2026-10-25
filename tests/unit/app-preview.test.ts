@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { catalogEntryById, catalogRef } from '../../src/engine/applications/catalog';
 import { applicationsConfig } from '../../src/engine/applications';
 import { effectiveApps, profilePreview } from '../../src/engine/applications/preview';
 import { resolveSelection } from '../../src/engine/applications/selection';
@@ -32,7 +33,7 @@ describe('effective application summary', () => {
   });
 
   it('separates manual follow-up (RustDesk) from automatic installs and lists nothing when provisioning is off', () => {
-    const p = profile();
+    const p = profile((q) => q.applications.selection.added.push(catalogRef(catalogEntryById('rustdesk')!)!));
     const apps = effectiveApps(p.applications.selection, true);
     expect(apps.manual.map((x) => x.displayName)).toContain('RustDesk');
     expect(apps.automatic.some((x) => x.displayName === 'RustDesk')).toBe(false);

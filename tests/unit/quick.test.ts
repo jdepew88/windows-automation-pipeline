@@ -52,11 +52,12 @@ describe('Phase 4.3 defaults', () => {
     expect(BUILTIN_PROFILES.find((x) => x.id === 'core')!.packages.map((x) => x.packageIdentifier)).toEqual(expect.arrayContaining(['Microsoft.VCRedist.2015+.x64', 'Microsoft.VCRedist.2015+.x86']));
   });
 
-  it('the Phase 4.2 profile defaults are unchanged', () => {
+  it('the Phase 4.2 profile defaults are unchanged, except RustDesk (Phase 10: optional in Core Essentials)', () => {
     const defaults = (id: string) => BUILTIN_PROFILES.find((x) => x.id === id)!.packages.map((x) => x.displayName);
     expect(defaults('gaming')).toEqual(expect.arrayContaining(['Steam', 'Epic Games Launcher']));
     expect(defaults('developer')).toEqual(expect.arrayContaining(['Git', 'Visual Studio Code', 'Python 3.14', 'Node.js (LTS)']));
-    expect(defaults('core')).toContain('RustDesk');
+    expect(defaults('core')).not.toContain('RustDesk');
+    expect(BUILTIN_PROFILES.find((x) => x.id === 'core')!.optional!.map((x) => x.displayName)).toContain('RustDesk');
     expect(CUSTOMER_TYPES.map((t) => t.profile)).toEqual(['everyday', 'gaming', 'developer', 'network-engineer', 'music', 'laptop', 'touch']);
   });
 });
@@ -173,9 +174,11 @@ describe('wizard steps and validation', () => {
 });
 
 describe('Final Review considerations: only when relevant', () => {
-  it('owner defaults: empty-password administrator (ack), generic key, update approval, RustDesk, Bitwarden sign-in', () => {
+  it('owner defaults: empty-password administrator (ack), generic key, update approval, Bitwarden sign-in; RustDesk only when ticked', () => {
     const c = considerations(named());
-    expect(c.map((x) => x.id)).toEqual(['autologon-admin', 'generic-key', 'update-approval', 'manual-apps', 'sign-in-apps']);
+    expect(c.map((x) => x.id)).toEqual(['autologon-admin', 'generic-key', 'update-approval', 'sign-in-apps']);
+    const withRustDesk = considerations(named((q) => q.applications.selection.added.push(catalogRef(catalogEntryById('rustdesk')!)!)));
+    expect(withRustDesk.map((x) => x.id)).toEqual(['autologon-admin', 'generic-key', 'update-approval', 'manual-apps', 'sign-in-apps']);
     expect(c.find((x) => x.id === 'autologon-admin')!.ack).toBeTruthy();
     expect(c.find((x) => x.id === 'generic-key')!.detail).toContain('does not license or activate');
   });
@@ -206,6 +209,7 @@ describe('Final Review considerations: only when relevant', () => {
       q.wifi.ssid = 'Home';
       q.wifi.password = 'never-show-me';
       setCustomerType(q, 'gaming', true);
+      q.applications.selection.added.push(catalogRef(catalogEntryById('rustdesk')!)!);
     });
     const s = reviewSummary(p);
     expect(s.computer.computerName).toBe('Alex-Computer');

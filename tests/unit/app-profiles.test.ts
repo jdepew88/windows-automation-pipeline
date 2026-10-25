@@ -47,8 +47,10 @@ const ref = (catalogId: string) => catalogRef(catalogEntryById(catalogId)!)!;
 const fresh = (): ApplicationsSelection => structuredClone(ownerDefaults().applications.selection);
 const selected = (s: ApplicationsSelection) => resolveSelection(s).packages.map((p) => p.catalog?.id ?? p.key);
 const devices = (d: Partial<Devices>): Devices => ({ phone: 'none', ipad: false, extraIphone: false, androidTablet: false, ...d });
-const CORE = ['chrome', 'vlc', '7zip', 'teracopy', 'rustdesk', 'bitwarden', 'vcredist-x64', 'vcredist-x86'];
+// Phase 10 (owner's instruction): RustDesk is no longer a Core Essentials default; it is optional there.
+const CORE = ['chrome', 'vlc', '7zip', 'teracopy', 'bitwarden', 'vcredist-x64', 'vcredist-x86'];
 const verification = JSON.parse(fixture('../../../docs/phase-4-2-application-profiles/verification-2026-10-21.json')) as { id: string; source: string; ok: boolean; publisher: string }[];
+const repository = JSON.parse(fixture('../../../docs/phase-10-application-manager/winget-verification-2026-10-25.json')) as { results: { id: string; found: boolean }[] };
 
 describe('catalog (Phase 4.2)', () => {
   it('has unique ids and package keys, valid categories, and only https links', () => {
@@ -61,15 +63,24 @@ describe('catalog (Phase 4.2)', () => {
     }
   });
 
-  it('counts: 115 entries, 94 WinGet, 11 Store, 4 portable, 6 manual', () => {
-    const by = (m: string) => CATALOG.filter((e) => methodOf(e) === m).length;
-    expect([CATALOG.length, by('winget'), by('msstore'), by('portable'), by('manual'), by('vendor')]).toEqual([115, 94, 11, 4, 6, 0]);
+  it('counts: the 115 Phase 4.2 entries (94 WinGet, 11 Store, 4 portable, 6 manual) plus 74 Phase 10 WinGet entries and VMware (manual)', () => {
+    const by = (list: typeof CATALOG, m: string) => list.filter((e) => methodOf(e) === m).length;
+    const p42 = CATALOG.filter((e) => e.validation.checkedAt === '2026-10-21');
+    expect([p42.length, by(p42, 'winget'), by(p42, 'msstore'), by(p42, 'portable'), by(p42, 'manual'), by(p42, 'vendor')]).toEqual([115, 94, 11, 4, 6, 0]);
+    const p10 = CATALOG.filter((e) => e.validation.checkedAt === '2026-10-25');
+    expect([p10.length, by(p10, 'winget'), by(p10, 'manual')]).toEqual([75, 74, 1]);
+    expect(CATALOG.length).toBe(190);
   });
 
-  it('every WinGet and Store identifier is one that the recorded verification found (never invented)', () => {
+  it('every WinGet and Store identifier is one that a recorded verification found (never invented)', () => {
     const found = new Set(verification.filter((v) => v.ok).map((v) => `${v.source}:${v.id}`.toLowerCase()));
+    const repo = new Set(repository.results.filter((r) => r.found).map((r) => `winget:${r.id}`.toLowerCase()));
     for (const e of CATALOG.filter((x) => x.packageIdentifier)) {
-      expect(found.has(`${e.source}:${e.packageIdentifier}`.toLowerCase()), `${e.id} ${e.packageIdentifier}`).toBe(true);
+      const key = `${e.source}:${e.packageIdentifier}`.toLowerCase();
+      // Phase 4.2 entries: winget show (2026-10-21). Phase 10 entries: the WinGet repository (2026-10-25).
+      expect(e.validation.checkedAt === '2026-10-21' ? found.has(key) : repo.has(key), `${e.id} ${e.packageIdentifier}`).toBe(true);
+      // Every WinGet identifier, old or new, is also in the 2026-10-25 repository check.
+      if (e.source === 'winget') expect(repo.has(key), `${e.id} in the 2026-10-25 check`).toBe(true);
       expect(e.validation.status, e.id).toBe('verified');
       expect((e.source === 'winget' ? WINGET_ID : MSSTORE_ID).test(e.packageIdentifier!), e.id).toBe(true);
     }
@@ -95,7 +106,7 @@ describe('catalog (Phase 4.2)', () => {
 
   it('manual entries carry a reason, instructions and an official https download, and are never WinGet packages', () => {
     const manual = CATALOG.filter((e) => methodOf(e) === 'manual');
-    expect(manual.map((e) => e.id).sort()).toEqual(['dotnet-framework-35', 'filezilla', 'freefilesync', 'launchbox', 'rustdesk', 'spybot']);
+    expect(manual.map((e) => e.id).sort()).toEqual(['dotnet-framework-35', 'filezilla', 'freefilesync', 'launchbox', 'rustdesk', 'spybot', 'vmware-workstation']);
     for (const e of manual) {
       expect(e).toMatchObject({ packageIdentifier: null, source: 'none', interaction: 'required', validation: { status: 'manual' } });
       expect(e.manual!.url, e.id).toMatch(/^https:\/\//);
@@ -123,9 +134,14 @@ describe('catalog (Phase 4.2)', () => {
 
   it('owner exclusions are recorded and none of them is a catalog entry', () => {
     const names = CATALOG_EXCLUDED.map((x) => x.name);
-    for (const n of ['Brave', 'Opera', 'Vivaldi', 'Pidgin', 'Dropbox', 'SugarSync', 'LibreOffice', 'Foxit Reader', 'PDF24 Creator', 'CutePDF', 'Ghostscript', 'SumatraPDF', 'Paint.NET', 'Krita', 'IrfanView', 'Greenshot', 'ShareX', 'WinDirStat', 'Apple TV']) {
+    for (const n of ['Brave', 'Vivaldi', 'Pidgin', 'Dropbox', 'SugarSync', 'Foxit Reader', 'PDF24 Creator', 'CutePDF', 'Ghostscript', 'SumatraPDF', 'Paint.NET', 'Krita', 'IrfanView', 'Greenshot', 'ShareX', 'WinDirStat', 'Apple TV']) {
       expect(names, n).toContain(n);
       expect(CATALOG.some((e) => e.displayName.toLowerCase().includes(n.toLowerCase())), n).toBe(false);
+    }
+    // Phase 10: the owner's inventory (2026-10-25) lists Opera and LibreOffice, superseding the earlier exclusions.
+    for (const n of ['Opera', 'LibreOffice']) {
+      expect(names, n).not.toContain(n);
+      expect(CATALOG.some((e) => e.displayName === n && e.validation.checkedAt === '2026-10-25'), n).toBe(true);
     }
     expect(catalogJson.catalogVersion).toBe(2);
   });
@@ -138,7 +154,7 @@ describe('catalog (Phase 4.2)', () => {
 
 describe('built-in profiles', () => {
   it('are templates: validated, read-only, and only reference packages that exist', () => {
-    expect(BUILTIN_PROFILES.map((p) => p.id)).toEqual(['core', 'everyday', 'gaming', 'developer', 'network-engineer', 'music', 'apple-devices', 'android-devices', 'laptop', 'touch']);
+    expect(BUILTIN_PROFILES.map((p) => p.id)).toEqual(['core', 'everyday', 'gaming', 'developer', 'network-engineer', 'music', 'creator', 'workstation', 'apple-devices', 'android-devices', 'laptop', 'touch']);
     expect(BUILTIN_PROFILES.every((p) => p.builtin)).toBe(true);
     for (const cid of BUILTIN_REFERENCED) expect(entryKey(catalogEntryById(cid)!), cid).toBeTruthy();
     expect(UNIVERSAL_PROFILES).toEqual(['core']);
@@ -148,7 +164,9 @@ describe('built-in profiles', () => {
 
   it('Core Essentials is in every new deployment, and each of its apps can be unticked and stays unticked', () => {
     const s = fresh();
-    expect(selected(s)).toEqual(['chrome', 'vlc', '7zip', 'teracopy', 'bitwarden', 'vcredist-x64', 'vcredist-x86', 'rustdesk']);
+    expect(selected(s)).toEqual(['chrome', 'vlc', '7zip', 'teracopy', 'bitwarden', 'vcredist-x64', 'vcredist-x86']);
+    // Remote support and power-user tools are recommended, never universal.
+    expect(resolveSelection(s).recommended.map((p) => p.catalog!.id)).toEqual(['rustdesk', 'notepadpp', 'everything', 'powertoys']);
     expect(new Set(selected(s))).toEqual(new Set(CORE));
     for (const app of ['chrome', 'bitwarden']) removePackage(s, id(app));
     toggleProfile(s, 'gaming', true);
@@ -184,7 +202,7 @@ describe('built-in profiles', () => {
     expect(builtinProfile('developer')!.optional!.length).toBeGreaterThanOrEqual(15);
   });
 
-  it('Network Engineer / Developer / Technician includes the developer baseline and every specified tool', () => {
+  it('Network Engineer / Technician includes the developer baseline and every specified tool', () => {
     const s = fresh();
     toggleProfile(s, 'network-engineer', true);
     const want = [
@@ -254,7 +272,9 @@ describe('devices', () => {
     const s = fresh();
     s.devices = devices({ phone: 'android', androidTablet: true });
     expect(selected(s)).toEqual(selected(fresh()));
-    expect(resolveSelection(s).recommended.map((p) => p.catalog!.id)).toEqual(['google-quick-share', 'samsung-smart-switch']);
+    // Only the Android profile's own recommendations are added (Core Essentials keeps its own).
+    const coreOptional = ['rustdesk', 'notepadpp', 'everything', 'powertoys'];
+    expect(resolveSelection(s).recommended.map((p) => p.catalog!.id).filter((x) => !coreOptional.includes(x))).toEqual(['google-quick-share', 'samsung-smart-switch']);
   });
 
   it('iCloud carries a large-transfer warning and is installed only', () => {
@@ -524,6 +544,8 @@ describe('engine plan and USB package', () => {
     removePackage(s, id('epic'));
     addPackage(s, ref('acrobat-reader'));
     addPackage(s, ref('rufus'));
+    // A manual catalog entry (Phase 10: no longer a Core Essentials default).
+    addPackage(s, ref('rustdesk'));
     s.devices.ipad = true;
   });
 

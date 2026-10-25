@@ -166,7 +166,8 @@ describe('catalog matching (exact, strong, possible, unknown; never a guessed in
   });
 
   it('an app deliberately left out of the curated catalog is offered as optional, not added to the catalog', () => {
-    const m = matchApp(wg('Google Chrome Canary', 'Google.Chrome.Canary'));
+    // Brave is deliberately not in the curated catalog (owner decision); Chrome Canary joined it in Phase 10.
+    const m = matchApp(wg('Brave', 'Brave.Brave'));
     expect(m.classification).toBe('winget');
   });
 
@@ -253,8 +254,9 @@ describe('migration profiles (review -> named profile on top of a base profile)'
     d.set(byName('Obsidian').id, { decision: 'optional', confirmed: false });
     d.set(byName('Wireshark').id, { decision: 'exclude', confirmed: false });
     d.set(byName('Contoso Field Tool').id, { decision: 'manual', confirmed: false });
-    const r = applyMigration(p, i, items, d, { name: 'Personal Workstation' });
-    expect(r.profile.name).toBe('Personal Workstation');
+    // Phase 10 added a built-in "Personal Workstation" profile; names must stay unique, so this test uses another.
+    const r = applyMigration(p, i, items, d, { name: "Alex's Workstation" });
+    expect(r.profile.name).toBe("Alex's Workstation");
     expect(r.profile.inherits).toEqual(['network-engineer']);
     // RustDesk (a manual catalog entry of Core Essentials, not of the base) becomes its catalog follow-up.
     expect(r.profile.packages.map((x) => `${x.source}:${x.packageIdentifier}`)).toEqual(['winget:Example.Tool', 'catalog:rustdesk']);

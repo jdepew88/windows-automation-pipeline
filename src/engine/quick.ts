@@ -36,8 +36,8 @@ export const CUSTOMER_TYPES: readonly CustomerType[] = [
   { profile: 'everyday', label: 'Everyday home user', hint: 'PDF reader; email, calls and cloud storage to choose from' },
   { profile: 'gaming', label: 'Gamer', hint: 'Steam and Epic Games Launcher; other launchers and Discord to choose from' },
   { profile: 'developer', label: 'Developer', hint: 'Git, Visual Studio Code, Python and Node.js LTS' },
-  { profile: 'network-engineer', label: 'Network Engineer / Developer / Technician', hint: 'The full power-user workstation (includes Developer)' },
-  { profile: 'music', label: 'Music Enthusiast', hint: 'MusicBee library manager; players and editors to choose from' },
+  { profile: 'network-engineer', label: 'Network Engineer / Technician', hint: 'The full power-user workstation (includes Developer)' },
+  { profile: 'music', label: 'Music Lover', hint: 'MusicBee library manager; players and editors to choose from' },
   { profile: 'laptop', label: 'Laptop', hint: 'Battery check tool; location services can be allowed' },
   { profile: 'touch', label: 'Touchscreen / 2-in-1', hint: 'Handwritten notes and PDF annotation' },
 ];

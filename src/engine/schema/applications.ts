@@ -43,7 +43,7 @@ export const PackageRefSchema = z
   .strict();
 export type PackageRef = z.infer<typeof PackageRefSchema>;
 
-export const APP_PROFILE_CATEGORIES = ['core', 'everyday', 'gaming', 'developer', 'network', 'music', 'devices', 'laptop', 'touch', 'custom'] as const;
+export const APP_PROFILE_CATEGORIES = ['core', 'everyday', 'gaming', 'developer', 'network', 'music', 'creator', 'workstation', 'devices', 'laptop', 'touch', 'custom'] as const;
 export const AppProfileCategorySchema = z.enum(APP_PROFILE_CATEGORIES);
 export type AppProfileCategory = z.infer<typeof AppProfileCategorySchema>;
 

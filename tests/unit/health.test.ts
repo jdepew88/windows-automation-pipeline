@@ -2,6 +2,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { catalogEntryById, catalogRef } from '../../src/engine/applications/catalog';
 import { generateOk, noApps, profile } from './helpers';
 import { ownerDefaults, importProfile } from '../../src/engine/profiles';
 import { applicationsConfig } from '../../src/engine/applications';
@@ -44,6 +45,7 @@ describe('verification plan (health-config.json)', () => {
       toggleProfile(q.applications.selection, 'gaming', true);
       removePackage(q.applications.selection, 'winget:epicgames.epicgameslauncher');
       additional(q);
+      q.applications.selection.added.push(catalogRef(catalogEntryById('rustdesk')!)!);
       q.health.optionalApps = ['winget:valve.steam'];
     });
     const c = healthConfig(p);
