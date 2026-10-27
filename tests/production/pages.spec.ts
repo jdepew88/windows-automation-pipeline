@@ -80,12 +80,39 @@ test('Quick Deployment end to end under the production policy: live counts, Fina
   await wiz(page).getByTestId('wiz-username').fill('Sam');
   await wiz(page).locator('[data-wiz="top-next"]').click();
   await expect(wiz(page)).toHaveAttribute('data-step', 'type');
-  const before = await wiz(page).locator('[data-action="view-combined"]').textContent();
-  await wiz(page).locator('[data-type="developer"] input').check();
-  await expect(wiz(page).locator('[data-action="view-combined"]')).not.toHaveText(before!);
+  // Step 2 lists the combined selection with one checkbox per application and a live count.
+  const developer = wiz(page).locator('[data-type="developer"] input');
+  const list = wiz(page).getByTestId('wiz-checklist-list');
+  const count = wiz(page).getByTestId('wiz-app-count');
+  const row = (key: string) => list.locator(`li[data-key="${key}"]`);
+  const ticked = () => list.locator('li[data-selected="true"]').evaluateAll((els) => els.map((e) => e.getAttribute('data-key')!).sort());
+  const base = await ticked();
+  await expect(count).toHaveAttribute('data-count', String(base.length));
+  await developer.check();
+  await expect(row('winget:git.git')).toHaveAttribute('data-selected', 'true');
+  const withDev = await ticked();
+  expect(withDev.length).toBeGreaterThan(base.length);
+  await expect(count).toHaveAttribute('data-count', String(withDev.length));
+  await developer.uncheck();
+  await expect(count).toHaveAttribute('data-count', String(base.length));
+  await expect(row('winget:git.git')).toHaveCount(0);
+  expect(await ticked()).toEqual(base);
+  // An application unticked by hand stays out, also when its profile is unticked and ticked again.
+  await developer.check();
+  await list.locator('input[data-check-app="winget:microsoft.visualstudiocode"]').uncheck();
+  await expect(row('winget:microsoft.visualstudiocode')).toHaveAttribute('data-selected', 'false');
+  await developer.uncheck();
+  await developer.check();
+  await expect(row('winget:microsoft.visualstudiocode')).toHaveAttribute('data-selected', 'false');
+  const step2 = await ticked();
+  expect(step2).toEqual(withDev.filter((k) => k !== 'winget:microsoft.visualstudiocode'));
+  await expect(count).toHaveAttribute('data-count', String(step2.length));
+  // Final Review shows exactly the step 2 selection.
   await wiz(page).locator('[data-wiz="go-review"]').click();
   await expect(wiz(page)).toHaveAttribute('data-step', 'review');
-  await expect(wiz(page).getByTestId('review-app-summary')).toContainText('Git');
+  const review = wiz(page).getByTestId('review-app-summary');
+  await expect(review).toHaveAttribute('data-total', String(step2.length));
+  expect((await review.locator('li[data-key]').evaluateAll((els) => els.map((e) => e.getAttribute('data-key')!))).sort()).toEqual(step2);
   for (const box of await wiz(page).locator('[data-ack]').all()) await box.check();
   const [dl] = await Promise.all([page.waitForEvent('download'), wiz(page).locator('[data-action="wiz-generate"]').click()]);
   expect(dl.suggestedFilename()).toMatch(/\.zip$/);
@@ -102,9 +129,12 @@ test('Quick Deployment end to end under the production policy: live counts, Fina
     expect(e, f.path).toBeTruthy();
     expect(createHash('sha256').update(e!.data).digest('hex').toUpperCase(), f.path).toBe(f.sha256.toUpperCase());
   }
+  // The package's application manifest is the step 2 selection, nothing more or less.
   expect(paths).toContain('WindowsDeployment/scripts/applications/applications-config.json');
-  const cfg = JSON.parse(new TextDecoder().decode(entries.find((e) => e.path.endsWith('applications-config.json'))!.data)) as { packages: { key: string }[] };
+  const cfg = JSON.parse(new TextDecoder().decode(entries.find((e) => e.path.endsWith('applications-config.json'))!.data)) as { packages: { key: string }[]; manual: { key: string }[] };
+  expect([...cfg.packages, ...cfg.manual].map((x) => x.key).sort()).toEqual(step2);
   expect(cfg.packages.map((x) => x.key)).toContain('winget:git.git');
+  expect(cfg.packages.map((x) => x.key)).not.toContain('winget:microsoft.visualstudiocode');
   expect(seen.violations).toEqual([]);
   expect(seen.external).toEqual([]);
 });
