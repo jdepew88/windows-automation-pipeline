@@ -11912,7 +11912,7 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
   try { data = JSON.parse(raw); } catch (e) { data = null; }
   function el(tag, attrs) {
     var n = document.createElement(tag);
-    if (attrs) { for (var k in attrs) { if (Object.prototype.hasOwnProperty.call(attrs, k) &amp;&amp; attrs[k] !== null &amp;&amp; attrs[k] !== undefined) { if (k === 'text') { n.textContent = attrs[k]; } else { n.setAttribute(k, attrs[k]); } } } }
+    if (attrs) { for (var k in attrs) { if (Object.prototype.hasOwnProperty.call(attrs, k) &amp;&amp; attrs[k] !== null &amp;&amp; attrs[k] !== undefined) { if (k === 'text') { n.textContent = attrs[k]; } else if (k === 'style') { n.style.cssText = attrs[k]; } else { n.setAttribute(k, attrs[k]); } } } }
     for (var i = 2; i &lt; arguments.length; i++) { add(n, arguments[i]); }
     return n;
   }
@@ -12202,7 +12202,7 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
   "format": "windows-deployment-builder/deployment-manifest",
   "manifestVersion": 1,
   "packageVersion": "1.1.0",
-  "packageId": "A78F79C783597E0F",
+  "packageId": "C6442357E1F38D5B",
   "scope": "answerFile",
   "generator": {
     "name": "Windows Deployment Builder",
@@ -12752,9 +12752,9 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
     {
       "path": "scripts/health/HealthReport.html",
       "role": "documentation",
-      "size": 24051,
-      "sha256": "5181A15C0F1493D96EE6C1BD0D61C5C7E20B5C98120A320EAE6CF2D3B7DBE1DB",
-      "textSha256": "C0E5F50FD47AB07ABCBDB6B303466549FEB3047631801DCDB51821DF29C19887",
+      "size": 24107,
+      "sha256": "815C4A4091AECB948134A66396874BB60DE1639AC4371E02BC89A9CE3F4532C3",
+      "textSha256": "51A1F285043040CA9CAD13327C78453D684B97FF79F424FB7A37E43524382D2A",
       "embedded": "Deployment\\\\scripts\\\\health\\\\HealthReport.html"
     },
     {
@@ -24855,7 +24855,7 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
   try { data = JSON.parse(raw); } catch (e) { data = null; }
   function el(tag, attrs) {
     var n = document.createElement(tag);
-    if (attrs) { for (var k in attrs) { if (Object.prototype.hasOwnProperty.call(attrs, k) &amp;&amp; attrs[k] !== null &amp;&amp; attrs[k] !== undefined) { if (k === 'text') { n.textContent = attrs[k]; } else { n.setAttribute(k, attrs[k]); } } } }
+    if (attrs) { for (var k in attrs) { if (Object.prototype.hasOwnProperty.call(attrs, k) &amp;&amp; attrs[k] !== null &amp;&amp; attrs[k] !== undefined) { if (k === 'text') { n.textContent = attrs[k]; } else if (k === 'style') { n.style.cssText = attrs[k]; } else { n.setAttribute(k, attrs[k]); } } } }
     for (var i = 2; i &lt; arguments.length; i++) { add(n, arguments[i]); }
     return n;
   }
@@ -25145,7 +25145,7 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
   "format": "windows-deployment-builder/deployment-manifest",
   "manifestVersion": 1,
   "packageVersion": "1.1.0",
-  "packageId": "299306FE684A71FC",
+  "packageId": "54E80CD064C22A8C",
   "scope": "answerFile",
   "generator": {
     "name": "Windows Deployment Builder",
@@ -25696,9 +25696,9 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
     {
       "path": "scripts/health/HealthReport.html",
       "role": "documentation",
-      "size": 24051,
-      "sha256": "5181A15C0F1493D96EE6C1BD0D61C5C7E20B5C98120A320EAE6CF2D3B7DBE1DB",
-      "textSha256": "C0E5F50FD47AB07ABCBDB6B303466549FEB3047631801DCDB51821DF29C19887",
+      "size": 24107,
+      "sha256": "815C4A4091AECB948134A66396874BB60DE1639AC4371E02BC89A9CE3F4532C3",
+      "textSha256": "51A1F285043040CA9CAD13327C78453D684B97FF79F424FB7A37E43524382D2A",
       "embedded": "Deployment\\\\scripts\\\\health\\\\HealthReport.html"
     },
     {

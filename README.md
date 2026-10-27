@@ -22,12 +22,16 @@ npx playwright install chromium && npm run test:e2e   # browser smoke tests
 npm run lint
 ```
 
-## Deployment (Cloudflare Workers)
+## Deployment (Cloudflare Pages or Workers)
 
-The site is deployed as the static-assets-only Worker `windows-automation-pipeline` (`wrangler.jsonc`
-serves `dist/`; source maps are excluded by `public/.assetsignore`). Deploy manually with
-`npm run deploy`, or let Cloudflare Workers Builds deploy pushes to `main` (build command
-`npm run build`, deploy command `npx wrangler deploy`).
+`npm run build` produces a fully static site in `dist/`, with security headers in `public/_headers`.
+It can be hosted on Cloudflare Pages with Git integration (framework preset None, build command
+`npm run build`, output directory `dist`); see
+[docs/cloudflare-pages/deployment.md](docs/cloudflare-pages/deployment.md). The existing
+static-assets-only Worker `windows-automation-pipeline` (`wrangler.jsonc`, `npm run deploy`) serves
+the same `dist/` with the same headers. Production builds contain no source maps
+(`WDB_SOURCEMAP=1 npm run build` writes them for local debugging). `npm run test:e2e:production`
+tests the build as Pages serves it (local emulator, no account needed).
 
 Everything runs locally in the browser, including on the deployed site. Nothing is uploaded, no script runs in the browser, and the
 configuration is not saved automatically. Only application profiles you save with "Save as new profile…" are kept in this

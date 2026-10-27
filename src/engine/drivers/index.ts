@@ -387,7 +387,11 @@ export const HardwareInventorySchema = z
   .strict();
 export type HardwareInventory = z.infer<typeof HardwareInventorySchema>;
 
+/** Largest inventory accepted: above what the schema's bounds allow, and a limit on the validation work. */
+export const MAX_HARDWARE_INVENTORY_BYTES = 16 * 1024 * 1024;
+
 export function importHardwareInventory(textValue: string): { ok: boolean; errors: string[]; inventory?: HardwareInventory } {
+  if (textValue.length > MAX_HARDWARE_INVENTORY_BYTES) return { ok: false, errors: [`File is larger than ${MAX_HARDWARE_INVENTORY_BYTES / 1024 / 1024} MB: not a hardware inventory.`] };
   let raw: unknown;
   try {
     raw = JSON.parse(textValue.replace(/^\uFEFF/, ''));

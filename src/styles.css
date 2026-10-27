@@ -2592,6 +2592,25 @@ pre.preview {
   padding: 7px 12px 7px calc(12px + var(--depth, 0) * 14px);
   font-size: 13px;
 }
+/* No inline styles (Content-Security-Policy): the depth comes from data-depth (capped at 6 levels). */
+.pkg-tree li[data-depth='1'] {
+  --depth: 1;
+}
+.pkg-tree li[data-depth='2'] {
+  --depth: 2;
+}
+.pkg-tree li[data-depth='3'] {
+  --depth: 3;
+}
+.pkg-tree li[data-depth='4'] {
+  --depth: 4;
+}
+.pkg-tree li[data-depth='5'] {
+  --depth: 5;
+}
+.pkg-tree li[data-depth='6'] {
+  --depth: 6;
+}
 .pkg-tree li + li {
   border-top: 1px solid var(--border);
 }

@@ -62,8 +62,15 @@ function fillRecordEntries(profile: Record<string, Json>, defaults: Record<strin
   }
 }
 
+/**
+ * Largest profile file accepted: far above any real profile (they are kilobytes), and a bound on the
+ * work the schema validation does on a hostile or corrupt file.
+ */
+export const MAX_PROFILE_BYTES = 16 * 1024 * 1024;
+
 /** Parses and validates profile JSON text (any supported schema version). */
 export function importProfile(text: string): ImportResult {
+  if (text.length > MAX_PROFILE_BYTES) return { errors: [{ path: '', message: `File is larger than ${MAX_PROFILE_BYTES / 1024 / 1024} MB: not a deployment profile.` }], warnings: [] };
   let raw: unknown;
   try {
     raw = JSON.parse(text);

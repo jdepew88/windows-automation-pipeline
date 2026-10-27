@@ -103,7 +103,7 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
   try { data = JSON.parse(raw); } catch (e) { data = null; }
   function el(tag, attrs) {
     var n = document.createElement(tag);
-    if (attrs) { for (var k in attrs) { if (Object.prototype.hasOwnProperty.call(attrs, k) && attrs[k] !== null && attrs[k] !== undefined) { if (k === 'text') { n.textContent = attrs[k]; } else { n.setAttribute(k, attrs[k]); } } } }
+    if (attrs) { for (var k in attrs) { if (Object.prototype.hasOwnProperty.call(attrs, k) && attrs[k] !== null && attrs[k] !== undefined) { if (k === 'text') { n.textContent = attrs[k]; } else if (k === 'style') { n.style.cssText = attrs[k]; } else { n.setAttribute(k, attrs[k]); } } } }
     for (var i = 2; i < arguments.length; i++) { add(n, arguments[i]); }
     return n;
   }

@@ -37,6 +37,11 @@ Unit test coverage by acceptance criterion:
   - busy installer, already finished, pending restart, corrupt state;
   - single instance (mutex across processes), log content, config defaults.
 
+- **Hosting (Cloudflare Pages)**: `security-headers.test.ts` (`public/_headers` and the pages' policy
+  generated from one definition, strict CSP, import size limits) and `npm run test:e2e:production`
+  (`tests/production/pages.spec.ts`: the built `dist/` in the local Pages emulator, headers, no CSP
+  violations or external requests, ZIP contents); see
+  [cloudflare-pages/deployment.md](cloudflare-pages/deployment.md).
 - **Quick Deployment application review and Advanced selection fix**: `app-preview.test.ts` (summary and
   profile previews equal the generated configuration) and `app-review.spec.ts` (previews, Final Review
   summary, and the Advanced catalog scroll regression in all four layouts); see

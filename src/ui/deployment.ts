@@ -234,11 +234,12 @@ export function renderDeploymentPage(): DeploymentPageHandle {
       );
       sizeLabel.textContent = `${x.fileName} · ${kb(x.zip.length)}`;
       for (const e of x.entries) {
-        const depth = e.path.split('/').length - 1;
+        // Indentation by data attribute, not a style attribute: the Content-Security-Policy allows no inline styles.
+        const depth = Math.min(e.path.split('/').length - 1, 6);
         contents.append(
           h(
             'li',
-            { 'data-file': e.path, style: `--depth:${depth}` },
+            { 'data-file': e.path, 'data-depth': depth },
             icon(e.path.endsWith('.ps1') || e.path.endsWith('.cmd') ? 'terminal' : e.path.endsWith('.json') ? 'code' : 'file'),
             h('code', {}, e.path),
             h('span', { class: `badge role-${e.role}` }, ROLE_LABELS[e.role] ?? e.role),
