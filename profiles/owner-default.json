@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 6,
+  "schemaVersion": 7,
   "profileName": "Owner default",
   "setup": {
     "languageMode": "unattended",
@@ -11,7 +11,9 @@
     "editionId": "pro",
     "customProductKey": "",
     "diskMode": "interactive",
-    "bypassRequirementsCheck": false,
+    "bypassTpmCheck": false,
+    "bypassCpuCheck": false,
+    "bypassSecureBootCheck": false,
     "bypassNetworkCheck": false,
     "processorArchitectures": [
       "amd64"
@@ -30,6 +32,7 @@
     "customUsername": "",
     "accountGroup": "Administrators",
     "password": "",
+    "noInitialPassword": false,
     "autoLogon": "persistent",
     "obscurePasswords": true,
     "hideOnlineAccountScreens": true,

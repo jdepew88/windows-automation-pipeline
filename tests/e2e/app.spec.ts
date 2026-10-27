@@ -630,16 +630,18 @@ test('mobile navigation drawer opens, navigates and closes without covering the 
 
 test('Windows 11 requirement bypass controls are present (Advanced), off by default, and drive the XML', async ({ page }) => {
   await setName(page, 'Alex');
-  await expect(checkbox(page, 'setup.bypassRequirementsCheck')).not.toBeChecked();
+  const bypasses = ['setup.bypassTpmCheck', 'setup.bypassCpuCheck', 'setup.bypassSecureBootCheck'];
+  for (const b of bypasses) await expect(checkbox(page, b)).not.toBeChecked();
   await expect(checkbox(page, 'setup.bypassNetworkCheck')).not.toBeChecked();
   await expect(preview(page)).not.toContainText('LabConfig');
   await page.getByRole('button', { name: 'Advanced', exact: true }).click();
   await go(page, 'setup');
-  await checkbox(page, 'setup.bypassRequirementsCheck').check();
-  for (const v of ['BypassTPMCheck', 'BypassSecureBootCheck', 'BypassRAMCheck']) await expect(preview(page)).toContainText(v);
+  for (const b of bypasses) await checkbox(page, b).check();
+  for (const v of ['BypassTPMCheck', 'BypassCPUCheck', 'BypassSecureBootCheck']) await expect(preview(page)).toContainText(v);
+  await expect(preview(page)).not.toContainText('BypassRAMCheck');
   await checkbox(page, 'setup.bypassNetworkCheck').check();
   await expect(preview(page)).toContainText('BypassNRO');
-  await checkbox(page, 'setup.bypassRequirementsCheck').uncheck();
+  for (const b of bypasses) await checkbox(page, b).uncheck();
   await expect(preview(page)).not.toContainText('LabConfig');
 });
 

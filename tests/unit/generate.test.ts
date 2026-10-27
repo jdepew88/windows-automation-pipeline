@@ -166,8 +166,8 @@ describe('variations', () => {
     expect(textContent(find(pk, 'WillShowUI')!)).toBe('Always');
   });
 
-  it('bypass requirements adds windowsPE LabConfig commands with order', () => {
-    const r = generateOk(profile((p) => (p.setup.bypassRequirementsCheck = true)));
+  it('the three bypasses add windowsPE LabConfig commands with order', () => {
+    const r = generateOk(profile((p) => Object.assign(p.setup, { bypassTpmCheck: true, bypassCpuCheck: true, bypassSecureBootCheck: true })));
     const cl = commandLines(r.root).windowsPE;
     expect(cl).toHaveLength(3);
     expect(cl[0]).toBe('reg.exe add "HKLM\\SYSTEM\\Setup\\LabConfig" /v BypassTPMCheck /t REG_DWORD /d 1 /f');

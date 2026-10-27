@@ -120,7 +120,7 @@ export function stripSecrets(profile: Profile): Profile {
 }
 
 export function hasSecrets(profile: Profile): boolean {
-  return profile.accounts.password !== '' || profile.wifi.password !== '' || /keyMaterial/i.test(profile.wifi.profileXml);
+  return (profile.accounts.password !== '' && !profile.accounts.noInitialPassword) || profile.wifi.password !== '' || /keyMaterial/i.test(profile.wifi.profileXml);
 }
 
 export function exportProfile(profile: Profile, options: ExportOptions = {}): string {

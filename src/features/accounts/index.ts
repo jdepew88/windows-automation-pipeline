@@ -91,6 +91,21 @@ export const settings: SettingDef[] = [
     verification: 'upstream-tested',
   },
   {
+    path: 'accounts.noInitialPassword',
+    section: 'accounts',
+    label: 'Create the account without an initial password',
+    control: 'checkbox',
+    description:
+      'The answer file contains no password value (an empty plain-text Password element, as Windows Setup requires for an account without one). Automatic sign-in can only be "once" (for first-logon provisioning) or off; set a password in Windows afterwards.',
+    applicability: 'Windows 10/11',
+    risk: 'Until a password is set, anyone with physical access can sign in to this account.',
+    stages: ['oobeSystem'],
+    mapping: 'LocalAccount/Password and AutoLogon/Password: empty Value, PlainText=true (never Base64-encoded)',
+    advanced: true,
+    visibleWhen: unattended,
+    verification: 'documented',
+  },
+  {
     path: 'accounts.password',
     section: 'accounts',
     label: 'Password',
@@ -101,7 +116,7 @@ export const settings: SettingDef[] = [
     stages: ['oobeSystem'],
     mapping: 'LocalAccount/Password/Value (+ AutoLogon/Password/Value)',
     advanced: true,
-    visibleWhen: unattended,
+    visibleWhen: (p) => unattended(p) && !p.accounts.noInitialPassword,
     verification: 'upstream-tested',
   },
   {
@@ -136,7 +151,7 @@ export const settings: SettingDef[] = [
     stages: ['oobeSystem'],
     mapping: '…/Password/PlainText = false and an encoded Value',
     advanced: true,
-    visibleWhen: unattended,
+    visibleWhen: (p) => unattended(p) && !p.accounts.noInitialPassword,
     verification: 'upstream-tested',
   },
   {
@@ -286,7 +301,9 @@ export function validate(p: Profile, issues: Issue[]): void {
     if (a.autoLogon !== 'none' && a.accountGroup !== 'Administrators') {
       err('accounts.autoLogon', 'Automatic sign-in requires the account to be an administrator. First-logon commands need administrative rights.');
     }
-    if (a.autoLogon === 'persistent' && a.password !== '') {
+    if (a.noInitialPassword && a.autoLogon === 'persistent') {
+      err('accounts.autoLogon', 'An account created without a password cannot keep automatic sign-in on. Choose "Sign in automatically once" (first-logon provisioning still runs) or "Do not sign in automatically".');
+    } else if (a.autoLogon === 'persistent' && a.password !== '') {
       err(
         'accounts.autoLogon',
         'Persistent automatic sign-in with a password would require storing the password in plain text in the registry. Use "once" or an empty password.',
@@ -334,7 +351,9 @@ export function obscurePassword(password: string, elementName: string): string {
   return btoa(binary);
 }
 
-function passwordElement(parent: XElement, name: string, password: string, obscure: boolean): void {
+function passwordElement(parent: XElement, name: string, password: string, obscure: boolean, none = false): void {
+  // No password: an empty plain-text value. Base64 would encode the element name as if it were a password.
+  if (none) return void append(parent, el(name, NS.unattend, [leaf('Value', ''), leaf('PlainText', 'true')]));
   append(
     parent,
     el(name, NS.unattend, [leaf('Value', obscure ? obscurePassword(password, name) : password), leaf('PlainText', obscure ? 'false' : 'true')]),
@@ -366,7 +385,7 @@ export function modify(ctx: GenContext): void {
 
   if (a.autoLogon !== 'none') {
     autoLogon.children.push(leaf('Username', username), leaf('Enabled', 'true'), leaf('LogonCount', '1'));
-    passwordElement(autoLogon, 'Password', a.password, a.obscurePasswords);
+    passwordElement(autoLogon, 'Password', a.password, a.obscurePasswords, a.noInitialPassword);
     const winlogon = "'Registry::HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon'";
     if (a.autoLogon === 'firstLogonOnly') {
       ctx.seq.firstLogon.append(`Set-ItemProperty -LiteralPath ${winlogon} -Name 'AutoLogonCount' -Type 'DWord' -Force -Value 0;`);
@@ -385,7 +404,7 @@ Set-ItemProperty -LiteralPath ${winlogon} -Name 'DefaultPassword' -Type 'String'
   const local = el('LocalAccount');
   setAttr(local, 'action', 'add', NS.wcm, 'wcm');
   local.children.push(leaf('Name', username), leaf('DisplayName', displayName), leaf('Group', a.accountGroup));
-  passwordElement(local, 'Password', a.password, a.obscurePasswords);
+  passwordElement(local, 'Password', a.password, a.obscurePasswords, a.noInitialPassword);
   append(userAccounts, el('LocalAccounts', NS.unattend, [local]));
 }
 

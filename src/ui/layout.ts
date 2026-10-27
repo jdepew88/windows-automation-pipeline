@@ -84,12 +84,12 @@ export interface FieldGroup {
  */
 export const FIELD_GROUPS: Partial<Record<SectionId, FieldGroup[]>> = {
   setup: [
-    { title: 'Edition & product key', paths: ['setup.editionMode', 'setup.editionId', 'setup.customProductKey'] },
+    { title: 'Edition & product key', paths: ['setup.editionMode', 'setup.editionId', 'setup.customProductKey', 'setup.bypassTpmCheck', 'setup.bypassCpuCheck', 'setup.bypassSecureBootCheck'] },
     {
       title: 'Language, region & time',
       paths: ['setup.languageMode', 'setup.imageLanguage', 'setup.userLocale', 'setup.keyboard', 'setup.geoLocation', 'setup.timeZoneMode', 'setup.timeZone'],
     },
-    { title: 'Disk & hardware', paths: ['setup.diskMode', 'setup.bypassRequirementsCheck', 'setup.bypassNetworkCheck', 'setup.processorArchitectures'] },
+    { title: 'Disk & hardware', paths: ['setup.diskMode', 'setup.bypassNetworkCheck', 'setup.processorArchitectures'] },
     { title: 'Setup behaviour', paths: ['setup.useConfigurationSet', 'setup.useNarrator', 'setup.hidePowerShellWindows', 'setup.keepSensitiveFiles'] },
   ],
   accounts: [
@@ -101,6 +101,7 @@ export const FIELD_GROUPS: Partial<Record<SectionId, FieldGroup[]>> = {
         'accounts.usernameMode',
         'accounts.customUsername',
         'accounts.accountGroup',
+        'accounts.noInitialPassword',
         'accounts.password',
         'accounts.obscurePasswords',
         'accounts.hideOnlineAccountScreens',

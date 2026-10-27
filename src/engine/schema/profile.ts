@@ -11,7 +11,7 @@ import { HealthSchema } from './health';
  *
  * Bump {@link SCHEMA_VERSION} and add a migration in `migrations.ts` for any breaking change.
  */
-export const SCHEMA_VERSION = 6;
+export const SCHEMA_VERSION = 7;
 
 export const ScriptTypeSchema = z.enum(['ps1', 'cmd', 'reg', 'vbs']);
 export type ScriptType = z.infer<typeof ScriptTypeSchema>;
@@ -69,7 +69,10 @@ export const ProfileSchema = z
         customProductKey: z.string().max(29),
         /** Windows PE disk selection is always interactive in this project; no other value is accepted. */
         diskMode: z.literal('interactive'),
-        bypassRequirementsCheck: bool,
+        /** Windows 11 Setup LabConfig bypasses, one per check (schema version 7). */
+        bypassTpmCheck: bool,
+        bypassCpuCheck: bool,
+        bypassSecureBootCheck: bool,
         bypassNetworkCheck: bool,
         processorArchitectures: z.array(ArchitectureSchema),
         timeZoneMode: z.enum(['implicit', 'explicit']),
@@ -89,6 +92,8 @@ export const ProfileSchema = z
         customUsername: z.string().max(64),
         accountGroup: z.enum(['Administrators', 'Users']),
         password: z.string().max(127),
+        /** Create the account without a password: no Password value, and no persistent automatic sign-in. */
+        noInitialPassword: bool,
         autoLogon: z.enum(['persistent', 'firstLogonOnly', 'none']),
         obscurePasswords: bool,
         hideOnlineAccountScreens: bool,

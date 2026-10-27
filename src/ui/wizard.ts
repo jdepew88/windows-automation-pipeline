@@ -9,6 +9,7 @@ import { resolveSelection, type SelectionResult } from '../engine/applications/s
 import { deploymentChecklist, effectiveApps, profilePreview, type ChecklistItem } from '../engine/applications/preview';
 import { addPackage, pruneDetached, removePackage } from '../engine/applications/profiles';
 import { SETTINGS_BY_PATH } from '../features';
+import { BYPASSES, targetsWindows11 } from '../features/setup';
 import {
   CUSTOMER_TYPES,
   LAPTOP_PROFILE,
@@ -209,6 +210,23 @@ export function renderWizard(ctx: WizardContext): WizardHandle {
             ? h('select', { id: editionSel, 'data-testid': 'wiz-edition', onchange: (e: Event) => mutate((q) => (q.setup.editionId = (e.target as HTMLSelectElement).value)) }, editions.map((e) => h('option', { value: e.Id, selected: e.Id === p.setup.editionId }, `Windows 11 ${e.DisplayName}`)))
             : customizedNote(p.setup.editionMode === 'interactive' ? 'Chosen during Setup.' : 'From a product key.', 'setup.editionMode', ctx),
           h('p', { class: 'desc' }, 'The edition must be on your installation media; an answer file cannot add one the ISO does not contain.'),
+          targetsWindows11(p)
+            ? h(
+                'fieldset',
+                { class: 'wiz-bypass', 'data-testid': 'wiz-bypass' },
+                h('legend', { class: 'f-label' }, 'Windows 11 hardware checks'),
+                BYPASSES.map(([path, label]) => {
+                  const key = path.slice('setup.'.length) as 'bypassTpmCheck' | 'bypassCpuCheck' | 'bypassSecureBootCheck';
+                  return h(
+                    'label',
+                    { class: 'check-row' },
+                    h('input', { type: 'checkbox', 'data-testid': `wiz-${key}`, 'data-path': path, checked: p.setup[key], onchange: (e: Event) => mutate((q) => (q.setup[key] = (e.target as HTMLInputElement).checked)) }),
+                    h('span', {}, label),
+                  );
+                }),
+                h('p', { class: 'desc' }, 'Off by default. Only for VMs or unsupported hardware: Microsoft does not support Windows 11 on devices that fail these checks, and they may not receive updates.'),
+              )
+            : null,
         ),
         h(
           'div',

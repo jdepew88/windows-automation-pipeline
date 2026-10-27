@@ -237,8 +237,8 @@ describe('answer file integration (Phase 4 changes)', () => {
   it('still contains no disk automation and keeps the bypass settings unchanged', () => {
     expect(r.xml).not.toMatch(/DiskConfiguration|WillWipeDisk|diskpart/i);
     expect(r.xml).not.toContain('LabConfig');
-    const bypass = generateOk(withApps((x) => (x.setup.bypassRequirementsCheck = true)));
-    for (const v of ['BypassTPMCheck', 'BypassSecureBootCheck', 'BypassRAMCheck']) expect(bypass.xml).toContain(v);
+    const bypass = generateOk(withApps((x) => Object.assign(x.setup, { bypassTpmCheck: true, bypassCpuCheck: true, bypassSecureBootCheck: true })));
+    for (const v of ['BypassTPMCheck', 'BypassCPUCheck', 'BypassSecureBootCheck']) expect(bypass.xml).toContain(v);
   });
 
   it('with both engines off nothing is added (Milestone 1 answer file unchanged)', () => {

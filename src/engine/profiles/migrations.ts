@@ -133,6 +133,20 @@ export const MIGRATIONS: Record<number, Migration> = {
       note: 'Deployment verification and health reports (added in schema version 6) are turned off for this older profile, so it produces the same deployment as before. Turn them on under "Verification & Health" if you want them.',
     };
   },
+
+  // v7 splits the combined Windows 11 requirements bypass (TPM, Secure Boot, RAM) into separate
+  // TPM, CPU and Secure Boot options. A profile that had it on keeps the TPM and Secure Boot bypasses.
+  6: (input) => {
+    const setup = isObj(input.setup) ? { ...input.setup } : undefined;
+    if (!setup || !('bypassRequirementsCheck' in setup)) return { value: input };
+    const on = setup.bypassRequirementsCheck === true;
+    delete setup.bypassRequirementsCheck;
+    Object.assign(setup, { bypassTpmCheck: on, bypassCpuCheck: false, bypassSecureBootCheck: on });
+    return {
+      value: { ...input, setup },
+      note: on ? 'The Windows 11 requirements bypass is now three separate options. This profile keeps the TPM and Secure Boot bypasses; the RAM check is no longer bypassed, and the CPU bypass is off. Change them under "Setup, region & edition".' : undefined,
+    };
+  },
 };
 
 /** The six (empty) built-in profiles of schema version 3, for the v2→v3 step. */

@@ -7,6 +7,24 @@ import { child, remove } from '../../engine/xml/tree';
 
 const unattendedLang = (p: Profile) => p.setup.languageMode === 'unattended';
 
+/** Windows 11 has no x86 edition, so an x86-only answer file is for Windows 10. */
+export const targetsWindows11 = (p: Profile) => p.setup.processorArchitectures.some((a) => a !== 'x86');
+
+/** The Windows 11 Setup hardware-check bypasses: profile path, label, LabConfig value. */
+export const BYPASSES = [
+  ['setup.bypassTpmCheck', 'Bypass TPM 2.0 requirement', 'BypassTPMCheck'],
+  ['setup.bypassCpuCheck', 'Bypass unsupported CPU check', 'BypassCPUCheck'],
+  ['setup.bypassSecureBootCheck', 'Bypass Secure Boot requirement', 'BypassSecureBootCheck'],
+] as const;
+
+/** The enabled bypasses' LabConfig values, in order; none for a Windows 10 (x86-only) answer file. */
+export function enabledBypasses(p: Profile): string[] {
+  if (!targetsWindows11(p)) return [];
+  const s = p.setup;
+  const on = { 'setup.bypassTpmCheck': s.bypassTpmCheck, 'setup.bypassCpuCheck': s.bypassCpuCheck, 'setup.bypassSecureBootCheck': s.bypassSecureBootCheck };
+  return BYPASSES.filter(([path]) => on[path]).map(([, , value]) => value);
+}
+
 export const settings: SettingDef[] = [
   {
     path: 'setup.languageMode',
@@ -144,19 +162,22 @@ export const settings: SettingDef[] = [
     advanced: false,
     verification: 'documented',
   },
-  {
-    path: 'setup.bypassRequirementsCheck',
-    section: 'setup',
-    label: 'Bypass Windows 11 hardware requirements check (TPM, Secure Boot, RAM)',
-    control: 'checkbox',
-    description: 'Only for VMs or unsupported hardware. Unsupported devices may not receive updates.',
-    applicability: 'Windows 11 Setup (windowsPE)',
-    risk: 'Microsoft does not support Windows 11 on hardware that fails these checks.',
-    stages: ['windowsPE'],
-    mapping: 'windowsPE RunSynchronous: reg.exe add HKLM\\SYSTEM\\Setup\\LabConfig /v BypassTPMCheck|BypassSecureBootCheck|BypassRAMCheck = 1',
-    advanced: true,
-    verification: 'upstream-tested',
-  },
+  ...BYPASSES.map(
+    ([path, label, value]): SettingDef => ({
+      path,
+      section: 'setup',
+      label,
+      control: 'checkbox',
+      description: 'Only for VMs or unsupported hardware. Unsupported devices may not receive updates.',
+      applicability: 'Windows 11 Setup (windowsPE); not shown when only x86 (Windows 10) is selected',
+      risk: 'Microsoft does not support Windows 11 on hardware that fails this check.',
+      stages: ['windowsPE'],
+      mapping: `windowsPE › Microsoft-Windows-Setup › RunSynchronous: reg.exe add "HKLM\\SYSTEM\\Setup\\LabConfig" /v ${value} /t REG_DWORD /d 1 /f`,
+      advanced: true,
+      visibleWhen: targetsWindows11,
+      verification: 'documented',
+    }),
+  ),
   {
     path: 'setup.bypassNetworkCheck',
     section: 'setup',
@@ -307,10 +328,8 @@ reg.exe ADD "HKCU\\Software\\Microsoft\\Windows NT\\CurrentVersion\\Accessibilit
   }
 
   // Bypass (upstream BypassModifier).
-  if (s.bypassRequirementsCheck) {
-    for (const value of ['BypassTPMCheck', 'BypassSecureBootCheck', 'BypassRAMCheck']) {
-      ctx.appendCommand('windowsPE', ctx.cmd.registry(`add "HKLM\\SYSTEM\\Setup\\LabConfig" /v ${value} /t REG_DWORD /d 1 /f`));
-    }
+  for (const value of enabledBypasses(ctx.profile)) {
+    ctx.appendCommand('windowsPE', ctx.cmd.registry(`add "HKLM\\SYSTEM\\Setup\\LabConfig" /v ${value} /t REG_DWORD /d 1 /f`));
   }
   if (s.bypassNetworkCheck) {
     ctx.seq.specialize.append('reg.exe add "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\OOBE" /v BypassNRO /t REG_DWORD /d 1 /f;');

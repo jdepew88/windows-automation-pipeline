@@ -5,6 +5,7 @@ import { resolveIdentity } from './naming';
 import { ownerDefaults, hasSecrets } from './profiles';
 import { diffProfiles } from './profiles/diff';
 import { AUTOLOGON_WARNING } from '../features/accounts';
+import { BYPASSES, enabledBypasses } from '../features/setup';
 import { SETTINGS_BY_PATH } from '../features';
 import { BUILTIN_PROFILES, UNIVERSAL_PROFILES } from './applications/builtin';
 import { installable, resolveSelection, type SelectionResult } from './applications/selection';
@@ -238,7 +239,7 @@ export interface Consideration {
 }
 
 export const isEmptyPasswordAutoAdmin = (p: Profile) =>
-  p.accounts.accountMode === 'unattendedLocal' && p.accounts.accountGroup === 'Administrators' && p.accounts.password === '' && p.accounts.autoLogon !== 'none';
+  p.accounts.accountMode === 'unattendedLocal' && p.accounts.accountGroup === 'Administrators' && (p.accounts.password === '' || p.accounts.noInitialPassword) && p.accounts.autoLogon !== 'none';
 
 export const wifiSecretEmbedded = (p: Profile) =>
   (p.wifi.mode === 'parameters' && p.wifi.authentication !== 'open' && p.wifi.password !== '') || (p.wifi.mode === 'profileXml' && /keyMaterial/i.test(p.wifi.profileXml));
@@ -255,7 +256,7 @@ export function considerations(p: Profile, sel: SelectionResult = resolveSelecti
       ack: 'I understand that anyone with physical access to this computer gets an administrator session.',
       edit: { section: 'accounts' },
     });
-  } else if (a.accountMode === 'unattendedLocal' && a.password !== '' && a.autoLogon === 'persistent') {
+  } else if (a.accountMode === 'unattendedLocal' && a.password !== '' && !a.noInitialPassword && a.autoLogon === 'persistent') {
     out.push({ id: 'autologon-password', severity: 'warning', title: 'The account password is stored for automatic sign-in', detail: 'Persistent automatic sign-in keeps the password readable by administrators in the registry (Winlogon DefaultPassword), and the answer file contains it until it is deleted at the first sign-in.', edit: { section: 'accounts' } });
   }
   if (p.setup.editionMode === 'genericKey') {
@@ -288,7 +289,8 @@ export function considerations(p: Profile, sel: SelectionResult = resolveSelecti
     const signIn = installable(sel).filter((x) => x.accountSignIn);
     if (signIn.length) out.push({ id: 'sign-in-apps', severity: 'info', title: 'Accounts are not configured', detail: `${signIn.map((x) => x.displayName).join(', ')} install unattended; the customer signs in to them afterwards.`, edit: { step: 'apps' } });
   }
-  if (p.setup.bypassRequirementsCheck) out.push({ id: 'bypass', severity: 'warning', title: 'Windows 11 hardware checks are bypassed', detail: 'Microsoft does not support Windows 11 on hardware that fails TPM, Secure Boot or RAM checks, and such devices may not receive updates.', edit: { section: 'setup' } });
+  const bypassed = enabledBypasses(p);
+  if (bypassed.length) out.push({ id: 'bypass', severity: 'warning', title: 'Windows 11 hardware checks are bypassed', detail: `${BYPASSES.filter(([, , v]) => bypassed.includes(v)).map(([, label]) => label).join('; ')}. Microsoft does not support Windows 11 on hardware that fails these checks, and such devices may not receive updates. The bypasses apply only to a clean installation started from this USB; they cannot make Windows 11 run on a processor that lacks the instructions it requires.`, edit: { section: 'setup' } });
   if (hasSecrets(p) && p.setup.keepSensitiveFiles) out.push({ id: 'keep-sensitive', severity: 'warning', title: 'Sensitive files are kept on the installed computer', detail: '"Keep sensitive files" leaves the answer file and the Wi-Fi profile (with passwords) on the installed system.', edit: { section: 'setup' } });
   return out;
 }
@@ -322,7 +324,7 @@ export function reviewSummary(p: Profile, sel: SelectionResult = resolveSelectio
       username: p.accounts.accountMode === 'unattendedLocal' ? id.username : p.accounts.accountMode === 'interactiveLocal' ? 'Created during setup (interactive)' : 'Microsoft account (interactive)',
       accountType: p.accounts.accountGroup === 'Administrators' ? 'Administrator' : 'Standard user',
       signIn: p.accounts.autoLogon === 'persistent' ? 'Automatic (stays on)' : p.accounts.autoLogon === 'firstLogonOnly' ? 'Automatic once' : 'Password required',
-      password: p.accounts.password === '' ? 'No password' : 'Password set (not shown)',
+      password: p.accounts.noInitialPassword ? 'No initial password (chosen)' : p.accounts.password === '' ? 'No password' : 'Password set (not shown)',
       edition,
       architecture: p.setup.processorArchitectures.map((x) => ARCH_LABEL[x] ?? x).join(', '),
       locale: unattendedLang ? `${lookup.userLocale(p.setup.userLocale)?.DisplayName ?? p.setup.userLocale} · display language ${p.setup.imageLanguage}` : 'Chosen during Setup',
