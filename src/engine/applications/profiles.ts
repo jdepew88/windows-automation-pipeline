@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { APP_PROFILE_ID, AppProfileSchema, NO_DEVICES, type AppProfile, type ApplicationsSelection, type PackageRef } from '../schema/applications';
 import { BUILTIN_PROFILES, UNIVERSAL_PROFILES, isBuiltinProfile } from './builtin';
 import { CATALOG_SOURCE, isKnownSource, packageKey, unresolvedReason } from './ids';
-import { ADDED, allProfiles, effectiveDevices, expandProfile, resolveSelection } from './selection';
+import { ADDED, activeClosure, allProfiles, effectiveDevices, expandProfile, resolveSelection } from './selection';
 import { importWinGetDocument, looksLikeWinGetDocument, MAX_IMPORT_BYTES } from './winget-json';
 
 /**
@@ -243,6 +243,7 @@ export function createProfile(sel: ApplicationsSelection, name: string, packages
  * device answers). The deployment then uses that profile alone, which resolves to the same apps.
  */
 export function saveAsNewProfile(sel: ApplicationsSelection, name: string, description = '', now = new Date()): AppProfile {
+  pruneDetached(sel);
   const before = selectedKeys(sel);
   const p = createProfile(sel, name, sel.added, now);
   p.description = description.trim().slice(0, 500);
@@ -252,6 +253,7 @@ export function saveAsNewProfile(sel: ApplicationsSelection, name: string, descr
   sel.selectedProfiles = [p.id];
   sel.added = [];
   sel.removed = [];
+  delete sel.addedWith;
   // Defensive: the saved profile must reproduce the selection exactly.
   const after = selectedKeys(sel);
   if (before !== after) throw new Error('Saved profile does not reproduce the selection.');
@@ -265,6 +267,7 @@ export function saveAsNewProfile(sel: ApplicationsSelection, name: string, descr
 export function updateProfileFromSelection(sel: ApplicationsSelection, id: string, now = new Date()): boolean {
   const p = sel.profiles.find((x) => x.id === id);
   if (!p || p.builtin || isBuiltinProfile(id)) return false;
+  pruneDetached(sel);
   const before = selectedKeys(sel);
   const devices = effectiveDevices(sel);
   if (sel.selectedProfiles.includes(id)) {
@@ -282,6 +285,7 @@ export function updateProfileFromSelection(sel: ApplicationsSelection, id: strin
   sel.selectedProfiles = [id];
   sel.added = [];
   sel.removed = [];
+  delete sel.addedWith;
   const after = selectedKeys(sel);
   return before === after;
 }
@@ -322,12 +326,44 @@ export function deleteProfile(sel: ApplicationsSelection, id: string): boolean {
   sel.profiles.splice(i, 1);
   sel.selectedProfiles = sel.selectedProfiles.filter((x) => x !== id);
   for (const p of sel.profiles) p.inherits = p.inherits.filter((x) => x !== id);
+  pruneDetached(sel);
   return true;
 }
 
 export function toggleProfile(sel: ApplicationsSelection, id: string, on: boolean): void {
   sel.selectedProfiles = on ? [...new Set([...sel.selectedProfiles, id])] : sel.selectedProfiles.filter((x) => x !== id);
+  pruneDetached(sel);
 }
+
+/**
+ * Forgets the recommendations whose profiles are all inactive (after a profile is unticked or a
+ * device answer changes): they leave `added`, so re-ticking the profile offers them again unticked.
+ * The resolver already ignores them; this keeps the stored selection equal to what is shown.
+ */
+export function pruneDetached(sel: ApplicationsSelection): void {
+  if (!sel.addedWith) return;
+  const active = activeClosure(sel);
+  const linked: Record<string, string[]> = {};
+  const dropped = new Set<string>();
+  for (const [key, via] of Object.entries(sel.addedWith)) {
+    const still = via.filter((id) => active.includes(id));
+    if (still.length) linked[key] = still;
+    else dropped.add(key);
+  }
+  sel.added = sel.added.filter((r) => !dropped.has(packageKey(r)));
+  setLinks(sel, linked);
+}
+
+function setLinks(sel: ApplicationsSelection, linked: Record<string, string[]>): void {
+  const kept = Object.fromEntries(Object.entries(linked).filter(([key]) => sel.added.some((r) => packageKey(r) === key)));
+  if (Object.keys(kept).length) sel.addedWith = kept;
+  else delete sel.addedWith;
+}
+
+const unlink = (sel: ApplicationsSelection, keys: Iterable<string>) => {
+  const drop = new Set(keys);
+  setLinks(sel, Object.fromEntries(Object.entries(sel.addedWith ?? {}).filter(([key]) => !drop.has(key))));
+};
 
 /** Adds a package to a custom profile, or to the individual additions when `target` is "added". */
 export function addPackage(sel: ApplicationsSelection, ref: PackageRef, target: string = ADDED): boolean {
@@ -338,7 +374,10 @@ export function addPackage(sel: ApplicationsSelection, ref: PackageRef, target: 
   if (list.some((r) => packageKey(r) === key)) return false;
   // Ticking an app that a profile already selects only undoes its removal.
   if (target === ADDED && resolveSelection({ ...sel, added: [], removed: [] }).packages.some((p) => p.key === key)) return true;
+  // A recommendation of the active profiles is linked to them, so it leaves when they are unticked.
+  const via = target === ADDED ? resolveSelection(sel).recommended.find((p) => p.key === key)?.origins : undefined;
   list.push(structuredClone(ref));
+  if (via?.length) setLinks(sel, { ...sel.addedWith, [key]: via });
   return true;
 }
 
@@ -349,6 +388,7 @@ export function addPackage(sel: ApplicationsSelection, ref: PackageRef, target: 
  */
 export function removePackage(sel: ApplicationsSelection, key: string): void {
   sel.added = sel.added.filter((r) => packageKey(r) !== key);
+  unlink(sel, [key]);
   const fromProfiles = resolveSelection({ ...sel, removed: [] }).packages.some((p) => p.key === key);
   if (fromProfiles && !sel.removed.includes(key)) sel.removed.push(key);
 }
@@ -369,12 +409,14 @@ export function restoreProfileDefaults(sel: ApplicationsSelection, profileId: st
   const optional = new Set((profiles.find((p) => p.id === profileId)?.optional ?? []).map(packageKey));
   sel.removed = sel.removed.filter((k) => !defaults.has(k));
   sel.added = sel.added.filter((r) => !optional.has(packageKey(r)));
+  unlink(sel, optional);
 }
 
 /** Clears every individual addition and removal (the ticked profiles and devices stay). */
 export function resetOverrides(sel: ApplicationsSelection): void {
   sel.added = [];
   sel.removed = [];
+  delete sel.addedWith;
 }
 
 /** Back to the owner defaults for applications: Core Essentials only, no devices, no changes. Custom profiles are kept. */

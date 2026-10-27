@@ -58,9 +58,10 @@ Behaviour that follows from the rules:
 | Action | Effect |
 |---|---|
 | Tick a profile | Its defaults are selected unless you removed them earlier; your earlier changes stay. |
-| Untick a profile | Its defaults leave the plan. Your additions stay; your removals stay recorded but have no effect while nothing selects the app. |
+| Untick a profile | Its defaults leave the plan, and so do its recommendations you ticked (unless another active profile also recommends them). Apps you added yourself stay; your removals stay recorded but have no effect while nothing selects the app. |
 | Untick an app that a profile selects | Recorded as a removal (`removed`). The profile itself never changes. Shown as "Unticked by you (default in …)". |
-| Tick an app | Undoes a removal, or adds the app individually (`added`). |
+| Tick an app | Undoes a removal, or adds the app individually (`added`). A recommendation of an active profile is linked to the profiles that recommend it (`addedWith`) and leaves the plan with them; any other app is your own addition and survives profile changes. |
+| Change a device answer | Its device profile's defaults and the recommendations of it you ticked follow the answer. |
 | Untick a dependency | It stays out, and the dependent app gets a warning. |
 | Restore defaults (on a profile card) | Ticks that profile's defaults again and unticks its recommendations you had ticked. |
 | Undo my changes | Clears all individual additions and removals; ticked profiles and devices stay. |

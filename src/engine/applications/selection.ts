@@ -15,8 +15,9 @@ import { CATALOG_SOURCE, packageKey, unresolvedReason } from './ids';
  *            ∪ dependencies of the above (catalog `requires`)
  *            − individual removals − exclusions saved in active custom profiles (unless added)
  *   recommended = optional apps of the active profiles that are not selected.
- * Ticking or unticking a profile never edits `added`/`removed`, so a deliberate change survives
- * profile switches; only the explicit reset actions clear them.
+ * Ticking or unticking a profile never edits the user's own additions or `removed`, so a deliberate
+ * change survives profile switches; only the explicit reset actions clear them. A recommendation
+ * ticked while its profile is active is linked to that profile (`addedWith`) and leaves with it.
  */
 
 export type Resolution = 'verified' | 'unverified' | 'unresolved' | 'manual';
@@ -116,6 +117,26 @@ export function effectiveDevices(sel: Pick<ApplicationsSelection, 'devices' | 's
   return d;
 }
 
+/** Every profile active in this selection: the ticked ones, the device profiles and everything they inherit. */
+export function activeClosure(sel: ApplicationsSelection): string[] {
+  const profiles = allProfiles(sel);
+  const ids = [...sel.selectedProfiles.filter((id) => profiles.some((p) => p.id === id)), ...deviceProfiles(effectiveDevices(sel))];
+  return [...new Set(ids.flatMap((id) => closure(id, profiles)))];
+}
+
+/**
+ * The individual additions that count: the user's own, and recommendations ticked while a profile
+ * that recommends them is still active. A recommendation goes with its profiles, so unticking the
+ * last of them removes it (`pruneDetached` then forgets it).
+ */
+export function attachedAdditions(sel: ApplicationsSelection, active: readonly string[] = activeClosure(sel)): PackageRef[] {
+  const linked = sel.addedWith ?? {};
+  return sel.added.filter((ref) => {
+    const via = linked[packageKey(ref)];
+    return !via || via.some((id) => active.includes(id));
+  });
+}
+
 function plan(key: string, input: PackageRef, origin: string): PlannedPackage {
   const catalog = catalogEntryForKey(key);
   const isCatalogRef = input.source.toLowerCase() === CATALOG_SOURCE;
@@ -172,12 +193,13 @@ export function resolveSelection(sel: ApplicationsSelection): SelectionResult {
   };
 
   for (const id of activeProfiles) for (const ref of expandProfile(id, profiles, cycles)) take(ref, id);
-  for (const ref of sel.added) take(ref, ADDED);
+  const active = [...new Set(activeProfiles.flatMap((id) => closure(id, profiles)))];
+  const added = attachedAdditions(sel, active);
+  for (const ref of added) take(ref, ADDED);
 
   // Removals: the user's, plus exclusions saved in active custom profiles (an explicit addition beats those).
-  const addedKeys = new Set(sel.added.map(packageKey));
+  const addedKeys = new Set(added.map(packageKey));
   const removedBy = new Map<string, string>();
-  const active = [...new Set(activeProfiles.flatMap((id) => closure(id, profiles)))];
   for (const id of active) for (const k of profiles.find((p) => p.id === id)?.excluded ?? []) if (!addedKeys.has(k.toLowerCase())) removedBy.set(k.toLowerCase(), id);
   for (const k of sel.removed) removedBy.set(k.toLowerCase(), 'user');
 

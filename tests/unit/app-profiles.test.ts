@@ -298,14 +298,24 @@ describe('overrides and profile switching', () => {
     expect(s.added.map((r) => r.packageIdentifier)).toEqual(['Discord.Discord']);
   });
 
-  it('removing and re-adding a profile keeps deliberate changes; restore and reset are explicit', () => {
+  it('removing and re-adding a profile keeps deliberate changes; its ticked recommendations leave with it; restore and reset are explicit', () => {
     const s = fresh();
     toggleProfile(s, 'gaming', true);
     removePackage(s, id('epic'));
     addPackage(s, ref('discord'));
+    addPackage(s, ref('gimp'));
+    expect(s.addedWith).toEqual({ [id('discord')]: ['gaming'] });
     toggleProfile(s, 'gaming', false);
+    // Discord was a Gaming recommendation: it goes with Gaming. GIMP was the user's own addition.
+    expect(selected(s)).not.toContain('discord');
+    expect(selected(s)).toContain('gimp');
+    expect(s.added.map((r) => packageKey(r))).toEqual([id('gimp')]);
+    expect(s.addedWith).toBeUndefined();
     toggleProfile(s, 'gaming', true);
     expect(selected(s)).not.toContain('epic');
+    expect(selected(s)).not.toContain('discord');
+    expect(resolveSelection(s).recommended.some((p) => p.key === id('discord'))).toBe(true);
+    addPackage(s, ref('discord'));
     expect(selected(s)).toContain('discord');
     restoreProfileDefaults(s, 'gaming');
     expect(selected(s)).toContain('epic');

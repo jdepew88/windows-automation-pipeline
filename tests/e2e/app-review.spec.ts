@@ -97,18 +97,20 @@ test.describe('Quick Deployment: profile previews', () => {
     await card(page, 'developer').locator('input').check();
     await card(page, 'network-engineer').locator('input').check();
     await card(page, 'gaming').locator('input').check();
-    await wiz(page).locator('[data-action="view-combined"]').click();
-    const combined = wiz(page).getByTestId('wiz-combined');
+    // The combined selection is listed under the profiles, one checkbox per application.
+    const combined = wiz(page).getByTestId('wiz-checklist-list');
+    const count = wiz(page).getByTestId('wiz-app-count');
     const all = await names(combined);
     expect(all.filter((n) => n === 'Git')).toHaveLength(1);
     expect(new Set(all).size).toBe(all.length);
     // Core Essentials + Gaming + Network Engineer (incl. Developer and WSL). RustDesk is only recommended (Phase 10).
-    await expect(combined).toHaveAttribute('data-total', String(7 + 2 + 29));
+    await expect(count).toHaveAttribute('data-count', String(7 + 2 + 29));
+    expect(all).toHaveLength(7 + 2 + 29);
     await expect(combined).not.toContainText('RustDesk');
-    await expect(combined.locator('[data-key="winget:git.git"]')).toHaveAttribute('title', /General Developer, Network Engineer/);
+    await expect(combined.locator('[data-key="winget:git.git"] label')).toHaveAttribute('title', /General Developer, Network Engineer/);
     // Unticking a profile updates the combined view immediately.
     await card(page, 'gaming').locator('input').uncheck();
-    await expect(combined).toHaveAttribute('data-total', String(7 + 29));
+    await expect(count).toHaveAttribute('data-count', String(7 + 29));
     await expect(combined).not.toContainText('Steam');
   });
 
@@ -301,7 +303,8 @@ test.describe('Advanced catalog keeps the scroll position', () => {
 test('no horizontal scroll with previews and the summary open', async ({ page }) => {
   await toType(page);
   await viewBtn(page, 'network-engineer').click();
-  await wiz(page).locator('[data-action="view-combined"]').click();
+  await card(page, 'network-engineer').locator('input').check();
+  await expect(wiz(page).getByTestId('wiz-checklist-list')).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true);
   await toReview(page);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true);

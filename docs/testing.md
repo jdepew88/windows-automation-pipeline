@@ -41,6 +41,11 @@ Unit test coverage by acceptance criterion:
   profile previews equal the generated configuration) and `app-review.spec.ts` (previews, Final Review
   summary, and the Advanced catalog scroll regression in all four layouts); see
   [phase-8-ui-review-and-app-selection-fixes](phase-8-ui-review-and-app-selection-fixes/implementation-report.md).
+- **Quick Deployment live profile selection**: `live-profile-selection.test.ts` (ticking and
+  unticking profiles, shared apps, exclusions, linked recommendations, devices, saved and imported
+  profiles, the package equal to step 2) and `live-profile-selection.spec.ts` (the same in the
+  browser: step 2 checklist, navigation, Final Review and the downloaded ZIP); see
+  [quick-deployment-live-profile-selection](quick-deployment-live-profile-selection/root-cause.md).
 - **Phase 8 (hardware-aware drivers)**: `drivers.test.ts`, `Drivers.Tests.ps1` (the engine of the
   real generated package against simulated hardware: fixtures A-H, selection, Windows Update,
   restarts, recovery, orchestrator and recovery-tool integration), driver scenarios in

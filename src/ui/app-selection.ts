@@ -24,6 +24,7 @@ import {
   duplicateProfile,
   exportAppProfiles,
   importAppProfiles,
+  pruneDetached,
   removePackage,
   renameProfile,
   resetOverrides,
@@ -112,7 +113,8 @@ export function explainOrigin(sel: ApplicationsSelection, x: PlannedPackage, r: 
   // Universal profiles (Core Essentials) first, then the others, as "Selected by …".
   const ordered = [...profiles.filter((o) => UNIVERSAL_PROFILES.includes(o)), ...profiles.filter((o) => !UNIVERSAL_PROFILES.includes(o))];
   if (ordered.length) parts.push(`Selected by ${ordered.map((o) => profileName(sel, o)).join(', ')}`);
-  if (x.origins.includes(ADDED)) parts.push('Added by you');
+  const via = sel.addedWith?.[x.key];
+  if (x.origins.includes(ADDED)) parts.push(via?.length ? `Ticked by you (recommended by ${via.map((o) => profileName(sel, o)).join(', ')})` : 'Added by you');
   if (x.origins.includes(REQUIRED)) {
     const by = x.requiredBy.map((k) => r.packages.find((p) => p.key === k)?.displayName ?? k);
     parts.push(`Required by ${by.join(', ')}`);
@@ -303,7 +305,11 @@ export function createApplicationsEditor(def: Parameters<CustomRenderer>[0], sto
   // Devices -------------------------------------------------------------------------------------
   const devicesBox = h('div', { class: 'devices', 'data-testid': 'app-devices' });
   const deviceNote = h('div', { class: 'device-note', 'data-testid': 'app-device-note', 'aria-live': 'polite' });
-  const setDevices = (fn: (d: Devices) => void) => mutate((s) => fn(s.devices));
+  const setDevices = (fn: (d: Devices) => void) =>
+    mutate((s) => {
+      fn(s.devices);
+      pruneDetached(s);
+    });
   function renderDevices(sel: ApplicationsSelection, r: SelectionResult): void {
     const phoneName = uid('ph');
     const radio = (value: Devices['phone'], label: string) => {

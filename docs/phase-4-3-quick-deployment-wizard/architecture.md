@@ -100,9 +100,12 @@ page) is still available and shown in the wizard as "Customized in Advanced Sett
 
 Customer types are exactly the Phase 4.2 built-in profiles (`everyday`, `gaming`, `developer`,
 `network-engineer`, `music`, `laptop`, `touch`) plus Core Essentials; ticking one is the same
-operation as the Advanced profile checkbox (`toggleProfile`). Individual ticks and unticks
-(`added`/`removed`) survive ticking or unticking types and switching layouts or modes; built-in
-definitions are never edited. Saved profiles appear in step 2 next to the built-in types.
+operation as the Advanced profile checkbox (`toggleProfile`). Individual unticks (`removed`) and
+the apps you add yourself survive ticking or unticking types and switching layouts or modes; a
+recommendation you ticked leaves with the profiles that recommend it (`addedWith`, see
+[the live selection fix](../quick-deployment-live-profile-selection/root-cause.md)). Built-in
+definitions are never edited. Saved profiles appear in step 2 next to the built-in types, and step 2
+lists the combined selection with one checkbox per application.
 
 "Customized in Advanced Settings" appears when a value the wizard summarises differs from what the
 wizard itself sets (edition from a product key, non-x64 architectures, a custom update policy,

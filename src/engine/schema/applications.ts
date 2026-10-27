@@ -101,6 +101,12 @@ export const ApplicationsSelectionSchema = z
     devices: DevicesSchema,
     /** Individually added packages (on top of the selected profiles). */
     added: z.array(PackageRefSchema).max(500),
+    /**
+     * Additions ticked as recommendations of active profiles: package key → the profiles that
+     * recommended it. Such an addition goes with those profiles: it is dropped once none of them
+     * is active. Additions without an entry are the user's own and survive profile changes.
+     */
+    addedWith: z.record(z.string().max(200), z.array(z.string().max(48)).max(50)).optional(),
     /** Package keys ("source:id", lower case) removed from the combined selection. */
     removed: z.array(z.string().max(200)).max(1000),
   })

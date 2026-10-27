@@ -34,7 +34,8 @@ function originText(sel: ApplicationsSelection, x: PlannedPackage, r: SelectionR
   const ordered = [...profiles.filter((o) => UNIVERSAL_PROFILES.includes(o)), ...profiles.filter((o) => !UNIVERSAL_PROFILES.includes(o))];
   const parts: string[] = [];
   if (ordered.length) parts.push(ordered.map((o) => nameOf(sel, o)).join(', '));
-  if (x.origins.includes(ADDED)) parts.push('Added by you');
+  const via = sel.addedWith?.[x.key];
+  if (x.origins.includes(ADDED)) parts.push(via?.length ? `Recommended by ${via.map((o) => nameOf(sel, o)).join(', ')}, ticked by you` : 'Added by you');
   if (x.origins.includes(REQUIRED)) parts.push(`Required by ${x.requiredBy.map((k) => r.packages.find((p) => p.key === k)?.displayName ?? k).join(', ')}`);
   return parts.join(' · ');
 }
@@ -170,4 +171,41 @@ export function profilePreview(sel: ApplicationsSelection, id: string, r: Select
     optional: alone.recommended.length,
     leftOut: alone.removed.map((x) => x.displayName),
   };
+}
+
+export interface ChecklistItem extends AppSummaryItem {
+  /** Ticked: installed (or listed for follow-up). Unticked: an active profile selects it, but this deployment leaves it out. */
+  selected: boolean;
+  /** For unticked items: who left it out. */
+  excludedBy?: string;
+  /** Selected items that other selected apps need (unticking them is allowed, with a warning). */
+  requiredBy: string[];
+}
+
+export interface DeploymentChecklist {
+  /** Every app the active profiles and individual changes bring in, each once, sorted by name so ticking never moves a row. */
+  items: ChecklistItem[];
+  /** Ticked items: exactly `resolveSelection(sel).packages`. */
+  selected: number;
+  /** Recommendations of the active profiles, ticked in the Applications step. */
+  recommended: number;
+}
+
+/**
+ * Step 2's per-application list: what is selected (the generated package installs exactly these)
+ * and what an active profile would select but this deployment leaves out, so it can be ticked again.
+ */
+export function deploymentChecklist(sel: ApplicationsSelection, r: SelectionResult = resolveSelection(sel)): DeploymentChecklist {
+  const name = (k: string) => r.packages.find((p) => p.key === k)?.displayName ?? k;
+  const items: ChecklistItem[] = [
+    ...r.packages.map((x) => ({ ...item(sel, x, r), selected: true, requiredBy: x.requiredBy.filter((k) => r.packages.some((p) => p.key === k)).map(name) })),
+    ...r.removed.map((x) => ({
+      ...item(sel, x, r),
+      selected: false,
+      excludedBy: x.removedBy && x.removedBy !== 'user' ? `Left out by saved profile "${nameOf(sel, x.removedBy)}"` : 'Unticked by you',
+      requiredBy: [],
+    })),
+  ];
+  items.sort((a, b) => a.displayName.localeCompare(b.displayName, 'en', { sensitivity: 'base' }) || a.key.localeCompare(b.key));
+  return { items, selected: r.packages.length, recommended: r.recommended.length };
 }

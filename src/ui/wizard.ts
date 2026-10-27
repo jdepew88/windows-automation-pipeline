@@ -5,8 +5,9 @@ import type { Devices } from '../engine/schema/applications';
 import { EDITIONS } from '../data';
 import { resolveIdentity, MAX_COMPUTER_NAME, MAX_USERNAME } from '../engine/naming';
 import { BUILTIN_PROFILES } from '../engine/applications/builtin';
-import { resolveSelection } from '../engine/applications/selection';
-import { effectiveApps, profilePreview } from '../engine/applications/preview';
+import { resolveSelection, type SelectionResult } from '../engine/applications/selection';
+import { deploymentChecklist, effectiveApps, profilePreview, type ChecklistItem } from '../engine/applications/preview';
+import { addPackage, pruneDetached, removePackage } from '../engine/applications/profiles';
 import { SETTINGS_BY_PATH } from '../features';
 import {
   CUSTOMER_TYPES,
@@ -34,8 +35,9 @@ import {
   type StepId,
   type StepStatus,
 } from '../engine/quick';
+import { appLogo } from './app-icon';
 import { createApplicationsEditor } from './app-selection';
-import { effectiveAppsView, profilePreviewView, selectedAppsSummary } from './app-summary';
+import { profilePreviewView, selectedAppsSummary } from './app-summary';
 import { currentPackage, downloadPackage } from './deployment';
 import { clear, h, patchChildren, render as patch, uid } from './dom';
 import { icon, type IconName } from './icons';
@@ -281,10 +283,9 @@ export function renderWizard(ctx: WizardContext): WizardHandle {
   const deviceBox = h('div', { class: 'devices wiz-devices', 'data-testid': 'wiz-devices' });
   const deviceNote = h('div', { class: 'device-note', 'aria-live': 'polite', 'data-testid': 'wiz-device-note' });
   const locationBox = h('div', { 'data-testid': 'wiz-location' });
-  const combinedBox = h('div', { class: 'combined-box', 'data-testid': 'wiz-combined-box' });
+  const checklistBox = h('section', { class: 'app-checklist', 'data-testid': 'wiz-checklist', 'aria-labelledby': 'wiz-checklist-title' });
   // Which profile previews are open (view state of this session only, never part of the profile).
   const openPreviews = new Set<string>();
-  let combinedOpen = false;
   panels.set(
     'type',
     h(
@@ -292,7 +293,7 @@ export function renderWizard(ctx: WizardContext): WizardHandle {
       { class: 'wiz-panel', 'data-step': 'type' },
       h('p', { class: 'wiz-lead' }, 'Tick everything that fits. Each type adds its default applications; you can still untick or add single apps in the next steps. Built-in profiles are never changed.'),
       typeGrid,
-      combinedBox,
+      checklistBox,
       locationBox,
       h('h3', { class: 'wiz-sub' }, icon('laptop'), 'Phones and tablets'),
       h('p', { class: 'desc' }, 'Apple and Android can be combined. Only the kind of device is recorded.'),
@@ -362,28 +363,9 @@ export function renderWizard(ctx: WizardContext): WizardHandle {
     // Patched, not rebuilt: the cards stay the same elements, so the page keeps its scroll position.
     patchChildren(typeGrid, cards);
 
-    // The combined selection after every ticked profile, device answer and individual change.
-    const apps = effectiveApps(sel, p.applications.enabled, r, p.additionalSoftware.items);
-    patchChildren(combinedBox, [
-      h(
-        'button',
-        {
-          type: 'button',
-          class: 'btn sm',
-          'data-action': 'view-combined',
-          'data-wiz-key': 'view-combined',
-          'aria-expanded': String(combinedOpen),
-          'aria-controls': combinedOpen ? 'wiz-combined' : undefined,
-          onclick: () => {
-            combinedOpen = !combinedOpen;
-            renderType(store.get());
-          },
-        },
-        icon(combinedOpen ? 'chevronUp' : 'layers'),
-        combinedOpen ? 'Hide the combined selection' : `View the combined selection (${apps.total} app${apps.total === 1 ? '' : 's'})`,
-      ),
-      combinedOpen ? h('div', { id: 'wiz-combined', role: 'region', 'aria-label': 'Combined application selection', class: 'combined-panel' }, h('p', { class: 'desc' }, 'Every ticked profile, the device answers and your individual changes together; an app selected by several profiles is installed once.'), effectiveAppsView(apps, { testid: 'wiz-combined', origins: true })) : null,
-    ]);
+    // The combined selection after every ticked profile, device answer and individual change, one
+    // checkbox per application. Unticking keeps the profile; it is the same removal as in Applications.
+    renderChecklist(p, r);
 
     const laptop = isTypeSelected(p, LAPTOP_PROFILE);
     const loc: HTMLElement[] = [];
@@ -402,7 +384,11 @@ export function renderWizard(ctx: WizardContext): WizardHandle {
     patchChildren(locationBox, loc);
 
     const d = p.applications.selection.devices;
-    const setDev = (fn: (x: Devices) => void) => mutate((q) => fn(q.applications.selection.devices));
+    const setDev = (fn: (x: Devices) => void) =>
+      mutate((q) => {
+        fn(q.applications.selection.devices);
+        pruneDetached(q.applications.selection);
+      });
     const phone = (value: Devices['phone'], label: string) => {
       const id = uid('wp');
       return h('label', { class: 'device-choice', for: id }, h('input', { type: 'radio', id, name: 'wiz-phone', 'data-device': `phone-${value}`, 'data-wiz-key': `phone-${value}`, checked: d.phone === value, onchange: () => setDev((x) => (x.phone = value)) }), label);
@@ -423,6 +409,87 @@ export function renderWizard(ctx: WizardContext): WizardHandle {
       }
     });
     if (focusKey) el.querySelector<HTMLElement>(`[data-wiz-key="${CSS.escape(focusKey)}"]`)?.focus({ preventScroll: true });
+  }
+
+  function renderChecklist(p: Profile, r: SelectionResult): void {
+    const sel = p.applications.selection;
+    const apps = effectiveApps(sel, p.applications.enabled, r, p.additionalSoftware.items);
+    const list = deploymentChecklist(sel, r);
+    // Ticking again restores what this deployment left out; it never ticks or unticks a profile.
+    const toggle = (x: ChecklistItem, on: boolean) =>
+      mutate((q) => {
+        const s = q.applications.selection;
+        if (!on) return removePackage(s, x.key);
+        const ref = resolveSelection(s).removed.find((y) => y.key === x.key)?.ref;
+        if (ref) addPackage(s, ref);
+        pruneDetached(s);
+      });
+    const row = (x: ChecklistItem) => {
+      const id = `wiz-app-${x.key.replace(/[^a-z0-9]+/gi, '-')}`;
+      const note = !x.selected
+        ? `${x.excludedBy} · ${x.origin}`
+        : [x.origin, x.kind === 'manual' ? 'Manual follow-up' : x.kind === 'unresolved' ? 'Cannot be installed' : ''].filter(Boolean).join(' · ');
+      return h(
+        'li',
+        { class: `app-check kind-${x.kind}${x.selected ? '' : ' off'}`, 'data-key': x.key, 'data-kind': x.kind, 'data-selected': String(x.selected) },
+        h(
+          'label',
+          { for: id, title: `${x.displayName}: ${note}` },
+          h('input', {
+            type: 'checkbox',
+            id,
+            checked: x.selected,
+            'data-check-app': x.key,
+            'data-wiz-key': `app-${x.key}`,
+            'aria-describedby': `${id}-n`,
+            onchange: (e: Event) => toggle(x, (e.target as HTMLInputElement).checked),
+          }),
+          appLogo(x.catalogId, x.displayName, x.category, 'sm'),
+          h('span', { class: 'app-sum-text' }, h('span', { class: 'app-sum-name' }, x.displayName), h('span', { class: 'app-sum-note', id: `${id}-n` }, note)),
+          x.kind === 'manual' ? h('span', { class: 'app-sum-flag', title: 'Manual follow-up: not installed automatically' }, icon('hand')) : null,
+        ),
+      );
+    };
+    const warnings = [...r.groupConflicts.map((c) => c.message), ...r.notices.filter((n) => n.kind === 'warning').map((n) => n.message)];
+    const headline = !apps.enabled
+      ? 'Application provisioning is off: nothing is installed, whatever is ticked. Turn it on in Advanced › Applications.'
+      : apps.total === 0
+        ? 'No applications are selected.'
+        : `${apps.total} application${apps.total === 1 ? '' : 's'} selected: ${apps.automatic.length} installed automatically${apps.manual.length ? `, ${apps.manual.length} manual follow-up` : ''}${apps.unresolved.length ? `, ${apps.unresolved.length} cannot be installed` : ''}${apps.additional.length ? `, ${apps.additional.length} Additional Software` : ''}.`;
+    patchChildren(checklistBox, [
+      h(
+        'h3',
+        { class: 'wiz-sub', id: 'wiz-checklist-title', 'data-key': 'checklist-title' },
+        icon('layers'),
+        'Applications in this deployment',
+        h('span', { class: 'chip-count', 'data-testid': 'wiz-app-count', 'data-count': String(apps.total) }, String(apps.total)),
+      ),
+      h('p', { class: `app-sum-count${apps.total ? '' : ' empty'}`, 'data-testid': 'wiz-checklist-count', 'aria-live': 'polite', 'data-key': 'checklist-count' }, headline),
+      h('p', { class: 'desc', 'data-key': 'checklist-desc' }, 'Every ticked profile and device answer together; an app several profiles select is listed and installed once. Untick an app to leave it out without unticking its profile.'),
+      list.items.length ? h('ul', { class: 'app-check-grid', 'data-testid': 'wiz-checklist-list', 'aria-label': 'Applications in this deployment' }, list.items.map(row)) : null,
+      apps.additional.length
+        ? h(
+            'ul',
+            { class: 'app-check-grid', 'data-testid': 'wiz-checklist-additional', 'aria-label': 'Additional Software' },
+            apps.additional.map((x) =>
+              h(
+                'li',
+                { class: `app-check kind-${x.kind}`, 'data-key': x.key, 'data-kind': x.kind },
+                h('span', { class: 'app-check-static' }, appLogo(undefined, x.displayName, undefined, 'sm'), h('span', { class: 'app-sum-text' }, h('span', { class: 'app-sum-name' }, x.displayName), h('span', { class: 'app-sum-note' }, `${x.origin} · change it in Advanced`))),
+              ),
+            ),
+          )
+        : null,
+      warnings.length ? h('div', { class: 'issues', 'data-testid': 'wiz-checklist-warnings', 'data-key': 'checklist-warnings' }, warnings.map((m) => h('p', { class: 'warning' }, icon('alert'), h('span', {}, m)))) : null,
+      list.recommended
+        ? h(
+            'p',
+            { class: 'desc', 'data-key': 'checklist-more' },
+            `${list.recommended} more app${list.recommended === 1 ? ' is' : 's are'} recommended by these profiles. `,
+            h('button', { type: 'button', class: 'linkish', 'data-wiz': 'checklist-apps', onclick: () => go('apps') }, 'Choose them in Applications'),
+          )
+        : null,
+    ]);
   }
 
   // Step 3: network ------------------------------------------------------------------------------
