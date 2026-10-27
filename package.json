@@ -15,8 +15,11 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
+    "test:e2e:production": "playwright test -c playwright.production.config.ts",
+    "preview:pages": "wrangler pages dev dist --ip 127.0.0.1 --port 8788",
     "test:ps": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/powershell/Engine.Tests.ps1 && powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/powershell/Applications.Tests.ps1 && powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/powershell/Migration.Tests.ps1 && vite-node tests/powershell/make-deployment-fixture.ts node_modules/.cache/wdd-fixture && powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/powershell/Deployment.Tests.ps1 -Fixture node_modules/.cache/wdd-fixture && powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/powershell/Media.Tests.ps1 -Fixture node_modules/.cache/wdd-fixture && powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/powershell/Drivers.Tests.ps1 -Fixture node_modules/.cache/wdd-fixture && powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/powershell/Health.Tests.ps1 -Fixture node_modules/.cache/wdd-fixture && vite-node tests/powershell/make-wifi-fixture.ts node_modules/.cache/wifi-fixture && powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/powershell/Wifi.Tests.ps1 -Fixture node_modules/.cache/wifi-fixture && vite-node scripts/build-manager.ts --policy node_modules/.cache/app-manager-policy.json && powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/powershell/AppManager.Tests.ps1 -Policy node_modules/.cache/app-manager-policy.json",
     "generate:sample": "vite-node scripts/generate-sample.ts",
+    "headers": "vite-node scripts/write-headers.ts",
     "docs:settings": "vite-node scripts/generate-settings-doc.ts",
     "check": "npm run typecheck && npm run lint && npm test"
   },

@@ -142,7 +142,8 @@ test('without the local agent: a read-only catalog, no operations, a download li
 test('the builder links to the Application Manager', async ({ page }) => {
   await page.goto('/');
   await page.locator('[data-action="open-manager"]').click();
-  await expect(page).toHaveURL(/\/manager\.html$/);
+  // manager.html, or /manager where the host serves pretty URLs (Cloudflare Pages redirects to it).
+  await expect(page).toHaveURL(/\/manager(\.html)?$/);
   await expect(page.getByRole('heading', { level: 1 })).toHaveText('Windows Deployment — Application Manager');
 });
 
