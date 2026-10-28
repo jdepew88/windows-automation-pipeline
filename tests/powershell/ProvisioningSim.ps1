@@ -65,7 +65,8 @@ function Invoke-WddInstaller {
     if (-not (Test-Path -LiteralPath $Path)) { throw "installer not staged: $Path" }
     $b = if ($script:InstallerBehaviour.ContainsKey($leaf)) { $script:InstallerBehaviour[$leaf] } else { 'ok' }
     if ($b -eq 'throw') { throw 'simulated installer crash' }
-    if ($b -eq 'noTask') { return 1 }
+    # Like the real installer when it cannot read its own staged files (the bare-metal failure).
+    if ($b -eq 'noTask') { $script:WddInstallerOutput = @('Starting.', "Access to the path '$Path' is denied."); return 1 }
     $task = if ($leaf -eq 'Install-UpdateEngine.ps1') { '\WindowsDeploymentBuilder\WindowsUpdate' } else { '\WindowsDeploymentBuilder\Applications' }
     $script:SimTasks[$task] = $script:SimIdentity.Name
     # Like the real installers: a new installation archives the engine's previous run.
@@ -204,7 +205,13 @@ function Get-SimAppConfig {
     return $c
 }
 function Get-WdrAppConfig { param([hashtable] $Paths) Get-SimAppConfig }
-function Invoke-WdrAppInstaller { param([hashtable] $Paths) $script:AppSim.ResumeInstalls++; $script:SimTasks['\WindowsDeploymentBuilder\Applications'] = $script:SimIdentity.Name; return 0 }
+function Invoke-WdrAppInstaller {
+    param([hashtable] $Paths)
+    if ($script:AppSim) { $script:AppSim.ResumeInstalls++ }
+    if ($script:InstallerBehaviour['Install-ApplicationEngine.ps1'] -eq 'noTask') { return 1 }
+    $script:SimTasks['\WindowsDeploymentBuilder\Applications'] = $script:SimIdentity.Name
+    return 0
+}
 
 <# The application task: at sign-in and hourly, plus a simulated restart when the engine asks for one. #>
 function Invoke-AppRuns {

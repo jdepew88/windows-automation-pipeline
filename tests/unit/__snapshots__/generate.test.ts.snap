@@ -1417,6 +1417,32 @@ $ErrorActionPreference = 'Stop'
 
 function Write-Step { param([string] $Message) Write-Output ('{0}  {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Message) }
 
+function Protect-WdbDataRoot {
+    param([string] $Root, [string[]] $Grant = @('*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F', '*S-1-5-32-545:(OI)(CI)RX'))
+    # Only the folder itself gets explicit entries; Windows propagates them to everything below.
+    # Never icacls /T with (OI)(CI) grants: on files those entries are dropped, which leaves every
+    # file protected with no entries at all, unreadable even for SYSTEM and Administrators.
+    # No /C either: with it icacls exits with 0 even when it fails.
+    &amp; icacls.exe $Root /inheritance:r /grant:r @Grant /Q | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "icacls failed with exit code $LASTEXITCODE on $Root; refusing to run a SYSTEM task from an unprotected folder." }
+    # Repairs what an earlier version left below (files protected with no entries, folders with a
+    # protected copy of these entries): they inherit again. Deliberately private folders (settings
+    # backups) have other entries and keep them.
+    function Get-Entries { param($Acl) (@($Acl.Access | ForEach-Object { "$($_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value)=$([int] $_.FileSystemRights)" }) | Sort-Object) -join ';' }
+    $own = Get-Entries (Get-Acl -LiteralPath $Root)
+    foreach ($item in @(Get-ChildItem -LiteralPath $Root -Recurse -Force -Attributes !ReparsePoint -ErrorAction SilentlyContinue)) {
+        $damaged = $true
+        try {
+            $acl = Get-Acl -LiteralPath $item.FullName
+            $e = Get-Entries $acl
+            $damaged = $acl.AreAccessRulesProtected -and ($e -eq '' -or $e -eq $own)
+        } catch { }
+        if (-not $damaged) { continue }
+        &amp; icacls.exe $item.FullName /reset /Q | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "icacls /reset failed with exit code $LASTEXITCODE on $($item.FullName); refusing to run a SYSTEM task from an unprotected folder." }
+    }
+}
+
 $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw 'Install-UpdateEngine.ps1 must run elevated (as Administrator or SYSTEM).'
@@ -1436,8 +1462,7 @@ if ($Uninstall) {
 
 # 1. Folder and permissions (SIDs, so this works on every display language).
 if (-not (Test-Path -LiteralPath $installDir)) { New-Item -ItemType Directory -Path $installDir -Force | Out-Null }
-&amp; icacls.exe $dataRoot /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' /T /C /Q | Out-Null
-if ($LASTEXITCODE -ne 0) { throw "icacls failed with exit code $LASTEXITCODE; refusing to run a SYSTEM task from an unprotected folder." }
+Protect-WdbDataRoot $dataRoot
 Write-Step "Secured $dataRoot (SYSTEM/Administrators full control, Users read)."
 
 # 2. Files. A new installation starts a new run; earlier state and results are archived.
@@ -4065,6 +4090,32 @@ $ErrorActionPreference = 'Stop'
 
 function Write-Step { param([string] $Message) Write-Output ('{0}  {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Message) }
 
+function Protect-WdbDataRoot {
+    param([string] $Root, [string[]] $Grant = @('*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F', '*S-1-5-32-545:(OI)(CI)RX'))
+    # Only the folder itself gets explicit entries; Windows propagates them to everything below.
+    # Never icacls /T with (OI)(CI) grants: on files those entries are dropped, which leaves every
+    # file protected with no entries at all, unreadable even for SYSTEM and Administrators.
+    # No /C either: with it icacls exits with 0 even when it fails.
+    &amp; icacls.exe $Root /inheritance:r /grant:r @Grant /Q | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "icacls failed with exit code $LASTEXITCODE on $Root; refusing to run a SYSTEM task from an unprotected folder." }
+    # Repairs what an earlier version left below (files protected with no entries, folders with a
+    # protected copy of these entries): they inherit again. Deliberately private folders (settings
+    # backups) have other entries and keep them.
+    function Get-Entries { param($Acl) (@($Acl.Access | ForEach-Object { "$($_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value)=$([int] $_.FileSystemRights)" }) | Sort-Object) -join ';' }
+    $own = Get-Entries (Get-Acl -LiteralPath $Root)
+    foreach ($item in @(Get-ChildItem -LiteralPath $Root -Recurse -Force -Attributes !ReparsePoint -ErrorAction SilentlyContinue)) {
+        $damaged = $true
+        try {
+            $acl = Get-Acl -LiteralPath $item.FullName
+            $e = Get-Entries $acl
+            $damaged = $acl.AreAccessRulesProtected -and ($e -eq '' -or $e -eq $own)
+        } catch { }
+        if (-not $damaged) { continue }
+        &amp; icacls.exe $item.FullName /reset /Q | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "icacls /reset failed with exit code $LASTEXITCODE on $($item.FullName); refusing to run a SYSTEM task from an unprotected folder." }
+    }
+}
+
 $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw 'Install-DriverEngine.ps1 must run elevated (as Administrator or SYSTEM).'
@@ -4084,8 +4135,7 @@ if ($Uninstall) {
 
 # 1. Folder and permissions (SIDs, so this works on every display language).
 if (-not (Test-Path -LiteralPath $installDir)) { New-Item -ItemType Directory -Path $installDir -Force | Out-Null }
-&amp; icacls.exe $dataRoot /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' /T /C /Q | Out-Null
-if ($LASTEXITCODE -ne 0) { throw "icacls failed with exit code $LASTEXITCODE; refusing to run a SYSTEM task from an unprotected folder." }
+Protect-WdbDataRoot $dataRoot
 Write-Step "Secured $dataRoot (SYSTEM/Administrators full control, Users read)."
 
 # 2. Files. A new installation starts a new run; earlier state and results are archived.
@@ -6147,8 +6197,33 @@ function Get-WdaBackupCandidates {
 function Protect-WdaBackupFolder {
     param([string] $Path)
     $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-    &amp; icacls.exe $Path /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' "*$($sid):(OI)(CI)F" /T /C /Q | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "icacls failed with exit code $LASTEXITCODE on $Path." }
+    Protect-WdaFolder $Path @('*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F', "*$($sid):(OI)(CI)F")
+}
+
+function Protect-WdaFolder {
+    param([string] $Root, [string[]] $Grant = @('*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F', '*S-1-5-32-545:(OI)(CI)RX'))
+    # Only the folder itself gets explicit entries; Windows propagates them to everything below.
+    # Never icacls /T with (OI)(CI) grants: on files those entries are dropped, which leaves every
+    # file protected with no entries at all, unreadable even for SYSTEM and Administrators.
+    # No /C either: with it icacls exits with 0 even when it fails.
+    &amp; icacls.exe $Root /inheritance:r /grant:r @Grant /Q | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "icacls failed with exit code $LASTEXITCODE on $Root; the folder is not protected." }
+    # Repairs what an earlier version left below (files protected with no entries, folders with a
+    # protected copy of these entries): they inherit again. Deliberately private folders (settings
+    # backups) have other entries and keep them.
+    function Get-Entries { param($Acl) (@($Acl.Access | ForEach-Object { "$($_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value)=$([int] $_.FileSystemRights)" }) | Sort-Object) -join ';' }
+    $own = Get-Entries (Get-Acl -LiteralPath $Root)
+    foreach ($item in @(Get-ChildItem -LiteralPath $Root -Recurse -Force -Attributes !ReparsePoint -ErrorAction SilentlyContinue)) {
+        $damaged = $true
+        try {
+            $acl = Get-Acl -LiteralPath $item.FullName
+            $e = Get-Entries $acl
+            $damaged = $acl.AreAccessRulesProtected -and ($e -eq '' -or $e -eq $own)
+        } catch { }
+        if (-not $damaged) { continue }
+        &amp; icacls.exe $item.FullName /reset /Q | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "icacls /reset failed with exit code $LASTEXITCODE on $($item.FullName); the folder is not protected." }
+    }
 }
 
 &lt;#
@@ -7163,6 +7238,32 @@ $ErrorActionPreference = 'Stop'
 
 function Write-Step { param([string] $Message) Write-Output ('{0}  {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Message) }
 
+function Protect-WdbDataRoot {
+    param([string] $Root, [string[]] $Grant = @('*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F', '*S-1-5-32-545:(OI)(CI)RX'))
+    # Only the folder itself gets explicit entries; Windows propagates them to everything below.
+    # Never icacls /T with (OI)(CI) grants: on files those entries are dropped, which leaves every
+    # file protected with no entries at all, unreadable even for SYSTEM and Administrators.
+    # No /C either: with it icacls exits with 0 even when it fails.
+    &amp; icacls.exe $Root /inheritance:r /grant:r @Grant /Q | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "icacls failed with exit code $LASTEXITCODE on $Root; refusing to run an elevated task from an unprotected folder." }
+    # Repairs what an earlier version left below (files protected with no entries, folders with a
+    # protected copy of these entries): they inherit again. Deliberately private folders (settings
+    # backups) have other entries and keep them.
+    function Get-Entries { param($Acl) (@($Acl.Access | ForEach-Object { "$($_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value)=$([int] $_.FileSystemRights)" }) | Sort-Object) -join ';' }
+    $own = Get-Entries (Get-Acl -LiteralPath $Root)
+    foreach ($item in @(Get-ChildItem -LiteralPath $Root -Recurse -Force -Attributes !ReparsePoint -ErrorAction SilentlyContinue)) {
+        $damaged = $true
+        try {
+            $acl = Get-Acl -LiteralPath $item.FullName
+            $e = Get-Entries $acl
+            $damaged = $acl.AreAccessRulesProtected -and ($e -eq '' -or $e -eq $own)
+        } catch { }
+        if (-not $damaged) { continue }
+        &amp; icacls.exe $item.FullName /reset /Q | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "icacls /reset failed with exit code $LASTEXITCODE on $($item.FullName); refusing to run an elevated task from an unprotected folder." }
+    }
+}
+
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = New-Object Security.Principal.WindowsPrincipal($identity)
 if ($identity.User.Value -eq 'S-1-5-18') {
@@ -7186,8 +7287,7 @@ if ($Uninstall) {
 
 # 1-2. Folder and permissions (SIDs, so this works on every display language).
 if (-not (Test-Path -LiteralPath $installDir)) { New-Item -ItemType Directory -Path $installDir -Force | Out-Null }
-&amp; icacls.exe $dataRoot /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' /T /C /Q | Out-Null
-if ($LASTEXITCODE -ne 0) { throw "icacls failed with exit code $LASTEXITCODE; refusing to run an elevated task from an unprotected folder." }
+Protect-WdbDataRoot $dataRoot
 Write-Step "Secured $dataRoot (SYSTEM/Administrators full control, Users read)."
 
 # 3. Files. A new installation starts a new run; earlier state and results are archived.
@@ -7581,9 +7681,12 @@ function Write-WddLog {
     $line = '{0}  {1,-5}  {2}' -f (Get-WddNow).ToString('yyyy-MM-dd HH:mm:ss'), $Level, $Message
     Write-Verbose $line
     if (-not $script:WddLogFile) { return }
+    $err = $null
     for ($i = 0; $i -lt 3; $i++) {
-        try { [System.IO.File]::AppendAllText($script:WddLogFile, $line + "\`r\`n"); return } catch { Start-Sleep -Milliseconds 200 }
+        try { [System.IO.File]::AppendAllText($script:WddLogFile, $line + "\`r\`n"); return } catch { $err = $_.Exception.Message; Start-Sleep -Milliseconds 200 }
     }
+    # Once per process: a log that cannot be written is visible on the console and in task output.
+    if (-not $script:WddLogWarned) { $script:WddLogWarned = $true; Write-Warning "Cannot write the deployment log $($script:WddLogFile): $err" }
 }
 
 function Get-WddPaths {
@@ -8008,12 +8111,32 @@ $script:RequiredForStart = @(
     'scripts/finalization/Complete-Deployment.ps1'
 )
 
+# SYSTEM and Administrators full control, Users read and execute, no entries inherited from
+# ProgramData (the same rule as the engine installers). Elevated tasks run scripts from here.
 function Set-WddAcl {
-    param([string] $Root)
-    # SYSTEM and Administrators full control, Users read and execute, no inherited entries (the
-    # same rule as the engine installers). Elevated tasks run scripts from here.
-    &amp; icacls.exe $Root /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' /T /C /Q | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "icacls failed with exit code $LASTEXITCODE; refusing to run elevated scripts from an unprotected folder." }
+    param([string] $Root, [string[]] $Grant = @('*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F', '*S-1-5-32-545:(OI)(CI)RX'))
+    # Only the folder itself gets explicit entries; Windows propagates them to everything below.
+    # Never icacls /T with (OI)(CI) grants: on files those entries are dropped, which leaves every
+    # file protected with no entries at all, unreadable even for SYSTEM and Administrators.
+    # No /C either: with it icacls exits with 0 even when it fails.
+    &amp; icacls.exe $Root /inheritance:r /grant:r @Grant /Q | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "icacls failed with exit code $LASTEXITCODE on $Root; refusing to run elevated scripts from an unprotected folder." }
+    # Repairs what an earlier version left below (files protected with no entries, folders with a
+    # protected copy of these entries): they inherit again. Deliberately private folders (settings
+    # backups) have other entries and keep them.
+    function Get-Entries { param($Acl) (@($Acl.Access | ForEach-Object { "$($_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value)=$([int] $_.FileSystemRights)" }) | Sort-Object) -join ';' }
+    $own = Get-Entries (Get-Acl -LiteralPath $Root)
+    foreach ($item in @(Get-ChildItem -LiteralPath $Root -Recurse -Force -Attributes !ReparsePoint -ErrorAction SilentlyContinue)) {
+        $damaged = $true
+        try {
+            $acl = Get-Acl -LiteralPath $item.FullName
+            $e = Get-Entries $acl
+            $damaged = $acl.AreAccessRulesProtected -and ($e -eq '' -or $e -eq $own)
+        } catch { }
+        if (-not $damaged) { continue }
+        &amp; icacls.exe $item.FullName /reset /Q | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "icacls /reset failed with exit code $LASTEXITCODE on $($item.FullName); refusing to run elevated scripts from an unprotected folder." }
+    }
 }
 
 # Where a manifest file comes from in each mode.
@@ -8147,12 +8270,14 @@ $script:MonitorTask = @{ path = '\\WindowsDeploymentBuilder\\'; name = 'Deployme
 # Adapters
 # ------------------------------------------------------------------------------------------------
 
-# Runs an engine installer in its own Windows PowerShell process; returns the exit code.
+# Runs an engine installer in its own Windows PowerShell process; returns the exit code. Its
+# output goes to the log, and its last line is kept as the reason when no task is registered.
 function Invoke-WddInstaller {
     param([string] $Path)
     $ps = Join-Path $env:SystemRoot 'System32\\WindowsPowerShell\\v1.0\\powershell.exe'
     $out = &amp; $ps -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $Path 2&gt;&amp;1
     foreach ($line in @($out)) { Write-WddLog "    | $line" }
+    $script:WddInstallerOutput = @(@($out) | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
     return $LASTEXITCODE
 }
 
@@ -8253,7 +8378,11 @@ function Invoke-WddLaunchStage {
     Save-WddState $Paths $State
     Write-WddLog "Launching stage $($Stage.id) ($($Stage.context)): $installer"
     $code = $null
-    try { $code = Invoke-WddInstaller $installer } catch { $rec.message = $_.Exception.Message; Write-WddLog "  installer error: $($rec.message)" 'ERROR' }
+    $script:WddInstallerOutput = @()
+    # The reason of THIS attempt (an earlier message, such as "Restarted manually.", is not one).
+    $failure = $null
+    if (-not (Test-Path -LiteralPath $installer)) { $failure = "The installer is missing from the staged package: $installer" }
+    else { try { $code = Invoke-WddInstaller $installer } catch { $failure = $_.Exception.Message; Write-WddLog "  installer error: $failure" 'ERROR' } }
     $rec.exitCode = $code
     if (Get-WddTask $Stage.task.path $Stage.task.name) {
         $rec.launchResult = 'Launched'
@@ -8263,7 +8392,8 @@ function Invoke-WddLaunchStage {
         $rec.launchResult = 'Launched'; $rec.message = 'Finished during launch.'
     } else {
         $rec.launchResult = $(if ([int] $rec.attempts -ge $MaxAttempts) { 'LaunchFailed' } else { 'Launching' })
-        if (-not $rec.message) { $rec.message = "The installer returned $code and registered no task." }
+        $reason = @($script:WddInstallerOutput) | Select-Object -Last 1
+        $rec.message = $(if ($failure) { $failure } else { "The installer returned $code and registered no task $($Stage.task.path)$($Stage.task.name)$(if ($reason) { ": $reason" } else { '.' })" })
         Write-WddLog "Stage $($Stage.id): $($rec.message)" 'ERROR'
     }
     Save-WddState $Paths $State
@@ -8332,7 +8462,15 @@ function Invoke-WddInitialize {
 
         $state.status = 'InProgress'
         Save-WddState $Paths $state
-        Register-WddMonitorTask $Paths $Manifest
+        try { Register-WddMonitorTask $Paths $Manifest }
+        catch {
+            # Without the monitor nothing follows the stages: say so instead of failing silently.
+            $state.message = "The monitor task $($script:MonitorTask.path)$($script:MonitorTask.name) could not be registered: $($_.Exception.Message) Run Resume-Deployment.ps1 as administrator."
+            Save-WddState $Paths $state
+            Write-WddLog $state.message 'ERROR'
+            Write-WddEvent 3002 "Deployment $($Manifest.packageId): $($state.message)" 'Error'
+            return 'MonitorRegistrationFailed'
+        }
         Write-WddLog "Registered $($script:MonitorTask.path)$($script:MonitorTask.name) (SYSTEM; at startup and every 15 minutes)."
         $snapshot = Get-WddSnapshot $Manifest $Paths $state
         Write-WddJson $Paths.Status $snapshot
@@ -8608,10 +8746,12 @@ if ($script:ShowMain) {
           Verifies &lt;dataRoot&gt;\\Package, registers the monitor task again and runs it once. Use it
           after a stalled stage was fixed, after the deadline passed, or if the monitor task was
           removed. A finished deployment is reopened (its report is rewritten at the end).
-      Resume-Deployment.ps1 -RestartStage windowsUpdate|applications
+      Resume-Deployment.ps1 -RestartStage windowsUpdate|applications|drivers
           Runs that engine's installer again. The installer archives the previous run and starts
           a new one; work already done is detected (installed updates are not offered again,
-          installed applications are reported AlreadyInstalled).
+          installed applications are reported AlreadyInstalled). If the installer does not
+          register its task, the result is StageRestartFailed with the reason (exit code 1),
+          never Resumed. Windows Setup and the disk are never touched.
       Resume-Deployment.ps1 -Status
           Prints the progress and changes nothing.
 
@@ -8619,7 +8759,7 @@ if ($script:ShowMain) {
 #&gt;
 [CmdletBinding()]
 param(
-    [ValidateSet('', 'windowsUpdate', 'applications')]
+    [ValidateSet('', 'windowsUpdate', 'applications', 'drivers')]
     [string] $RestartStage = '',
     [switch] $Status
 )
@@ -8660,11 +8800,26 @@ function Invoke-WddResume {
             $stage = Get-WddStage $manifest $RestartStage
             if (-not $stage -or -not $stage.enabled) { Write-WddLog "Stage $RestartStage is not part of this deployment." 'ERROR'; return 'UnknownStage' }
             $state.stages[$RestartStage] = @{ launchResult = ''; attempts = 0; launchedUtc = $null; exitCode = $null; message = 'Restarted manually.' }
-            Invoke-WddLaunchStage $stage $Paths $state $identity ([int] $manifest.failureHandling.orchestrator.launchAttempts) | Out-Null
+            $rec = Invoke-WddLaunchStage $stage $Paths $state $identity ([int] $manifest.failureHandling.orchestrator.launchAttempts)
+            if ($rec.launchResult -ne 'Launched') {
+                # Recorded (the monitor reports the stage as failed to launch); never reported as resumed.
+                $state.message = "Restart of stage $RestartStage failed: $($rec.message)"
+                $script:ResumeDetail = $state.message
+                Save-WddState $Paths $state
+                Write-WddLog "Resume: $($state.message)" 'ERROR'
+                Write-WddEvent 3006 "Deployment $($manifest.packageId): $($state.message) See $($Paths.Log)." 'Error'
+                try { Register-WddMonitorTask $Paths $manifest } catch { Write-WddLog "Resume: the monitor task could not be registered either: $($_.Exception.Message)" 'ERROR' }
+                return 'StageRestartFailed'
+            }
         }
         Save-WddState $Paths $state
-        Register-WddMonitorTask $Paths $manifest
-        try { Start-WddTask $script:MonitorTask.path $script:MonitorTask.name } catch { }
+        try { Register-WddMonitorTask $Paths $manifest }
+        catch {
+            $script:ResumeDetail = "The monitor task $($script:MonitorTask.path)$($script:MonitorTask.name) could not be registered: $($_.Exception.Message)"
+            Write-WddLog "Resume: $($script:ResumeDetail)" 'ERROR'
+            return 'MonitorRegistrationFailed'
+        }
+        try { Start-WddTask $script:MonitorTask.path $script:MonitorTask.name } catch { Write-WddLog "Resume: could not start the monitor now; it runs within 15 minutes: $($_.Exception.Message)" 'WARN' }
         Write-WddEvent 3001 "Deployment $($manifest.packageId) resumed manually$(if ($RestartStage) { " (stage $RestartStage restarted)" })."
         return 'Resumed'
     } finally {
@@ -8677,8 +8832,9 @@ if ($script:ResumeMain) {
     $manifest = Read-WddManifest (Join-Path $package 'deployment-manifest.json')
     $paths = Get-WddPaths $manifest.dataRoot
     if ($script:ResumeArgs.Status) { (Format-WddStatus $manifest $paths (Read-WddDeploymentState $paths).State).Text; exit 0 }
+    $script:ResumeDetail = ''
     $outcome = Invoke-WddResume $paths $script:ResumeArgs.RestartStage
-    Write-Output "Resume: $outcome. Log: $($paths.Log)"
+    Write-Output "Resume: $outcome.$(if ($script:ResumeDetail) { " $($script:ResumeDetail)" }) Log: $($paths.Log)"
     if ($outcome -eq 'Resumed') { exit 0 }
     exit 1
 }
@@ -9243,7 +9399,9 @@ function Step-WddUpdatePolicy {
     Exit codes: Status returns the outcome code (0 Succeeded, 10 CompletedWithWarnings,
     20 CompletedWithFailures, 25 Incomplete, 30/31/32 paused for network/reboot/user, 40 InProgress,
     50 FailedToInitialize, 60 Failed). Actions return 0 (done), 1 (refused or nothing to do),
-    2 (busy), 3 (package integrity), 4 (administrator rights needed).
+    2 (busy), 3 (package integrity), 4 (administrator rights needed), 5 (Partial: some stages
+    were restarted, the task of another could not be registered), 6 (Failed: no stage task could
+    be registered). A stage only counts as restarted when its scheduled task exists afterwards.
 #&gt;
 [CmdletBinding()]
 param(
@@ -9276,7 +9434,7 @@ $script:HealthEngineScript = Join-Path $PSScriptRoot '..\\health\\DeploymentHeal
 if (Test-Path -LiteralPath $script:HealthEngineScript) { . $script:HealthEngineScript -Mode Library }
 Set-StrictMode -Version 2.0
 
-$script:RecoveryExit = @{ Done = 0; Refused = 1; NothingToDo = 1; Busy = 2; IntegrityFailed = 3; NotElevated = 4; NoState = 1; UnknownStage = 1 }
+$script:RecoveryExit = @{ Done = 0; Refused = 1; NothingToDo = 1; Busy = 2; IntegrityFailed = 3; NotElevated = 4; NoState = 1; UnknownStage = 1; Partial = 5; Failed = 6 }
 
 &lt;#
     The account the application stage belongs to (Phase 5 deployment user): its launch record, else
@@ -9493,6 +9651,8 @@ function Invoke-WdrRecovery {
         }
 
         $accepted = @(); $refused = @(); $notes = @()
+        # Stages whose task could not be registered again: this recovery failed for them.
+        $failedStages = @()
         $ops = @($Operations | Where-Object { $_ } | ForEach-Object { ([string] $_).Trim() })
         $wuRequested = $ops -contains 'stage:windowsUpdate'
         $driverOps = @($ops | Where-Object { $_ -like 'driver:*' -or $_ -eq 'stage:drivers' })
@@ -9532,7 +9692,8 @@ function Invoke-WdrRecovery {
                         $rec.message = $(if ($rec.launchResult -eq 'Launched') { "Restarted by the recovery tool ($Mode)." } else { "The recovery tool could not register the application task (exit code $code)." })
                         $state.stages['applications'] = $rec
                         $notes += "Application stage: $($rec.message)"
-                        if ($r.Outcome -ne 'Accepted') { $accepted += 'stage:applications' }
+                        if ($rec.launchResult -ne 'Launched') { $refused += @{ operationId = 'stage:applications'; reason = $rec.message }; $failedStages += 'applications' }
+                        elseif ($r.Outcome -ne 'Accepted') { $accepted += 'stage:applications' }
                     }
                 }
             }
@@ -9547,7 +9708,7 @@ function Invoke-WdrRecovery {
             if (($Mode -ne 'Resume' -and $failed) -or $lost) {
                 $state.stages['windowsUpdate'] = @{ launchResult = ''; attempts = 0; launchedUtc = $null; exitCode = $null; message = "Restarted by the recovery tool ($Mode)."; user = 'SYSTEM' }
                 $rec = Invoke-WddLaunchStage $wuStage $Paths $state $identity ([int] $Manifest.failureHandling.orchestrator.launchAttempts)
-                if ($rec.launchResult -eq 'Launched') { $accepted += 'stage:windowsUpdate' } else { $refused += @{ operationId = 'stage:windowsUpdate'; reason = [string] $rec.message } }
+                if ($rec.launchResult -eq 'Launched') { $accepted += 'stage:windowsUpdate' } else { $refused += @{ operationId = 'stage:windowsUpdate'; reason = [string] $rec.message }; $failedStages += 'windowsUpdate' }
             } elseif ($wuRequested) {
                 $refused += @{ operationId = 'stage:windowsUpdate'; reason = "the Windows Update stage is $($wu.state)$(if ($wu.status) { "/$($wu.status)" }); only a stage that ended with failures is retried" }
             }
@@ -9579,7 +9740,7 @@ function Invoke-WdrRecovery {
                     $state.stages['drivers'] = $rec
                     $notes += "Driver stage: $($rec.message)"
                     if ($rec.launchResult -eq 'Launched' -and $r.Outcome -ne 'Accepted') { $accepted += 'stage:drivers' }
-                    elseif ($rec.launchResult -ne 'Launched') { $refused += @{ operationId = 'stage:drivers'; reason = $rec.message } }
+                    elseif ($rec.launchResult -ne 'Launched') { $refused += @{ operationId = 'stage:drivers'; reason = $rec.message }; $failedStages += 'drivers' }
                 }
             }
         } elseif ($driverOps.Count) {
@@ -9610,7 +9771,8 @@ function Invoke-WdrRecovery {
             Register-WddMonitorTask $Paths $Manifest
             try { Start-WddTask $script:MonitorTask.path $script:MonitorTask.name } catch { }
         }
-        $outcome = $(if ($accepted.Count) { 'Done' } elseif ($Mode -eq 'Resume') { 'Done' } elseif ($refused.Count) { 'Refused' } else { 'NothingToDo' })
+        # A stage whose task could not be registered is a failure of this recovery, never "Done".
+        $outcome = $(if ($failedStages.Count -and $accepted.Count) { 'Partial' } elseif ($failedStages.Count) { 'Failed' } elseif ($accepted.Count) { 'Done' } elseif ($Mode -eq 'Resume') { 'Done' } elseif ($refused.Count) { 'Refused' } else { 'NothingToDo' })
         $msg = "Reopened: $(if ($accepted.Count) { $accepted -join ', ' } else { 'none' }). Refused: $(if ($refused.Count) { ($refused | ForEach-Object { "$($_.operationId) ($($_.reason))" }) -join '; ' } else { 'none' }).$(if ($notes.Count) { ' ' + ($notes -join ' ') })"
         Write-WddLog "Recovery ($Mode): $msg" $(if ($outcome -eq 'Done') { 'INFO' } else { 'WARN' })
         Write-WddEvent 3005 "Deployment recovery ($Mode) by $($identity.Name): $msg" $(if ($outcome -eq 'Done') { 'Information' } else { 'Warning' })
@@ -12202,7 +12364,7 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
   "format": "windows-deployment-builder/deployment-manifest",
   "manifestVersion": 1,
   "packageVersion": "1.1.0",
-  "packageId": "C6442357E1F38D5B",
+  "packageId": "E3A108073C67780B",
   "scope": "answerFile",
   "generator": {
     "name": "Windows Deployment Builder",
@@ -12616,25 +12778,25 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
     {
       "path": "scripts/common/DeploymentCommon.ps1",
       "role": "orchestrator",
-      "size": 31309,
-      "sha256": "221AC87B93609A4931E26BD8C20BB72974FCDF57D615863DEABACEB38B084851",
-      "textSha256": "6FC201D9935376F91AA659B6E7BF7B0C56ADD809F2A77A80298C79E9111CA8DB",
+      "size": 31602,
+      "sha256": "8A6BA4DF8B3799EE0325FC83CA16F53C2C9A56A1F460669F3FE37131DB717DD6",
+      "textSha256": "279DDB849A7D02F7BAAE9EDF863554BB4222A61A1EFC250A3BD9C537B43AF600",
       "embedded": "Deployment\\\\scripts\\\\common\\\\DeploymentCommon.ps1"
     },
     {
       "path": "scripts/bootstrap/Stage-Deployment.ps1",
       "role": "orchestrator",
-      "size": 6904,
-      "sha256": "25A7286842970981A18CD42C42B915DBCD4A0BB396E9142C439D0A03B983C8B6",
-      "textSha256": "5222A19B267E3C90447D944470DF552D783DEBA02839B5C5C17F394FDDEB4991",
+      "size": 8485,
+      "sha256": "3893BB5E4625D99F4FF791BA54A22DC0F84267EF943703B9549C9376E0D17CFE",
+      "textSha256": "287150324D1DFD384314FE47917D9E9CE5F6B656ED194C705C62E056E873AB3D",
       "embedded": "Deployment\\\\scripts\\\\bootstrap\\\\Stage-Deployment.ps1"
     },
     {
       "path": "scripts/bootstrap/Initialize-Deployment.ps1",
       "role": "orchestrator",
-      "size": 16412,
-      "sha256": "A0D87EB9145B44B58F533DC00007A70A6C13EB5051C3A4604673F949CB98F055",
-      "textSha256": "C8D866BAE71C68BE4AD22B162E80D505CC5C27EADCE9E730216C0A36A20F49A0",
+      "size": 17630,
+      "sha256": "10D7BFAB7D0DEC0911A02087568FC31283DFEDB65B5A6C6C150636D88C0382E4",
+      "textSha256": "D1E0897118EB94C44F6EBC5863D21B487583B7A649F86687BEC1301E5C580AAC",
       "embedded": "Deployment\\\\scripts\\\\bootstrap\\\\Initialize-Deployment.ps1"
     },
     {
@@ -12656,9 +12818,9 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
     {
       "path": "scripts/orchestrator/Resume-Deployment.ps1",
       "role": "orchestrator",
-      "size": 4917,
-      "sha256": "E2CEB16E5A9EBCA185E3A4E77110977B14244E39F32D68D20C71F1EC82BDD901",
-      "textSha256": "3D42F308B0F0414DDB2401E5F59685235DD0FCC6EC547852425B6EEC6146C8DF",
+      "size": 6416,
+      "sha256": "8B5749EC5EC545155F80CE9ABCC7F1F7EDA65A97F621ECCE3F88AB7869A005BA",
+      "textSha256": "FA1FCB57FE1301061C8EC18F855BBA2B3307F034603EAB65F4CD7962DA8DF9B5",
       "embedded": "Deployment\\\\scripts\\\\orchestrator\\\\Resume-Deployment.ps1"
     },
     {
@@ -12680,9 +12842,9 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
     {
       "path": "scripts/recovery/DeploymentRecovery.ps1",
       "role": "orchestrator",
-      "size": 53000,
-      "sha256": "992AF3AD20B2B66C37B6BAAD769DD0EE2EB00C59310CABCA1D5DAB9177942379",
-      "textSha256": "144B3D8424D9D1D23283E1B13C2999EFB1C61634259170E72E5095363D0AEEBA",
+      "size": 53810,
+      "sha256": "DF9EBC8766904F66223F01826715A6BE85DBC0C000D157C8E38CD8E6AA9029E9",
+      "textSha256": "04AA1A1F1DF9A99D38634BFBC09E9F144CB6D336334E69948A35D74BF8B3CC12",
       "embedded": "Deployment\\\\scripts\\\\recovery\\\\DeploymentRecovery.ps1"
     },
     {
@@ -12696,9 +12858,9 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
     {
       "path": "scripts/windows-update/Install-UpdateEngine.ps1",
       "role": "engine",
-      "size": 6113,
-      "sha256": "FFC9568EFA033AA1984FCAC106471D45EFFD0956877E861F573C1881CC60F872",
-      "textSha256": "B3029F3929F389CF777A282F15F0B8417849065FCCE21739173E95C39E850C06",
+      "size": 7781,
+      "sha256": "8CD39D94659841528DE37B4EA20F40FEBD3FB4DA3771D4895851EE9872A5330E",
+      "textSha256": "4B1C85092F820709CD8391DD1D713AAC7E6D4A8F0CFC56BC974E9BC9C364D6FD",
       "embedded": "WindowsUpdate\\\\Install-UpdateEngine.ps1"
     },
     {
@@ -12720,9 +12882,9 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
     {
       "path": "scripts/drivers/Install-DriverEngine.ps1",
       "role": "engine",
-      "size": 6222,
-      "sha256": "7EC9C034B35BB455A598A4C77A65CCC44C27810CF2B6531100FA0C290CF56E10",
-      "textSha256": "A4BF65D9F98BE870A986561D2AC198DF8A88A4270A3F9BB4153060F662519C65",
+      "size": 7890,
+      "sha256": "D1877B7243722F1EA40E8A34BB74EC08E77A832593E49255B8E035670993DE30",
+      "textSha256": "C2AE182106747864FB56DFA2187C3B5C50D7068D9ADAFC521310C0B9DA0077CA",
       "embedded": "Drivers\\\\Install-DriverEngine.ps1"
     },
     {
@@ -12760,9 +12922,9 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
     {
       "path": "scripts/applications/ApplicationEngine.ps1",
       "role": "engine",
-      "size": 133102,
-      "sha256": "556F656E30C36A3BE2D8580EBC1214760D1F1AD7391D501F5E070211CB2351BB",
-      "textSha256": "A7484AC6C096210F9DF8076873F3ED2DE7DEFE4CBAAA674EC4DFF04AA8BB4C05",
+      "size": 134833,
+      "sha256": "9D832599C5AC8DB24BF3CD245E4921E1391CB0D8240BDE6EE89016A3A97A85D0",
+      "textSha256": "17E7EEA5A47CEF5455904661E5C9D8AAA9559E5EE9361DD0BEF7029280C8F4FE",
       "embedded": "Applications\\\\ApplicationEngine.ps1"
     },
     {
@@ -12776,9 +12938,9 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
     {
       "path": "scripts/applications/Install-ApplicationEngine.ps1",
       "role": "engine",
-      "size": 8121,
-      "sha256": "2C76DA9A86E59BEE539A274B8B90A93CACC6B74F493D89DB4F96550552C8D0E2",
-      "textSha256": "AB94EB38B01A87DE172C241557C59987B461DBC95D0AD2572417E535A0100610",
+      "size": 9792,
+      "sha256": "F068AC1C3C3A1ABC6870E9472B28F2E872724F3C0AC7FCC9309F45DB0F97DDD5",
+      "textSha256": "BAA7EE6BF5094ECA7FF60E19E41D1BBF1E39C81A03E90102961D8D0EF1DFE3CF",
       "embedded": "Applications\\\\Install-ApplicationEngine.ps1"
     },
     {
@@ -14359,6 +14521,32 @@ $ErrorActionPreference = 'Stop'
 
 function Write-Step { param([string] $Message) Write-Output ('{0}  {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Message) }
 
+function Protect-WdbDataRoot {
+    param([string] $Root, [string[]] $Grant = @('*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F', '*S-1-5-32-545:(OI)(CI)RX'))
+    # Only the folder itself gets explicit entries; Windows propagates them to everything below.
+    # Never icacls /T with (OI)(CI) grants: on files those entries are dropped, which leaves every
+    # file protected with no entries at all, unreadable even for SYSTEM and Administrators.
+    # No /C either: with it icacls exits with 0 even when it fails.
+    &amp; icacls.exe $Root /inheritance:r /grant:r @Grant /Q | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "icacls failed with exit code $LASTEXITCODE on $Root; refusing to run a SYSTEM task from an unprotected folder." }
+    # Repairs what an earlier version left below (files protected with no entries, folders with a
+    # protected copy of these entries): they inherit again. Deliberately private folders (settings
+    # backups) have other entries and keep them.
+    function Get-Entries { param($Acl) (@($Acl.Access | ForEach-Object { "$($_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value)=$([int] $_.FileSystemRights)" }) | Sort-Object) -join ';' }
+    $own = Get-Entries (Get-Acl -LiteralPath $Root)
+    foreach ($item in @(Get-ChildItem -LiteralPath $Root -Recurse -Force -Attributes !ReparsePoint -ErrorAction SilentlyContinue)) {
+        $damaged = $true
+        try {
+            $acl = Get-Acl -LiteralPath $item.FullName
+            $e = Get-Entries $acl
+            $damaged = $acl.AreAccessRulesProtected -and ($e -eq '' -or $e -eq $own)
+        } catch { }
+        if (-not $damaged) { continue }
+        &amp; icacls.exe $item.FullName /reset /Q | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "icacls /reset failed with exit code $LASTEXITCODE on $($item.FullName); refusing to run a SYSTEM task from an unprotected folder." }
+    }
+}
+
 $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw 'Install-UpdateEngine.ps1 must run elevated (as Administrator or SYSTEM).'
@@ -14378,8 +14566,7 @@ if ($Uninstall) {
 
 # 1. Folder and permissions (SIDs, so this works on every display language).
 if (-not (Test-Path -LiteralPath $installDir)) { New-Item -ItemType Directory -Path $installDir -Force | Out-Null }
-&amp; icacls.exe $dataRoot /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' /T /C /Q | Out-Null
-if ($LASTEXITCODE -ne 0) { throw "icacls failed with exit code $LASTEXITCODE; refusing to run a SYSTEM task from an unprotected folder." }
+Protect-WdbDataRoot $dataRoot
 Write-Step "Secured $dataRoot (SYSTEM/Administrators full control, Users read)."
 
 # 2. Files. A new installation starts a new run; earlier state and results are archived.
@@ -17007,6 +17194,32 @@ $ErrorActionPreference = 'Stop'
 
 function Write-Step { param([string] $Message) Write-Output ('{0}  {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Message) }
 
+function Protect-WdbDataRoot {
+    param([string] $Root, [string[]] $Grant = @('*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F', '*S-1-5-32-545:(OI)(CI)RX'))
+    # Only the folder itself gets explicit entries; Windows propagates them to everything below.
+    # Never icacls /T with (OI)(CI) grants: on files those entries are dropped, which leaves every
+    # file protected with no entries at all, unreadable even for SYSTEM and Administrators.
+    # No /C either: with it icacls exits with 0 even when it fails.
+    &amp; icacls.exe $Root /inheritance:r /grant:r @Grant /Q | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "icacls failed with exit code $LASTEXITCODE on $Root; refusing to run a SYSTEM task from an unprotected folder." }
+    # Repairs what an earlier version left below (files protected with no entries, folders with a
+    # protected copy of these entries): they inherit again. Deliberately private folders (settings
+    # backups) have other entries and keep them.
+    function Get-Entries { param($Acl) (@($Acl.Access | ForEach-Object { "$($_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value)=$([int] $_.FileSystemRights)" }) | Sort-Object) -join ';' }
+    $own = Get-Entries (Get-Acl -LiteralPath $Root)
+    foreach ($item in @(Get-ChildItem -LiteralPath $Root -Recurse -Force -Attributes !ReparsePoint -ErrorAction SilentlyContinue)) {
+        $damaged = $true
+        try {
+            $acl = Get-Acl -LiteralPath $item.FullName
+            $e = Get-Entries $acl
+            $damaged = $acl.AreAccessRulesProtected -and ($e -eq '' -or $e -eq $own)
+        } catch { }
+        if (-not $damaged) { continue }
+        &amp; icacls.exe $item.FullName /reset /Q | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "icacls /reset failed with exit code $LASTEXITCODE on $($item.FullName); refusing to run a SYSTEM task from an unprotected folder." }
+    }
+}
+
 $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw 'Install-DriverEngine.ps1 must run elevated (as Administrator or SYSTEM).'
@@ -17026,8 +17239,7 @@ if ($Uninstall) {
 
 # 1. Folder and permissions (SIDs, so this works on every display language).
 if (-not (Test-Path -LiteralPath $installDir)) { New-Item -ItemType Directory -Path $installDir -Force | Out-Null }
-&amp; icacls.exe $dataRoot /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' /T /C /Q | Out-Null
-if ($LASTEXITCODE -ne 0) { throw "icacls failed with exit code $LASTEXITCODE; refusing to run a SYSTEM task from an unprotected folder." }
+Protect-WdbDataRoot $dataRoot
 Write-Step "Secured $dataRoot (SYSTEM/Administrators full control, Users read)."
 
 # 2. Files. A new installation starts a new run; earlier state and results are archived.
@@ -19089,8 +19301,33 @@ function Get-WdaBackupCandidates {
 function Protect-WdaBackupFolder {
     param([string] $Path)
     $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-    &amp; icacls.exe $Path /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' "*$($sid):(OI)(CI)F" /T /C /Q | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "icacls failed with exit code $LASTEXITCODE on $Path." }
+    Protect-WdaFolder $Path @('*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F', "*$($sid):(OI)(CI)F")
+}
+
+function Protect-WdaFolder {
+    param([string] $Root, [string[]] $Grant = @('*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F', '*S-1-5-32-545:(OI)(CI)RX'))
+    # Only the folder itself gets explicit entries; Windows propagates them to everything below.
+    # Never icacls /T with (OI)(CI) grants: on files those entries are dropped, which leaves every
+    # file protected with no entries at all, unreadable even for SYSTEM and Administrators.
+    # No /C either: with it icacls exits with 0 even when it fails.
+    &amp; icacls.exe $Root /inheritance:r /grant:r @Grant /Q | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "icacls failed with exit code $LASTEXITCODE on $Root; the folder is not protected." }
+    # Repairs what an earlier version left below (files protected with no entries, folders with a
+    # protected copy of these entries): they inherit again. Deliberately private folders (settings
+    # backups) have other entries and keep them.
+    function Get-Entries { param($Acl) (@($Acl.Access | ForEach-Object { "$($_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value)=$([int] $_.FileSystemRights)" }) | Sort-Object) -join ';' }
+    $own = Get-Entries (Get-Acl -LiteralPath $Root)
+    foreach ($item in @(Get-ChildItem -LiteralPath $Root -Recurse -Force -Attributes !ReparsePoint -ErrorAction SilentlyContinue)) {
+        $damaged = $true
+        try {
+            $acl = Get-Acl -LiteralPath $item.FullName
+            $e = Get-Entries $acl
+            $damaged = $acl.AreAccessRulesProtected -and ($e -eq '' -or $e -eq $own)
+        } catch { }
+        if (-not $damaged) { continue }
+        &amp; icacls.exe $item.FullName /reset /Q | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "icacls /reset failed with exit code $LASTEXITCODE on $($item.FullName); the folder is not protected." }
+    }
 }
 
 &lt;#
@@ -20105,6 +20342,32 @@ $ErrorActionPreference = 'Stop'
 
 function Write-Step { param([string] $Message) Write-Output ('{0}  {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Message) }
 
+function Protect-WdbDataRoot {
+    param([string] $Root, [string[]] $Grant = @('*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F', '*S-1-5-32-545:(OI)(CI)RX'))
+    # Only the folder itself gets explicit entries; Windows propagates them to everything below.
+    # Never icacls /T with (OI)(CI) grants: on files those entries are dropped, which leaves every
+    # file protected with no entries at all, unreadable even for SYSTEM and Administrators.
+    # No /C either: with it icacls exits with 0 even when it fails.
+    &amp; icacls.exe $Root /inheritance:r /grant:r @Grant /Q | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "icacls failed with exit code $LASTEXITCODE on $Root; refusing to run an elevated task from an unprotected folder." }
+    # Repairs what an earlier version left below (files protected with no entries, folders with a
+    # protected copy of these entries): they inherit again. Deliberately private folders (settings
+    # backups) have other entries and keep them.
+    function Get-Entries { param($Acl) (@($Acl.Access | ForEach-Object { "$($_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value)=$([int] $_.FileSystemRights)" }) | Sort-Object) -join ';' }
+    $own = Get-Entries (Get-Acl -LiteralPath $Root)
+    foreach ($item in @(Get-ChildItem -LiteralPath $Root -Recurse -Force -Attributes !ReparsePoint -ErrorAction SilentlyContinue)) {
+        $damaged = $true
+        try {
+            $acl = Get-Acl -LiteralPath $item.FullName
+            $e = Get-Entries $acl
+            $damaged = $acl.AreAccessRulesProtected -and ($e -eq '' -or $e -eq $own)
+        } catch { }
+        if (-not $damaged) { continue }
+        &amp; icacls.exe $item.FullName /reset /Q | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "icacls /reset failed with exit code $LASTEXITCODE on $($item.FullName); refusing to run an elevated task from an unprotected folder." }
+    }
+}
+
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = New-Object Security.Principal.WindowsPrincipal($identity)
 if ($identity.User.Value -eq 'S-1-5-18') {
@@ -20128,8 +20391,7 @@ if ($Uninstall) {
 
 # 1-2. Folder and permissions (SIDs, so this works on every display language).
 if (-not (Test-Path -LiteralPath $installDir)) { New-Item -ItemType Directory -Path $installDir -Force | Out-Null }
-&amp; icacls.exe $dataRoot /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' /T /C /Q | Out-Null
-if ($LASTEXITCODE -ne 0) { throw "icacls failed with exit code $LASTEXITCODE; refusing to run an elevated task from an unprotected folder." }
+Protect-WdbDataRoot $dataRoot
 Write-Step "Secured $dataRoot (SYSTEM/Administrators full control, Users read)."
 
 # 3. Files. A new installation starts a new run; earlier state and results are archived.
@@ -20523,9 +20785,12 @@ function Write-WddLog {
     $line = '{0}  {1,-5}  {2}' -f (Get-WddNow).ToString('yyyy-MM-dd HH:mm:ss'), $Level, $Message
     Write-Verbose $line
     if (-not $script:WddLogFile) { return }
+    $err = $null
     for ($i = 0; $i -lt 3; $i++) {
-        try { [System.IO.File]::AppendAllText($script:WddLogFile, $line + "\`r\`n"); return } catch { Start-Sleep -Milliseconds 200 }
+        try { [System.IO.File]::AppendAllText($script:WddLogFile, $line + "\`r\`n"); return } catch { $err = $_.Exception.Message; Start-Sleep -Milliseconds 200 }
     }
+    # Once per process: a log that cannot be written is visible on the console and in task output.
+    if (-not $script:WddLogWarned) { $script:WddLogWarned = $true; Write-Warning "Cannot write the deployment log $($script:WddLogFile): $err" }
 }
 
 function Get-WddPaths {
@@ -20950,12 +21215,32 @@ $script:RequiredForStart = @(
     'scripts/finalization/Complete-Deployment.ps1'
 )
 
+# SYSTEM and Administrators full control, Users read and execute, no entries inherited from
+# ProgramData (the same rule as the engine installers). Elevated tasks run scripts from here.
 function Set-WddAcl {
-    param([string] $Root)
-    # SYSTEM and Administrators full control, Users read and execute, no inherited entries (the
-    # same rule as the engine installers). Elevated tasks run scripts from here.
-    &amp; icacls.exe $Root /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' /T /C /Q | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "icacls failed with exit code $LASTEXITCODE; refusing to run elevated scripts from an unprotected folder." }
+    param([string] $Root, [string[]] $Grant = @('*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F', '*S-1-5-32-545:(OI)(CI)RX'))
+    # Only the folder itself gets explicit entries; Windows propagates them to everything below.
+    # Never icacls /T with (OI)(CI) grants: on files those entries are dropped, which leaves every
+    # file protected with no entries at all, unreadable even for SYSTEM and Administrators.
+    # No /C either: with it icacls exits with 0 even when it fails.
+    &amp; icacls.exe $Root /inheritance:r /grant:r @Grant /Q | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "icacls failed with exit code $LASTEXITCODE on $Root; refusing to run elevated scripts from an unprotected folder." }
+    # Repairs what an earlier version left below (files protected with no entries, folders with a
+    # protected copy of these entries): they inherit again. Deliberately private folders (settings
+    # backups) have other entries and keep them.
+    function Get-Entries { param($Acl) (@($Acl.Access | ForEach-Object { "$($_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value)=$([int] $_.FileSystemRights)" }) | Sort-Object) -join ';' }
+    $own = Get-Entries (Get-Acl -LiteralPath $Root)
+    foreach ($item in @(Get-ChildItem -LiteralPath $Root -Recurse -Force -Attributes !ReparsePoint -ErrorAction SilentlyContinue)) {
+        $damaged = $true
+        try {
+            $acl = Get-Acl -LiteralPath $item.FullName
+            $e = Get-Entries $acl
+            $damaged = $acl.AreAccessRulesProtected -and ($e -eq '' -or $e -eq $own)
+        } catch { }
+        if (-not $damaged) { continue }
+        &amp; icacls.exe $item.FullName /reset /Q | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "icacls /reset failed with exit code $LASTEXITCODE on $($item.FullName); refusing to run elevated scripts from an unprotected folder." }
+    }
 }
 
 # Where a manifest file comes from in each mode.
@@ -21089,12 +21374,14 @@ $script:MonitorTask = @{ path = '\\WindowsDeploymentBuilder\\'; name = 'Deployme
 # Adapters
 # ------------------------------------------------------------------------------------------------
 
-# Runs an engine installer in its own Windows PowerShell process; returns the exit code.
+# Runs an engine installer in its own Windows PowerShell process; returns the exit code. Its
+# output goes to the log, and its last line is kept as the reason when no task is registered.
 function Invoke-WddInstaller {
     param([string] $Path)
     $ps = Join-Path $env:SystemRoot 'System32\\WindowsPowerShell\\v1.0\\powershell.exe'
     $out = &amp; $ps -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $Path 2&gt;&amp;1
     foreach ($line in @($out)) { Write-WddLog "    | $line" }
+    $script:WddInstallerOutput = @(@($out) | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
     return $LASTEXITCODE
 }
 
@@ -21195,7 +21482,11 @@ function Invoke-WddLaunchStage {
     Save-WddState $Paths $State
     Write-WddLog "Launching stage $($Stage.id) ($($Stage.context)): $installer"
     $code = $null
-    try { $code = Invoke-WddInstaller $installer } catch { $rec.message = $_.Exception.Message; Write-WddLog "  installer error: $($rec.message)" 'ERROR' }
+    $script:WddInstallerOutput = @()
+    # The reason of THIS attempt (an earlier message, such as "Restarted manually.", is not one).
+    $failure = $null
+    if (-not (Test-Path -LiteralPath $installer)) { $failure = "The installer is missing from the staged package: $installer" }
+    else { try { $code = Invoke-WddInstaller $installer } catch { $failure = $_.Exception.Message; Write-WddLog "  installer error: $failure" 'ERROR' } }
     $rec.exitCode = $code
     if (Get-WddTask $Stage.task.path $Stage.task.name) {
         $rec.launchResult = 'Launched'
@@ -21205,7 +21496,8 @@ function Invoke-WddLaunchStage {
         $rec.launchResult = 'Launched'; $rec.message = 'Finished during launch.'
     } else {
         $rec.launchResult = $(if ([int] $rec.attempts -ge $MaxAttempts) { 'LaunchFailed' } else { 'Launching' })
-        if (-not $rec.message) { $rec.message = "The installer returned $code and registered no task." }
+        $reason = @($script:WddInstallerOutput) | Select-Object -Last 1
+        $rec.message = $(if ($failure) { $failure } else { "The installer returned $code and registered no task $($Stage.task.path)$($Stage.task.name)$(if ($reason) { ": $reason" } else { '.' })" })
         Write-WddLog "Stage $($Stage.id): $($rec.message)" 'ERROR'
     }
     Save-WddState $Paths $State
@@ -21274,7 +21566,15 @@ function Invoke-WddInitialize {
 
         $state.status = 'InProgress'
         Save-WddState $Paths $state
-        Register-WddMonitorTask $Paths $Manifest
+        try { Register-WddMonitorTask $Paths $Manifest }
+        catch {
+            # Without the monitor nothing follows the stages: say so instead of failing silently.
+            $state.message = "The monitor task $($script:MonitorTask.path)$($script:MonitorTask.name) could not be registered: $($_.Exception.Message) Run Resume-Deployment.ps1 as administrator."
+            Save-WddState $Paths $state
+            Write-WddLog $state.message 'ERROR'
+            Write-WddEvent 3002 "Deployment $($Manifest.packageId): $($state.message)" 'Error'
+            return 'MonitorRegistrationFailed'
+        }
         Write-WddLog "Registered $($script:MonitorTask.path)$($script:MonitorTask.name) (SYSTEM; at startup and every 15 minutes)."
         $snapshot = Get-WddSnapshot $Manifest $Paths $state
         Write-WddJson $Paths.Status $snapshot
@@ -21550,10 +21850,12 @@ if ($script:ShowMain) {
           Verifies &lt;dataRoot&gt;\\Package, registers the monitor task again and runs it once. Use it
           after a stalled stage was fixed, after the deadline passed, or if the monitor task was
           removed. A finished deployment is reopened (its report is rewritten at the end).
-      Resume-Deployment.ps1 -RestartStage windowsUpdate|applications
+      Resume-Deployment.ps1 -RestartStage windowsUpdate|applications|drivers
           Runs that engine's installer again. The installer archives the previous run and starts
           a new one; work already done is detected (installed updates are not offered again,
-          installed applications are reported AlreadyInstalled).
+          installed applications are reported AlreadyInstalled). If the installer does not
+          register its task, the result is StageRestartFailed with the reason (exit code 1),
+          never Resumed. Windows Setup and the disk are never touched.
       Resume-Deployment.ps1 -Status
           Prints the progress and changes nothing.
 
@@ -21561,7 +21863,7 @@ if ($script:ShowMain) {
 #&gt;
 [CmdletBinding()]
 param(
-    [ValidateSet('', 'windowsUpdate', 'applications')]
+    [ValidateSet('', 'windowsUpdate', 'applications', 'drivers')]
     [string] $RestartStage = '',
     [switch] $Status
 )
@@ -21602,11 +21904,26 @@ function Invoke-WddResume {
             $stage = Get-WddStage $manifest $RestartStage
             if (-not $stage -or -not $stage.enabled) { Write-WddLog "Stage $RestartStage is not part of this deployment." 'ERROR'; return 'UnknownStage' }
             $state.stages[$RestartStage] = @{ launchResult = ''; attempts = 0; launchedUtc = $null; exitCode = $null; message = 'Restarted manually.' }
-            Invoke-WddLaunchStage $stage $Paths $state $identity ([int] $manifest.failureHandling.orchestrator.launchAttempts) | Out-Null
+            $rec = Invoke-WddLaunchStage $stage $Paths $state $identity ([int] $manifest.failureHandling.orchestrator.launchAttempts)
+            if ($rec.launchResult -ne 'Launched') {
+                # Recorded (the monitor reports the stage as failed to launch); never reported as resumed.
+                $state.message = "Restart of stage $RestartStage failed: $($rec.message)"
+                $script:ResumeDetail = $state.message
+                Save-WddState $Paths $state
+                Write-WddLog "Resume: $($state.message)" 'ERROR'
+                Write-WddEvent 3006 "Deployment $($manifest.packageId): $($state.message) See $($Paths.Log)." 'Error'
+                try { Register-WddMonitorTask $Paths $manifest } catch { Write-WddLog "Resume: the monitor task could not be registered either: $($_.Exception.Message)" 'ERROR' }
+                return 'StageRestartFailed'
+            }
         }
         Save-WddState $Paths $state
-        Register-WddMonitorTask $Paths $manifest
-        try { Start-WddTask $script:MonitorTask.path $script:MonitorTask.name } catch { }
+        try { Register-WddMonitorTask $Paths $manifest }
+        catch {
+            $script:ResumeDetail = "The monitor task $($script:MonitorTask.path)$($script:MonitorTask.name) could not be registered: $($_.Exception.Message)"
+            Write-WddLog "Resume: $($script:ResumeDetail)" 'ERROR'
+            return 'MonitorRegistrationFailed'
+        }
+        try { Start-WddTask $script:MonitorTask.path $script:MonitorTask.name } catch { Write-WddLog "Resume: could not start the monitor now; it runs within 15 minutes: $($_.Exception.Message)" 'WARN' }
         Write-WddEvent 3001 "Deployment $($manifest.packageId) resumed manually$(if ($RestartStage) { " (stage $RestartStage restarted)" })."
         return 'Resumed'
     } finally {
@@ -21619,8 +21936,9 @@ if ($script:ResumeMain) {
     $manifest = Read-WddManifest (Join-Path $package 'deployment-manifest.json')
     $paths = Get-WddPaths $manifest.dataRoot
     if ($script:ResumeArgs.Status) { (Format-WddStatus $manifest $paths (Read-WddDeploymentState $paths).State).Text; exit 0 }
+    $script:ResumeDetail = ''
     $outcome = Invoke-WddResume $paths $script:ResumeArgs.RestartStage
-    Write-Output "Resume: $outcome. Log: $($paths.Log)"
+    Write-Output "Resume: $outcome.$(if ($script:ResumeDetail) { " $($script:ResumeDetail)" }) Log: $($paths.Log)"
     if ($outcome -eq 'Resumed') { exit 0 }
     exit 1
 }
@@ -22185,7 +22503,9 @@ function Step-WddUpdatePolicy {
     Exit codes: Status returns the outcome code (0 Succeeded, 10 CompletedWithWarnings,
     20 CompletedWithFailures, 25 Incomplete, 30/31/32 paused for network/reboot/user, 40 InProgress,
     50 FailedToInitialize, 60 Failed). Actions return 0 (done), 1 (refused or nothing to do),
-    2 (busy), 3 (package integrity), 4 (administrator rights needed).
+    2 (busy), 3 (package integrity), 4 (administrator rights needed), 5 (Partial: some stages
+    were restarted, the task of another could not be registered), 6 (Failed: no stage task could
+    be registered). A stage only counts as restarted when its scheduled task exists afterwards.
 #&gt;
 [CmdletBinding()]
 param(
@@ -22218,7 +22538,7 @@ $script:HealthEngineScript = Join-Path $PSScriptRoot '..\\health\\DeploymentHeal
 if (Test-Path -LiteralPath $script:HealthEngineScript) { . $script:HealthEngineScript -Mode Library }
 Set-StrictMode -Version 2.0
 
-$script:RecoveryExit = @{ Done = 0; Refused = 1; NothingToDo = 1; Busy = 2; IntegrityFailed = 3; NotElevated = 4; NoState = 1; UnknownStage = 1 }
+$script:RecoveryExit = @{ Done = 0; Refused = 1; NothingToDo = 1; Busy = 2; IntegrityFailed = 3; NotElevated = 4; NoState = 1; UnknownStage = 1; Partial = 5; Failed = 6 }
 
 &lt;#
     The account the application stage belongs to (Phase 5 deployment user): its launch record, else
@@ -22435,6 +22755,8 @@ function Invoke-WdrRecovery {
         }
 
         $accepted = @(); $refused = @(); $notes = @()
+        # Stages whose task could not be registered again: this recovery failed for them.
+        $failedStages = @()
         $ops = @($Operations | Where-Object { $_ } | ForEach-Object { ([string] $_).Trim() })
         $wuRequested = $ops -contains 'stage:windowsUpdate'
         $driverOps = @($ops | Where-Object { $_ -like 'driver:*' -or $_ -eq 'stage:drivers' })
@@ -22474,7 +22796,8 @@ function Invoke-WdrRecovery {
                         $rec.message = $(if ($rec.launchResult -eq 'Launched') { "Restarted by the recovery tool ($Mode)." } else { "The recovery tool could not register the application task (exit code $code)." })
                         $state.stages['applications'] = $rec
                         $notes += "Application stage: $($rec.message)"
-                        if ($r.Outcome -ne 'Accepted') { $accepted += 'stage:applications' }
+                        if ($rec.launchResult -ne 'Launched') { $refused += @{ operationId = 'stage:applications'; reason = $rec.message }; $failedStages += 'applications' }
+                        elseif ($r.Outcome -ne 'Accepted') { $accepted += 'stage:applications' }
                     }
                 }
             }
@@ -22489,7 +22812,7 @@ function Invoke-WdrRecovery {
             if (($Mode -ne 'Resume' -and $failed) -or $lost) {
                 $state.stages['windowsUpdate'] = @{ launchResult = ''; attempts = 0; launchedUtc = $null; exitCode = $null; message = "Restarted by the recovery tool ($Mode)."; user = 'SYSTEM' }
                 $rec = Invoke-WddLaunchStage $wuStage $Paths $state $identity ([int] $Manifest.failureHandling.orchestrator.launchAttempts)
-                if ($rec.launchResult -eq 'Launched') { $accepted += 'stage:windowsUpdate' } else { $refused += @{ operationId = 'stage:windowsUpdate'; reason = [string] $rec.message } }
+                if ($rec.launchResult -eq 'Launched') { $accepted += 'stage:windowsUpdate' } else { $refused += @{ operationId = 'stage:windowsUpdate'; reason = [string] $rec.message }; $failedStages += 'windowsUpdate' }
             } elseif ($wuRequested) {
                 $refused += @{ operationId = 'stage:windowsUpdate'; reason = "the Windows Update stage is $($wu.state)$(if ($wu.status) { "/$($wu.status)" }); only a stage that ended with failures is retried" }
             }
@@ -22521,7 +22844,7 @@ function Invoke-WdrRecovery {
                     $state.stages['drivers'] = $rec
                     $notes += "Driver stage: $($rec.message)"
                     if ($rec.launchResult -eq 'Launched' -and $r.Outcome -ne 'Accepted') { $accepted += 'stage:drivers' }
-                    elseif ($rec.launchResult -ne 'Launched') { $refused += @{ operationId = 'stage:drivers'; reason = $rec.message } }
+                    elseif ($rec.launchResult -ne 'Launched') { $refused += @{ operationId = 'stage:drivers'; reason = $rec.message }; $failedStages += 'drivers' }
                 }
             }
         } elseif ($driverOps.Count) {
@@ -22552,7 +22875,8 @@ function Invoke-WdrRecovery {
             Register-WddMonitorTask $Paths $Manifest
             try { Start-WddTask $script:MonitorTask.path $script:MonitorTask.name } catch { }
         }
-        $outcome = $(if ($accepted.Count) { 'Done' } elseif ($Mode -eq 'Resume') { 'Done' } elseif ($refused.Count) { 'Refused' } else { 'NothingToDo' })
+        # A stage whose task could not be registered is a failure of this recovery, never "Done".
+        $outcome = $(if ($failedStages.Count -and $accepted.Count) { 'Partial' } elseif ($failedStages.Count) { 'Failed' } elseif ($accepted.Count) { 'Done' } elseif ($Mode -eq 'Resume') { 'Done' } elseif ($refused.Count) { 'Refused' } else { 'NothingToDo' })
         $msg = "Reopened: $(if ($accepted.Count) { $accepted -join ', ' } else { 'none' }). Refused: $(if ($refused.Count) { ($refused | ForEach-Object { "$($_.operationId) ($($_.reason))" }) -join '; ' } else { 'none' }).$(if ($notes.Count) { ' ' + ($notes -join ' ') })"
         Write-WddLog "Recovery ($Mode): $msg" $(if ($outcome -eq 'Done') { 'INFO' } else { 'WARN' })
         Write-WddEvent 3005 "Deployment recovery ($Mode) by $($identity.Name): $msg" $(if ($outcome -eq 'Done') { 'Information' } else { 'Warning' })
@@ -25145,7 +25469,7 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
   "format": "windows-deployment-builder/deployment-manifest",
   "manifestVersion": 1,
   "packageVersion": "1.1.0",
-  "packageId": "54E80CD064C22A8C",
+  "packageId": "D84BDACDCF36196F",
   "scope": "answerFile",
   "generator": {
     "name": "Windows Deployment Builder",
@@ -25560,25 +25884,25 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
     {
       "path": "scripts/common/DeploymentCommon.ps1",
       "role": "orchestrator",
-      "size": 31309,
-      "sha256": "221AC87B93609A4931E26BD8C20BB72974FCDF57D615863DEABACEB38B084851",
-      "textSha256": "6FC201D9935376F91AA659B6E7BF7B0C56ADD809F2A77A80298C79E9111CA8DB",
+      "size": 31602,
+      "sha256": "8A6BA4DF8B3799EE0325FC83CA16F53C2C9A56A1F460669F3FE37131DB717DD6",
+      "textSha256": "279DDB849A7D02F7BAAE9EDF863554BB4222A61A1EFC250A3BD9C537B43AF600",
       "embedded": "Deployment\\\\scripts\\\\common\\\\DeploymentCommon.ps1"
     },
     {
       "path": "scripts/bootstrap/Stage-Deployment.ps1",
       "role": "orchestrator",
-      "size": 6904,
-      "sha256": "25A7286842970981A18CD42C42B915DBCD4A0BB396E9142C439D0A03B983C8B6",
-      "textSha256": "5222A19B267E3C90447D944470DF552D783DEBA02839B5C5C17F394FDDEB4991",
+      "size": 8485,
+      "sha256": "3893BB5E4625D99F4FF791BA54A22DC0F84267EF943703B9549C9376E0D17CFE",
+      "textSha256": "287150324D1DFD384314FE47917D9E9CE5F6B656ED194C705C62E056E873AB3D",
       "embedded": "Deployment\\\\scripts\\\\bootstrap\\\\Stage-Deployment.ps1"
     },
     {
       "path": "scripts/bootstrap/Initialize-Deployment.ps1",
       "role": "orchestrator",
-      "size": 16412,
-      "sha256": "A0D87EB9145B44B58F533DC00007A70A6C13EB5051C3A4604673F949CB98F055",
-      "textSha256": "C8D866BAE71C68BE4AD22B162E80D505CC5C27EADCE9E730216C0A36A20F49A0",
+      "size": 17630,
+      "sha256": "10D7BFAB7D0DEC0911A02087568FC31283DFEDB65B5A6C6C150636D88C0382E4",
+      "textSha256": "D1E0897118EB94C44F6EBC5863D21B487583B7A649F86687BEC1301E5C580AAC",
       "embedded": "Deployment\\\\scripts\\\\bootstrap\\\\Initialize-Deployment.ps1"
     },
     {
@@ -25600,9 +25924,9 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
     {
       "path": "scripts/orchestrator/Resume-Deployment.ps1",
       "role": "orchestrator",
-      "size": 4917,
-      "sha256": "E2CEB16E5A9EBCA185E3A4E77110977B14244E39F32D68D20C71F1EC82BDD901",
-      "textSha256": "3D42F308B0F0414DDB2401E5F59685235DD0FCC6EC547852425B6EEC6146C8DF",
+      "size": 6416,
+      "sha256": "8B5749EC5EC545155F80CE9ABCC7F1F7EDA65A97F621ECCE3F88AB7869A005BA",
+      "textSha256": "FA1FCB57FE1301061C8EC18F855BBA2B3307F034603EAB65F4CD7962DA8DF9B5",
       "embedded": "Deployment\\\\scripts\\\\orchestrator\\\\Resume-Deployment.ps1"
     },
     {
@@ -25624,9 +25948,9 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
     {
       "path": "scripts/recovery/DeploymentRecovery.ps1",
       "role": "orchestrator",
-      "size": 53000,
-      "sha256": "992AF3AD20B2B66C37B6BAAD769DD0EE2EB00C59310CABCA1D5DAB9177942379",
-      "textSha256": "144B3D8424D9D1D23283E1B13C2999EFB1C61634259170E72E5095363D0AEEBA",
+      "size": 53810,
+      "sha256": "DF9EBC8766904F66223F01826715A6BE85DBC0C000D157C8E38CD8E6AA9029E9",
+      "textSha256": "04AA1A1F1DF9A99D38634BFBC09E9F144CB6D336334E69948A35D74BF8B3CC12",
       "embedded": "Deployment\\\\scripts\\\\recovery\\\\DeploymentRecovery.ps1"
     },
     {
@@ -25640,9 +25964,9 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
     {
       "path": "scripts/windows-update/Install-UpdateEngine.ps1",
       "role": "engine",
-      "size": 6113,
-      "sha256": "FFC9568EFA033AA1984FCAC106471D45EFFD0956877E861F573C1881CC60F872",
-      "textSha256": "B3029F3929F389CF777A282F15F0B8417849065FCCE21739173E95C39E850C06",
+      "size": 7781,
+      "sha256": "8CD39D94659841528DE37B4EA20F40FEBD3FB4DA3771D4895851EE9872A5330E",
+      "textSha256": "4B1C85092F820709CD8391DD1D713AAC7E6D4A8F0CFC56BC974E9BC9C364D6FD",
       "embedded": "WindowsUpdate\\\\Install-UpdateEngine.ps1"
     },
     {
@@ -25664,9 +25988,9 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
     {
       "path": "scripts/drivers/Install-DriverEngine.ps1",
       "role": "engine",
-      "size": 6222,
-      "sha256": "7EC9C034B35BB455A598A4C77A65CCC44C27810CF2B6531100FA0C290CF56E10",
-      "textSha256": "A4BF65D9F98BE870A986561D2AC198DF8A88A4270A3F9BB4153060F662519C65",
+      "size": 7890,
+      "sha256": "D1877B7243722F1EA40E8A34BB74EC08E77A832593E49255B8E035670993DE30",
+      "textSha256": "C2AE182106747864FB56DFA2187C3B5C50D7068D9ADAFC521310C0B9DA0077CA",
       "embedded": "Drivers\\\\Install-DriverEngine.ps1"
     },
     {
@@ -25704,9 +26028,9 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
     {
       "path": "scripts/applications/ApplicationEngine.ps1",
       "role": "engine",
-      "size": 133102,
-      "sha256": "556F656E30C36A3BE2D8580EBC1214760D1F1AD7391D501F5E070211CB2351BB",
-      "textSha256": "A7484AC6C096210F9DF8076873F3ED2DE7DEFE4CBAAA674EC4DFF04AA8BB4C05",
+      "size": 134833,
+      "sha256": "9D832599C5AC8DB24BF3CD245E4921E1391CB0D8240BDE6EE89016A3A97A85D0",
+      "textSha256": "17E7EEA5A47CEF5455904661E5C9D8AAA9559E5EE9361DD0BEF7029280C8F4FE",
       "embedded": "Applications\\\\ApplicationEngine.ps1"
     },
     {
@@ -25720,9 +26044,9 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
     {
       "path": "scripts/applications/Install-ApplicationEngine.ps1",
       "role": "engine",
-      "size": 8121,
-      "sha256": "2C76DA9A86E59BEE539A274B8B90A93CACC6B74F493D89DB4F96550552C8D0E2",
-      "textSha256": "AB94EB38B01A87DE172C241557C59987B461DBC95D0AD2572417E535A0100610",
+      "size": 9792,
+      "sha256": "F068AC1C3C3A1ABC6870E9472B28F2E872724F3C0AC7FCC9309F45DB0F97DDD5",
+      "textSha256": "BAA7EE6BF5094ECA7FF60E19E41D1BBF1E39C81A03E90102961D8D0EF1DFE3CF",
       "embedded": "Applications\\\\Install-ApplicationEngine.ps1"
     },
     {

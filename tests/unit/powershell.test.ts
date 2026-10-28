@@ -112,6 +112,22 @@ describe.skipIf(!onWindows)('PowerShell (Windows only)', () => {
     }
   }, 240_000);
 
+  it('NTFS permissions: the shipped folder-protection code leaves every staged script, log and state file usable (real icacls)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'wdb-acl-fixture-'));
+    try {
+      writeDeploymentFixture(dir);
+      let out: string;
+      try {
+        out = await psAsync(['-File', script('../powershell/Acl.Tests.ps1'), '-Fixture', dir]);
+      } catch (e) {
+        throw new Error(`Acl.Tests.ps1 failed:\n${(e as { stdout?: string }).stdout ?? e}`);
+      }
+      expect(out).toMatch(/\b\d+ passed, 0 failed/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 240_000);
+
   it('inventory, backup and restore scenarios pass (Phase 6); the collector output imports into the website', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'wdb-migration-'));
     try {

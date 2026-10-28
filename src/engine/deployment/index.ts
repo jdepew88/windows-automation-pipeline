@@ -695,7 +695,7 @@ stages wait and retry within their limits, then end as Offline; installation its
 Recovery: see the report, or run (elevated)
   powershell.exe -ExecutionPolicy Bypass -File "C:\\ProgramData\\WindowsDeploymentBuilder\\Package\\scripts\\orchestrator\\Resume-Deployment.ps1"
   ... -Status                 shows progress
-  ... -RestartStage <stage>   starts windowsUpdate or applications again
+  ... -RestartStage <stage>   starts windowsUpdate, applications or drivers again
 ${recoveryText(p)}
 ${backupText(p)}${driversText(p)}Remove the USB drive, or at least ${p.output.answerFileName}, after installing: another computer
 booted from it would be installed with the same settings, and the file may contain passwords.

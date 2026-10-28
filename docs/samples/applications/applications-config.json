@@ -168,14 +168,7 @@
     }
   ],
   "unresolved": [],
-  "manual": [
-    {
-      "key": "catalog:rustdesk",
-      "displayName": "RustDesk",
-      "instructions": "Download the signed Windows installer from RustDesk's official GitHub releases and install it. Leave unattended access off: do not set a permanent password; the customer approves each session.",
-      "url": "https://github.com/rustdesk/rustdesk/releases/latest"
-    }
-  ],
+  "manual": [],
   "deselected": [],
   "additionalSoftware": []
 }

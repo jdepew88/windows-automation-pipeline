@@ -40,9 +40,6 @@ For every package: "winget list" first (already installed = left unchanged), the
      needs an account sign-in after installation; Microsoft Store package
      winget install --id 9MSPC6MP8FM4 --exact --source msstore --silent --no-upgrade --accept-package-agreements --accept-source-agreements --disable-interactivity
 
-Manual follow-up (no unattended installation; reported as RequiresInteraction):
-  - RustDesk: Download the signed Windows installer from RustDesk's official GitHub releases and install it. Leave unattended access off: do not set a permanent password; the customer approves each session. https://github.com/rustdesk/rustdesk/releases/latest
-
 Additional Software (after WinGet):
   (none)
 

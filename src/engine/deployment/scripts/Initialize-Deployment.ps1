@@ -44,12 +44,14 @@ $script:MonitorTask = @{ path = '\WindowsDeploymentBuilder\'; name = 'Deployment
 # Adapters
 # ------------------------------------------------------------------------------------------------
 
-# Runs an engine installer in its own Windows PowerShell process; returns the exit code.
+# Runs an engine installer in its own Windows PowerShell process; returns the exit code. Its
+# output goes to the log, and its last line is kept as the reason when no task is registered.
 function Invoke-WddInstaller {
     param([string] $Path)
     $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     $out = & $ps -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $Path 2>&1
     foreach ($line in @($out)) { Write-WddLog "    | $line" }
+    $script:WddInstallerOutput = @(@($out) | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
     return $LASTEXITCODE
 }
 
@@ -150,7 +152,11 @@ function Invoke-WddLaunchStage {
     Save-WddState $Paths $State
     Write-WddLog "Launching stage $($Stage.id) ($($Stage.context)): $installer"
     $code = $null
-    try { $code = Invoke-WddInstaller $installer } catch { $rec.message = $_.Exception.Message; Write-WddLog "  installer error: $($rec.message)" 'ERROR' }
+    $script:WddInstallerOutput = @()
+    # The reason of THIS attempt (an earlier message, such as "Restarted manually.", is not one).
+    $failure = $null
+    if (-not (Test-Path -LiteralPath $installer)) { $failure = "The installer is missing from the staged package: $installer" }
+    else { try { $code = Invoke-WddInstaller $installer } catch { $failure = $_.Exception.Message; Write-WddLog "  installer error: $failure" 'ERROR' } }
     $rec.exitCode = $code
     if (Get-WddTask $Stage.task.path $Stage.task.name) {
         $rec.launchResult = 'Launched'
@@ -160,7 +166,8 @@ function Invoke-WddLaunchStage {
         $rec.launchResult = 'Launched'; $rec.message = 'Finished during launch.'
     } else {
         $rec.launchResult = $(if ([int] $rec.attempts -ge $MaxAttempts) { 'LaunchFailed' } else { 'Launching' })
-        if (-not $rec.message) { $rec.message = "The installer returned $code and registered no task." }
+        $reason = @($script:WddInstallerOutput) | Select-Object -Last 1
+        $rec.message = $(if ($failure) { $failure } else { "The installer returned $code and registered no task $($Stage.task.path)$($Stage.task.name)$(if ($reason) { ": $reason" } else { '.' })" })
         Write-WddLog "Stage $($Stage.id): $($rec.message)" 'ERROR'
     }
     Save-WddState $Paths $State
@@ -229,7 +236,15 @@ function Invoke-WddInitialize {
 
         $state.status = 'InProgress'
         Save-WddState $Paths $state
-        Register-WddMonitorTask $Paths $Manifest
+        try { Register-WddMonitorTask $Paths $Manifest }
+        catch {
+            # Without the monitor nothing follows the stages: say so instead of failing silently.
+            $state.message = "The monitor task $($script:MonitorTask.path)$($script:MonitorTask.name) could not be registered: $($_.Exception.Message) Run Resume-Deployment.ps1 as administrator."
+            Save-WddState $Paths $state
+            Write-WddLog $state.message 'ERROR'
+            Write-WddEvent 3002 "Deployment $($Manifest.packageId): $($state.message)" 'Error'
+            return 'MonitorRegistrationFailed'
+        }
         Write-WddLog "Registered $($script:MonitorTask.path)$($script:MonitorTask.name) (SYSTEM; at startup and every 15 minutes)."
         $snapshot = Get-WddSnapshot $Manifest $Paths $state
         Write-WddJson $Paths.Status $snapshot

@@ -53,7 +53,9 @@
     Exit codes: Status returns the outcome code (0 Succeeded, 10 CompletedWithWarnings,
     20 CompletedWithFailures, 25 Incomplete, 30/31/32 paused for network/reboot/user, 40 InProgress,
     50 FailedToInitialize, 60 Failed). Actions return 0 (done), 1 (refused or nothing to do),
-    2 (busy), 3 (package integrity), 4 (administrator rights needed).
+    2 (busy), 3 (package integrity), 4 (administrator rights needed), 5 (Partial: some stages
+    were restarted, the task of another could not be registered), 6 (Failed: no stage task could
+    be registered). A stage only counts as restarted when its scheduled task exists afterwards.
 #>
 [CmdletBinding()]
 param(
@@ -86,7 +88,7 @@ $script:HealthEngineScript = Join-Path $PSScriptRoot '..\health\DeploymentHealth
 if (Test-Path -LiteralPath $script:HealthEngineScript) { . $script:HealthEngineScript -Mode Library }
 Set-StrictMode -Version 2.0
 
-$script:RecoveryExit = @{ Done = 0; Refused = 1; NothingToDo = 1; Busy = 2; IntegrityFailed = 3; NotElevated = 4; NoState = 1; UnknownStage = 1 }
+$script:RecoveryExit = @{ Done = 0; Refused = 1; NothingToDo = 1; Busy = 2; IntegrityFailed = 3; NotElevated = 4; NoState = 1; UnknownStage = 1; Partial = 5; Failed = 6 }
 
 <#
     The account the application stage belongs to (Phase 5 deployment user): its launch record, else
@@ -303,6 +305,8 @@ function Invoke-WdrRecovery {
         }
 
         $accepted = @(); $refused = @(); $notes = @()
+        # Stages whose task could not be registered again: this recovery failed for them.
+        $failedStages = @()
         $ops = @($Operations | Where-Object { $_ } | ForEach-Object { ([string] $_).Trim() })
         $wuRequested = $ops -contains 'stage:windowsUpdate'
         $driverOps = @($ops | Where-Object { $_ -like 'driver:*' -or $_ -eq 'stage:drivers' })
@@ -342,7 +346,8 @@ function Invoke-WdrRecovery {
                         $rec.message = $(if ($rec.launchResult -eq 'Launched') { "Restarted by the recovery tool ($Mode)." } else { "The recovery tool could not register the application task (exit code $code)." })
                         $state.stages['applications'] = $rec
                         $notes += "Application stage: $($rec.message)"
-                        if ($r.Outcome -ne 'Accepted') { $accepted += 'stage:applications' }
+                        if ($rec.launchResult -ne 'Launched') { $refused += @{ operationId = 'stage:applications'; reason = $rec.message }; $failedStages += 'applications' }
+                        elseif ($r.Outcome -ne 'Accepted') { $accepted += 'stage:applications' }
                     }
                 }
             }
@@ -357,7 +362,7 @@ function Invoke-WdrRecovery {
             if (($Mode -ne 'Resume' -and $failed) -or $lost) {
                 $state.stages['windowsUpdate'] = @{ launchResult = ''; attempts = 0; launchedUtc = $null; exitCode = $null; message = "Restarted by the recovery tool ($Mode)."; user = 'SYSTEM' }
                 $rec = Invoke-WddLaunchStage $wuStage $Paths $state $identity ([int] $Manifest.failureHandling.orchestrator.launchAttempts)
-                if ($rec.launchResult -eq 'Launched') { $accepted += 'stage:windowsUpdate' } else { $refused += @{ operationId = 'stage:windowsUpdate'; reason = [string] $rec.message } }
+                if ($rec.launchResult -eq 'Launched') { $accepted += 'stage:windowsUpdate' } else { $refused += @{ operationId = 'stage:windowsUpdate'; reason = [string] $rec.message }; $failedStages += 'windowsUpdate' }
             } elseif ($wuRequested) {
                 $refused += @{ operationId = 'stage:windowsUpdate'; reason = "the Windows Update stage is $($wu.state)$(if ($wu.status) { "/$($wu.status)" }); only a stage that ended with failures is retried" }
             }
@@ -389,7 +394,7 @@ function Invoke-WdrRecovery {
                     $state.stages['drivers'] = $rec
                     $notes += "Driver stage: $($rec.message)"
                     if ($rec.launchResult -eq 'Launched' -and $r.Outcome -ne 'Accepted') { $accepted += 'stage:drivers' }
-                    elseif ($rec.launchResult -ne 'Launched') { $refused += @{ operationId = 'stage:drivers'; reason = $rec.message } }
+                    elseif ($rec.launchResult -ne 'Launched') { $refused += @{ operationId = 'stage:drivers'; reason = $rec.message }; $failedStages += 'drivers' }
                 }
             }
         } elseif ($driverOps.Count) {
@@ -420,7 +425,8 @@ function Invoke-WdrRecovery {
             Register-WddMonitorTask $Paths $Manifest
             try { Start-WddTask $script:MonitorTask.path $script:MonitorTask.name } catch { }
         }
-        $outcome = $(if ($accepted.Count) { 'Done' } elseif ($Mode -eq 'Resume') { 'Done' } elseif ($refused.Count) { 'Refused' } else { 'NothingToDo' })
+        # A stage whose task could not be registered is a failure of this recovery, never "Done".
+        $outcome = $(if ($failedStages.Count -and $accepted.Count) { 'Partial' } elseif ($failedStages.Count) { 'Failed' } elseif ($accepted.Count) { 'Done' } elseif ($Mode -eq 'Resume') { 'Done' } elseif ($refused.Count) { 'Refused' } else { 'NothingToDo' })
         $msg = "Reopened: $(if ($accepted.Count) { $accepted -join ', ' } else { 'none' }). Refused: $(if ($refused.Count) { ($refused | ForEach-Object { "$($_.operationId) ($($_.reason))" }) -join '; ' } else { 'none' }).$(if ($notes.Count) { ' ' + ($notes -join ' ') })"
         Write-WddLog "Recovery ($Mode): $msg" $(if ($outcome -eq 'Done') { 'INFO' } else { 'WARN' })
         Write-WddEvent 3005 "Deployment recovery ($Mode) by $($identity.Name): $msg" $(if ($outcome -eq 'Done') { 'Information' } else { 'Warning' })

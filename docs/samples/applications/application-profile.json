@@ -86,13 +86,6 @@
           "displayName": "Microsoft Whiteboard",
           "version": "",
           "scope": ""
-        },
-        {
-          "packageIdentifier": "rustdesk",
-          "source": "catalog",
-          "displayName": "RustDesk",
-          "version": "",
-          "scope": ""
         }
       ]
     }

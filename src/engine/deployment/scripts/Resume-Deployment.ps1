@@ -11,10 +11,12 @@
           Verifies <dataRoot>\Package, registers the monitor task again and runs it once. Use it
           after a stalled stage was fixed, after the deadline passed, or if the monitor task was
           removed. A finished deployment is reopened (its report is rewritten at the end).
-      Resume-Deployment.ps1 -RestartStage windowsUpdate|applications
+      Resume-Deployment.ps1 -RestartStage windowsUpdate|applications|drivers
           Runs that engine's installer again. The installer archives the previous run and starts
           a new one; work already done is detected (installed updates are not offered again,
-          installed applications are reported AlreadyInstalled).
+          installed applications are reported AlreadyInstalled). If the installer does not
+          register its task, the result is StageRestartFailed with the reason (exit code 1),
+          never Resumed. Windows Setup and the disk are never touched.
       Resume-Deployment.ps1 -Status
           Prints the progress and changes nothing.
 
@@ -22,7 +24,7 @@
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('', 'windowsUpdate', 'applications')]
+    [ValidateSet('', 'windowsUpdate', 'applications', 'drivers')]
     [string] $RestartStage = '',
     [switch] $Status
 )
@@ -63,11 +65,26 @@ function Invoke-WddResume {
             $stage = Get-WddStage $manifest $RestartStage
             if (-not $stage -or -not $stage.enabled) { Write-WddLog "Stage $RestartStage is not part of this deployment." 'ERROR'; return 'UnknownStage' }
             $state.stages[$RestartStage] = @{ launchResult = ''; attempts = 0; launchedUtc = $null; exitCode = $null; message = 'Restarted manually.' }
-            Invoke-WddLaunchStage $stage $Paths $state $identity ([int] $manifest.failureHandling.orchestrator.launchAttempts) | Out-Null
+            $rec = Invoke-WddLaunchStage $stage $Paths $state $identity ([int] $manifest.failureHandling.orchestrator.launchAttempts)
+            if ($rec.launchResult -ne 'Launched') {
+                # Recorded (the monitor reports the stage as failed to launch); never reported as resumed.
+                $state.message = "Restart of stage $RestartStage failed: $($rec.message)"
+                $script:ResumeDetail = $state.message
+                Save-WddState $Paths $state
+                Write-WddLog "Resume: $($state.message)" 'ERROR'
+                Write-WddEvent 3006 "Deployment $($manifest.packageId): $($state.message) See $($Paths.Log)." 'Error'
+                try { Register-WddMonitorTask $Paths $manifest } catch { Write-WddLog "Resume: the monitor task could not be registered either: $($_.Exception.Message)" 'ERROR' }
+                return 'StageRestartFailed'
+            }
         }
         Save-WddState $Paths $state
-        Register-WddMonitorTask $Paths $manifest
-        try { Start-WddTask $script:MonitorTask.path $script:MonitorTask.name } catch { }
+        try { Register-WddMonitorTask $Paths $manifest }
+        catch {
+            $script:ResumeDetail = "The monitor task $($script:MonitorTask.path)$($script:MonitorTask.name) could not be registered: $($_.Exception.Message)"
+            Write-WddLog "Resume: $($script:ResumeDetail)" 'ERROR'
+            return 'MonitorRegistrationFailed'
+        }
+        try { Start-WddTask $script:MonitorTask.path $script:MonitorTask.name } catch { Write-WddLog "Resume: could not start the monitor now; it runs within 15 minutes: $($_.Exception.Message)" 'WARN' }
         Write-WddEvent 3001 "Deployment $($manifest.packageId) resumed manually$(if ($RestartStage) { " (stage $RestartStage restarted)" })."
         return 'Resumed'
     } finally {
@@ -80,8 +97,9 @@ if ($script:ResumeMain) {
     $manifest = Read-WddManifest (Join-Path $package 'deployment-manifest.json')
     $paths = Get-WddPaths $manifest.dataRoot
     if ($script:ResumeArgs.Status) { (Format-WddStatus $manifest $paths (Read-WddDeploymentState $paths).State).Text; exit 0 }
+    $script:ResumeDetail = ''
     $outcome = Invoke-WddResume $paths $script:ResumeArgs.RestartStage
-    Write-Output "Resume: $outcome. Log: $($paths.Log)"
+    Write-Output "Resume: $outcome.$(if ($script:ResumeDetail) { " $($script:ResumeDetail)" }) Log: $($paths.Log)"
     if ($outcome -eq 'Resumed') { exit 0 }
     exit 1
 }

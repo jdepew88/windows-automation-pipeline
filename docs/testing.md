@@ -51,6 +51,12 @@ Unit test coverage by acceptance criterion:
   profiles, the package equal to step 2) and `live-profile-selection.spec.ts` (the same in the
   browser: step 2 checklist, navigation, Final Review and the downloaded ZIP); see
   [quick-deployment-live-profile-selection](quick-deployment-live-profile-selection/root-cause.md).
+- **Package permissions (first bare-metal deployment)**: `Acl.Tests.ps1` (Windows only: the shipped
+  folder-protection functions with real icacls on folders under `%TEMP%`; scripts, logs and JSON
+  usable, idempotent, damaged trees repaired, private backups kept, failures thrown),
+  `acl-commands.test.ts` (no recursive `(OI)(CI)` grants, no `/C` on checked calls) and the
+  task-registration and recovery scenarios in `Deployment.Tests.ps1`; see
+  [bare-metal-package-permissions](bare-metal-package-permissions/root-cause.md).
 - **Phase 8 (hardware-aware drivers)**: `drivers.test.ts`, `Drivers.Tests.ps1` (the engine of the
   real generated package against simulated hardware: fixtures A-H, selection, Windows Update,
   restarts, recovery, orchestrator and recovery-tool integration), driver scenarios in

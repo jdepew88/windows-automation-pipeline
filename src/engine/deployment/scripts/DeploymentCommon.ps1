@@ -150,9 +150,12 @@ function Write-WddLog {
     $line = '{0}  {1,-5}  {2}' -f (Get-WddNow).ToString('yyyy-MM-dd HH:mm:ss'), $Level, $Message
     Write-Verbose $line
     if (-not $script:WddLogFile) { return }
+    $err = $null
     for ($i = 0; $i -lt 3; $i++) {
-        try { [System.IO.File]::AppendAllText($script:WddLogFile, $line + "`r`n"); return } catch { Start-Sleep -Milliseconds 200 }
+        try { [System.IO.File]::AppendAllText($script:WddLogFile, $line + "`r`n"); return } catch { $err = $_.Exception.Message; Start-Sleep -Milliseconds 200 }
     }
+    # Once per process: a log that cannot be written is visible on the console and in task output.
+    if (-not $script:WddLogWarned) { $script:WddLogWarned = $true; Write-Warning "Cannot write the deployment log $($script:WddLogFile): $err" }
 }
 
 function Get-WddPaths {

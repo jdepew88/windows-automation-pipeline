@@ -238,6 +238,71 @@ Test-Scenario 'launch limit: an installer that never registers its task ends Lau
     Assert-Equal @($script:Installers | Where-Object { $_ -eq 'Install-UpdateEngine.ps1' }).Count 2 'two attempts only'
 }
 
+# Bare-metal regression: stage tasks missing, recovery must not claim success.
+Test-Scenario 'a stage whose installer registers no task records the reason and the task it expected' {
+    $script:InstallerBehaviour['Install-UpdateEngine.ps1'] = 'noTask'
+    Initialize-Embedded | Out-Null
+    $rec = (Read-WddJson $script:Paths.State).stages.windowsUpdate
+    Assert-True ($rec.launchResult -ne 'Launched') 'not launched'
+    Assert-True ($rec.message.Contains('\WindowsDeploymentBuilder\WindowsUpdate')) "expected task named ($($rec.message))"
+    Assert-True ($rec.message -match 'is denied') "installer reason kept ($($rec.message))"
+    Assert-True ((Get-Content -LiteralPath $script:Paths.Log -Raw) -match 'registered no task') 'logged'
+}
+
+Test-Scenario 'Resume -RestartStage: a stage whose task is not registered is StageRestartFailed, never Resumed; then it recovers' {
+    Initialize-Embedded | Out-Null
+    $script:SimTasks.Remove('\WindowsDeploymentBuilder\WindowsUpdate') | Out-Null   # the missing task of the field report
+    $script:InstallerBehaviour['Install-UpdateEngine.ps1'] = 'noTask'
+    $script:ResumeDetail = ''
+    Assert-Equal (Invoke-WddResume $script:Paths 'windowsUpdate') 'StageRestartFailed' 'failure reported'
+    Assert-True ($script:ResumeDetail -match 'is denied') "reason shown ($($script:ResumeDetail))"
+    Assert-True (-not $script:SimTasks.ContainsKey('\WindowsDeploymentBuilder\WindowsUpdate')) 'no task'
+    $st = Read-WddJson $script:Paths.State
+    Assert-True ($st.stages.windowsUpdate.launchResult -ne 'Launched') 'state does not claim a launch'
+    Assert-True ($st.message -match 'Restart of stage windowsUpdate failed') "state message ($($st.message))"
+    Assert-True ($script:Events -contains 3006) 'error event'
+    Assert-True ($st.stages.applications.launchResult -eq 'Launched') 'other stage records kept'
+    # After the cause is fixed the same command works, and nothing else is relaunched.
+    $script:InstallerBehaviour['Install-UpdateEngine.ps1'] = 'ok'
+    $before = $script:Installers.Count
+    Assert-Equal (Invoke-WddResume $script:Paths 'windowsUpdate') 'Resumed' 'recovered'
+    Assert-True $script:SimTasks.ContainsKey('\WindowsDeploymentBuilder\WindowsUpdate') 'task registered'
+    Assert-Equal ($script:Installers.Count - $before) 1 'one installer run'
+    Assert-Equal (Read-WddJson $script:Paths.State).stages.windowsUpdate.launchResult 'Launched' 'recorded'
+}
+
+Test-Scenario 'Resume: a monitor task that cannot be registered is reported, not Resumed' {
+    Initialize-Embedded | Out-Null
+    function Register-WddMonitorTask { param([hashtable] $Paths, [hashtable] $Manifest) throw 'Access is denied. (0x80070005)' }
+    $script:ResumeDetail = ''
+    Assert-Equal (Invoke-WddResume $script:Paths '') 'MonitorRegistrationFailed' 'reported'
+    Assert-True ($script:ResumeDetail -match '0x80070005') "reason ($($script:ResumeDetail))"
+}
+
+Test-Scenario 'initialization: a monitor task that cannot be registered ends MonitorRegistrationFailed with the reason in the state' {
+    function Register-WddMonitorTask { param([hashtable] $Paths, [hashtable] $Manifest) throw 'The task XML is malformed.' }
+    Assert-Equal (Initialize-Embedded) 'MonitorRegistrationFailed' 'reported'
+    $st = Read-WddJson $script:Paths.State
+    Assert-True ($st.message -match 'could not be registered: The task XML is malformed') "state ($($st.message))"
+    Assert-Equal $st.stages.windowsUpdate.launchResult 'Launched' 'stages launched before are recorded'
+}
+
+Test-Scenario 'recovery tool Resume: a missing application task that cannot be registered again is Failed, not Done' {
+    Initialize-Embedded | Out-Null
+    $script:SimTasks.Remove('\WindowsDeploymentBuilder\Applications') | Out-Null
+    $script:InstallerBehaviour['Install-ApplicationEngine.ps1'] = 'noTask'
+    $r = Invoke-WdrRecovery $script:Manifest $script:Paths 'Resume'
+    Assert-True ($r.Outcome -in 'Failed', 'Partial') "outcome $($r.Outcome): $($r.Message)"
+    Assert-True ('stage:applications' -notin @($r.Accepted)) 'not counted as reopened'
+    Assert-True (@($r.Refused | Where-Object { $_.operationId -eq 'stage:applications' }).Count -eq 1) 'listed as refused with the reason'
+    Assert-True ($script:RecoveryExit[$r.Outcome] -ne 0) 'non-zero exit code'
+    Assert-Equal (Read-WddJson $script:Paths.State).stages.applications.launchResult 'LaunchFailed' 'state is honest'
+    $script:InstallerBehaviour['Install-ApplicationEngine.ps1'] = 'ok'
+    $r = Invoke-WdrRecovery $script:Manifest $script:Paths 'Resume'
+    Assert-Equal $r.Outcome 'Done' "recovers: $($r.Message)"
+    Assert-True $script:SimTasks.ContainsKey('\WindowsDeploymentBuilder\Applications') 'task registered'
+}
+
 Test-Scenario 'another deployment in progress is not overwritten; a finished one is not restarted' {
     Initialize-Embedded | Out-Null
     $st = Read-WddJson $script:Paths.State

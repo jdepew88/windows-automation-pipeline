@@ -36,12 +36,32 @@ $script:RequiredForStart = @(
     'scripts/finalization/Complete-Deployment.ps1'
 )
 
+# SYSTEM and Administrators full control, Users read and execute, no entries inherited from
+# ProgramData (the same rule as the engine installers). Elevated tasks run scripts from here.
 function Set-WddAcl {
-    param([string] $Root)
-    # SYSTEM and Administrators full control, Users read and execute, no inherited entries (the
-    # same rule as the engine installers). Elevated tasks run scripts from here.
-    & icacls.exe $Root /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' /T /C /Q | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "icacls failed with exit code $LASTEXITCODE; refusing to run elevated scripts from an unprotected folder." }
+    param([string] $Root, [string[]] $Grant = @('*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F', '*S-1-5-32-545:(OI)(CI)RX'))
+    # Only the folder itself gets explicit entries; Windows propagates them to everything below.
+    # Never icacls /T with (OI)(CI) grants: on files those entries are dropped, which leaves every
+    # file protected with no entries at all, unreadable even for SYSTEM and Administrators.
+    # No /C either: with it icacls exits with 0 even when it fails.
+    & icacls.exe $Root /inheritance:r /grant:r @Grant /Q | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "icacls failed with exit code $LASTEXITCODE on $Root; refusing to run elevated scripts from an unprotected folder." }
+    # Repairs what an earlier version left below (files protected with no entries, folders with a
+    # protected copy of these entries): they inherit again. Deliberately private folders (settings
+    # backups) have other entries and keep them.
+    function Get-Entries { param($Acl) (@($Acl.Access | ForEach-Object { "$($_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value)=$([int] $_.FileSystemRights)" }) | Sort-Object) -join ';' }
+    $own = Get-Entries (Get-Acl -LiteralPath $Root)
+    foreach ($item in @(Get-ChildItem -LiteralPath $Root -Recurse -Force -Attributes !ReparsePoint -ErrorAction SilentlyContinue)) {
+        $damaged = $true
+        try {
+            $acl = Get-Acl -LiteralPath $item.FullName
+            $e = Get-Entries $acl
+            $damaged = $acl.AreAccessRulesProtected -and ($e -eq '' -or $e -eq $own)
+        } catch { }
+        if (-not $damaged) { continue }
+        & icacls.exe $item.FullName /reset /Q | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "icacls /reset failed with exit code $LASTEXITCODE on $($item.FullName); refusing to run elevated scripts from an unprotected folder." }
+    }
 }
 
 # Where a manifest file comes from in each mode.
