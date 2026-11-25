@@ -66,6 +66,13 @@ Unit test coverage by acceptance criterion:
   final report, real HTTP on 127.0.0.1) and `deployment-reliability.test.ts`; see
   [deployment-reliability](deployment-reliability/README.md), which also has the bare-metal
   checklist.
+- **Bare-metal reliability review (orchestrator 1.3.0)**: restart coordination, final-state
+  reconciliation (exit code 40), the Windows Update re-check, the finalization fallback and the
+  non-elevated task view in `Deployment.Tests.ps1`; restart-pending retries and engine-side errors
+  in `Engine.Tests.ps1`; the hash-mismatch retry and non-elevated installers in
+  `Applications.Tests.ps1`; static guarantees in `deployment-reliability.test.ts`. The restart
+  command and the update search are simulated (`ProvisioningSim.ps1`); see
+  [bare-metal-review](deployment-reliability/bare-metal-review.md).
 - **Phase 8 (hardware-aware drivers)**: `drivers.test.ts`, `Drivers.Tests.ps1` (the engine of the
   real generated package against simulated hardware: fixtures A-H, selection, Windows Update,
   restarts, recovery, orchestrator and recovery-tool integration), driver scenarios in

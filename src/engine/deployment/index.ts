@@ -39,7 +39,7 @@ import { EMBEDDED_HEALTH_FILES, HEALTH_DIR, HEALTH_ENGINE_VERSION, HEALTH_REPORT
  * verification, manual runs on other installations (setup.cmd) and recovery.
  */
 
-export const DEPLOYMENT_VERSION = '1.2.0';
+export const DEPLOYMENT_VERSION = '1.3.0';
 export const PACKAGE_DIR = 'WindowsDeployment';
 export const PACKAGE_FILE_NAME = 'windows-deployment-package.zip';
 export const MANIFEST_FILE = 'deployment-manifest.json';
@@ -97,6 +97,16 @@ export const ORCHESTRATOR_LIMITS = {
   autoRecoveries: 2,
   monitorIntervalMinutes: 5,
   graceHours: 24,
+  /** Orchestrator 1.3.0: restarts the monitor itself does when Windows still needs one (restart-loop limit). */
+  coordinatedRestarts: 3,
+  /** Warning shown before such a restart. */
+  restartWarningSeconds: 120,
+  /** How long a needed restart may stay blocked before the deployment finishes and reports it. */
+  restartWaitMinutes: 120,
+  /** Extra Windows Update runs when it offers more updates after the stage finished (often after a restart). */
+  updateRechecks: 1,
+  /** Attempts to write the final report before a minimal one is written. */
+  finalizeAttempts: 3,
 } as const;
 
 export type FileRole = 'entry' | 'orchestrator' | 'engine' | 'configuration' | 'profile' | 'documentation';

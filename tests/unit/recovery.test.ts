@@ -23,7 +23,7 @@ describe('Phase 5 defaults and compatibility', () => {
     expect(a.maxAttemptsPerPackage).toBe(3);
     expect(a.recovery).toEqual({ automaticRetry: true, continueAfterFailure: true, includeRecoveryTool: true });
     const c = applicationsConfig(profile());
-    expect(c.engineVersion).toBe('1.4.0');
+    expect(c.engineVersion).toBe('1.5.0');
     expect(c.retry).toEqual({ automatic: true, continueAfterFailure: true, ...RETRY_TIMING });
     expect(RETRY_TIMING).toEqual({ baseDelaySeconds: 60, maxDelaySeconds: 900, jitterRatio: 0.2, maxNetworkDeferrals: 6 });
   });
@@ -75,8 +75,8 @@ describe('Phase 5 deployment package', () => {
     const entry = manifest.files.find((f) => f.path === RECOVERY_SCRIPT)!;
     expect(entry.embedded).toBe('Deployment\\scripts\\recovery\\DeploymentRecovery.ps1');
     expect(entry.textSha256).toMatch(/^[0-9A-F]{64}$/);
-    expect(manifest.packageVersion).toBe('1.2.0');
-    expect(manifest.generator.orchestrator).toBe('1.2.0');
+    expect(manifest.packageVersion).toBe('1.3.0');
+    expect(manifest.generator.orchestrator).toBe('1.3.0');
     expect(manifest.recovery).toMatchObject({ tool: RECOVERY_SCRIPT, automaticRetry: true, maxAttemptsPerPackage: 3, continueAfterFailure: true, stateSchemas: STATE_SCHEMAS, outcomeCodes: OUTCOME_CODES });
     expect(manifest.paths.recoveryTool).toBe('C:\\ProgramData\\WindowsDeploymentBuilder\\Package\\scripts\\recovery\\DeploymentRecovery.ps1');
     const r = generateOk(p);

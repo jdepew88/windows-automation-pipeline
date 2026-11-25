@@ -16,7 +16,8 @@ export const BOOTSTRAP_STATUSES = ['NotRun', 'Healthy', 'Repaired', 'NeedsRepair
 export const LIFECYCLE_STATES = ['Pending', 'Running', 'Succeeded', 'AlreadySatisfied', 'FailedRetryable', 'FailedPermanent', 'WaitingForNetwork', 'WaitingForReboot', 'ManualActionRequired', 'SkippedByUser', 'BlockedByDependency'] as const;
 /** Phase 5: failure classes. The first group is retried automatically, the second never. */
 export const RETRIED_CLASSES = ['Network', 'Transient', 'Timeout', 'Resource', 'Unknown'] as const;
-export const PERMANENT_CLASSES = ['Permanent', 'Integrity', 'Policy', 'User', 'Manual'] as const;
+// Elevation (engine 1.5.0): the installer refuses administrator rights; run once without them, never retried.
+export const PERMANENT_CLASSES = ['Permanent', 'Integrity', 'Policy', 'User', 'Manual', 'Elevation'] as const;
 export const FAILURE_CLASSES = ['', 'Success', 'Restart', ...RETRIED_CLASSES, ...PERMANENT_CLASSES, 'Dependency', 'Budget', 'Interrupted'] as const;
 export const DETECTION_STATES = ['', 'Installed', 'InstalledRequiresRestart', 'NotInstalled', 'Unconfirmed', 'Unknown'] as const;
 
@@ -325,4 +326,6 @@ export const WINGET_EXIT_CODES: Record<string, { status: (typeof PACKAGE_STATUSE
   '0x8A150106': { status: 'Failed', retry: true, restart: 'none', symbol: 'INSTALL_INSUFFICIENT_MEMORY' , class: 'Resource' },
   // Engine 1.4.0: the package's own installer failed; its exit code is kept separately (installerExitCode).
   '0x8A150006': { status: 'Failed', retry: true, restart: 'none', symbol: 'SHELLEXEC_INSTALL_FAILED' , class: 'Unknown' },
+  // Engine 1.5.0: the manifest forbids an elevated installation; the engine runs it once as the signed-in user without elevation.
+  '0x8A150056': { status: 'Failed', retry: false, restart: 'none', symbol: 'INSTALLER_PROHIBITS_ELEVATION' , class: 'Elevation' },
 };

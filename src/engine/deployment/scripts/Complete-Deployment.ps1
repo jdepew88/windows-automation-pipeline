@@ -100,17 +100,53 @@ function Get-WddDeviceReport {
         $ids = @(@($d['hardwareIds']) | Where-Object { $_ })
         $unknown = (-not $class -or $class -eq 'Unknown' -or $name -match '(?i)^unknown device$' -or -not $name)
         if ($code -in 22, 45) { continue }
-        if ($code -eq 0 -and -not $unknown) { continue }
+        # Orchestrator 1.3.0: a display adapter running on Windows' generic driver works, but without acceleration.
+        $basicDisplay = $code -eq 0 -and $name -match '(?i)^Microsoft Basic Display Adapter$'
+        if ($code -eq 0 -and -not $unknown -and -not $basicDisplay) { continue }
         $descriptor = (@($ids | Where-Object { $_ -match '(?i)(DEVICE_DESCRIPTOR_FAILURE|CONFIG_DESCRIPTOR_FAILURE|RESET_FAILURE|SET_ADDRESS_FAILURE)' }).Count -gt 0) -or $name -match '(?i)(Descriptor Request Failed|Port Reset Failed|Set Address Failed)'
         $problem = $(if ($code -and $script:WddProblemCodes.ContainsKey($code)) { $script:WddProblemCodes[$code] } elseif ($code) { "problem code $code" } else { 'no matching driver' })
         if ($descriptor) { $kind = 'HardwareOrConnection'; $note = 'The USB device did not answer Windows correctly (descriptor or reset failure). This usually means a hardware, cable, hub or port problem, not a missing driver: reconnect it, try another port, or check the device.' }
         elseif ($code -eq 28) { $kind = 'NoDriver'; $note = 'No driver is installed. Find the driver by the hardware ID (Windows Update optional updates, or the manufacturer''s support page).' }
         elseif ($unknown) { $kind = 'UnknownDevice'; $note = 'Windows does not recognise this device. Identify it by its hardware ID.' }
         elseif ($code -eq 14) { $kind = 'RestartRequired'; $note = 'Restart the computer to finish installing its driver.' }
+        elseif ($basicDisplay) { $kind = 'GenericDriver'; $note = 'The graphics adapter runs on Windows'' generic display driver (no acceleration). Windows Update did not provide its driver.' }
         else { $kind = 'Problem'; $note = "Device Manager reports code ${code}: $problem. This is not necessarily a missing driver; check the device in Device Manager." }
-        $out += , ([ordered]@{ name = $(if ($name) { $name } else { 'Unknown device' }); class = $class; problemCode = $code; problem = $problem; kind = $kind; hardwareIds = $ids; note = $note })
+        $hint = Get-WddDriverHint $name $class $ids $kind
+        $out += , ([ordered]@{ name = $(if ($name) { $name } else { 'Unknown device' }); class = $class; problemCode = $code; problem = $problem; kind = $kind; hardwareIds = $ids; note = $note; vendor = $hint.vendor; driverSource = $hint.source })
     }
     return [ordered]@{ checked = $true; checkedUtc = (Get-WddNow).ToString('o'); devices = @($devices).Count; unresolved = $out }
+}
+
+<#
+    Orchestrator 1.3.0: where a missing chipset or graphics driver officially comes from, by the PCI
+    vendor ID in the hardware ID. Guidance for the technician only: nothing is downloaded, and no
+    third-party driver site is ever suggested. A USB descriptor failure gets no driver hint.
+#>
+$script:WddPciVendors = @{ '8086' = 'Intel'; '1022' = 'AMD'; '1002' = 'AMD'; '10DE' = 'NVIDIA'; '10EC' = 'Realtek'; '14E4' = 'Broadcom'; '1B21' = 'ASMedia'; '168C' = 'Qualcomm Atheros'; '1969' = 'Qualcomm Atheros' }
+function Get-WddDriverHint {
+    param([string] $Name, [string] $Class, [object[]] $Ids, [string] $Kind)
+    $o = [ordered]@{ vendor = ''; source = '' }
+    if ($Kind -eq 'HardwareOrConnection') { return $o }
+    foreach ($id in @($Ids)) { if ([string] $id -match '(?i)VEN_([0-9A-F]{4})') { $v = $Matches[1].ToUpperInvariant(); if ($script:WddPciVendors.ContainsKey($v)) { $o.vendor = $script:WddPciVendors[$v] } else { $o.vendor = "PCI vendor $v" }; break } }
+    $chipset = $Name -match '(?i)(SM ?Bus Controller|PCI Memory Controller|PCI Simple Communications Controller|PCI Data Acquisition|Base System Device|PCI Encryption|Signal Processing Controller)'
+    $graphics = $Class -eq 'Display' -or $Name -match '(?i)(Video Controller|Basic Display Adapter|3D Video Controller)'
+    if ($chipset) {
+        $o.source = switch ($o.vendor) {
+            'Intel' { 'Chipset driver: Intel Chipset Device Software (Intel Driver & Support Assistant, intel.com) or the motherboard/computer manufacturer''s support page.' }
+            'AMD' { 'Chipset driver: AMD Chipset Software (amd.com/support) or the motherboard/computer manufacturer''s support page.' }
+            default { 'Chipset driver: the motherboard or computer manufacturer''s support page for this model.' }
+        }
+    } elseif ($graphics) {
+        $o.source = switch ($o.vendor) {
+            'NVIDIA' { 'Graphics driver: nvidia.com/drivers (or NVIDIA App), or the computer manufacturer''s support page for laptops.' }
+            'AMD' { 'Graphics driver: AMD Software: Adrenalin Edition (amd.com/support), or the computer manufacturer''s support page for laptops.' }
+            'Intel' { 'Graphics driver: Intel Driver & Support Assistant (intel.com), or the computer manufacturer''s support page for laptops.' }
+            default { 'Graphics driver: the graphics card or computer manufacturer''s support page.' }
+        }
+    } elseif ($Kind -in 'NoDriver', 'UnknownDevice' -and $o.vendor) {
+        $o.source = "Driver: $($o.vendor)'s support site or the computer/motherboard manufacturer's support page (search by the hardware ID)."
+    }
+    return $o
 }
 
 <#
@@ -262,8 +298,17 @@ function New-WddReport {
     }
     # Orchestrator 1.2.0: Device Manager at the end (read-only), restarts and recoveries.
     $devices = $(if ($State.ContainsKey('deviceReport') -and $State.deviceReport) { $State.deviceReport } else { Get-WddDeviceReport })
-    foreach ($d in @($devices.unresolved)) { $remaining += "Device: $($d.name)$(if (@($d.hardwareIds).Count) { " [$(@($d.hardwareIds)[0])]" }): $($d.note)" }
+    foreach ($d in @($devices.unresolved)) { $remaining += "Device: $($d.name)$(if (@($d.hardwareIds).Count) { " [$(@($d.hardwareIds)[0])]" }): $($d.note)$(if ($d.Contains('driverSource') -and $d.driverSource) { " $($d.driverSource)" })" }
     if (-not $devices.checked) { $remaining += "Device Manager: $($devices.error)" }
+    # Orchestrator 1.3.0: a restart Windows still needs, and what Windows Update still offers after the last run.
+    $restartView = Get-WddRestartView $State
+    $rcState = $(if ($State['restartCoordinator'] -is [hashtable]) { $State['restartCoordinator'] } else { @{} })
+    $restartReport = [ordered]@{ status = $restartView.status; outstanding = (Test-WddRestartOutstanding $State); reasons = @($restartView.reasons); blockers = @($restartView.blockers)
+                                 automaticRestarts = $restartView.restarts; message = $restartView.message; history = @(@($rcState['history']) | Where-Object { $_ }) }
+    if ($restartReport.outstanding) { $remaining += "Restart: Windows still needs a restart ($(@($restartView.reasons) -join '; ')). $(if ($restartView.status -eq 'LimitReached') { 'The automatic restart limit was reached.' } elseif (@($restartView.blockers).Count) { "It was blocked: $(@($restartView.blockers) -join '; ')." }) Restart the computer, then check Device Manager." }
+    $recheck = $(if ($State['updateRecheck'] -is [hashtable]) { $State['updateRecheck'] } else { $null })
+    if ($recheck -and $recheck['status'] -eq 'Remaining') { foreach ($u in @($recheck['remaining']) | Where-Object { $_ }) { $remaining += "Windows Update: $((@($u['kbs']) -join ', ')) $($u['title']) is still offered after the deployment's last update run." } }
+    if ($recheck -and $recheck['status'] -eq 'CheckFailed') { $remaining += "Windows Update: $($recheck['message'])" }
     $outcome = Get-WddDeploymentOutcome @{ status = 'Completed'; overall = $Overall; message = $Reason } $null
     [ordered]@{
         format             = 'windows-deployment-builder/deployment-report'
@@ -286,6 +331,8 @@ function New-WddReport {
         drivers            = $(if ($driversReport) { $driversReport } elseif ($drvStage -and $drvStage['implemented']) { [ordered]@{ state = 'NotPartOfDeployment'; note = 'Hardware-aware driver provisioning was off; no driver was installed or changed by this deployment.' } } else { [ordered]@{ state = 'NotImplemented'; note = 'No driver was installed or changed by this deployment.' } })
         restarts           = [ordered]@{ windowsUpdate = $(if ($wu) { $wu.reboots } else { 0 }); applications = $(if ($apps) { $apps.reboots } else { 0 }); drivers = $(if ($drv) { $drv.reboots } else { 0 }) }
         restartHistory     = @(if ($State.ContainsKey('restarts')) { @($State.restarts) | Where-Object { $_ } })
+        restartCoordination = $restartReport
+        updateRecheck      = $recheck
         devices            = $devices
         incompleteStages   = $incomplete
         errors             = $errors
@@ -374,6 +421,7 @@ function Format-WddReport {
                 $l.Add(('  {0,-20} {1} ({2}{3})' -f $d.kind, $d.name, $(if ($d.class) { "$($d.class), " }), $(if ($d.problemCode) { "code $($d.problemCode): $($d.problem)" } else { $d.problem })))
                 if (@($d.hardwareIds).Count) { $l.Add("                       hardware ID: $(@($d.hardwareIds) -join '; ')") }
                 $l.Add("                       $($d.note)")
+                if ($d.Contains('driverSource') -and $d.driverSource) { $l.Add("                       $($d.driverSource)") }
             }
         }
         $l.Add('')
@@ -381,6 +429,18 @@ function Format-WddReport {
     if ($Report.Contains('restartHistory') -and @($Report.restartHistory).Count) {
         $l.Add('Restarts during the deployment')
         foreach ($x in @($Report.restartHistory)) { $l.Add("  $($x.bootUtc)  $(if ($x.planned) { "planned ($($x.by)$(if ($x.reason) { ": $($x.reason)" }))" } else { 'UNEXPECTED (not scheduled by the deployment)' })") }
+        $l.Add('')
+    }
+    if ($Report.Contains('restartCoordination') -and $Report.restartCoordination) {
+        $rc = $Report.restartCoordination
+        $l.Add('Restart required by Windows (at the end of the deployment)')
+        $l.Add("  $(if ($rc.outstanding) { "OUTSTANDING: $(@($rc.reasons) -join '; ')$(if ($rc.message) { " $($rc.message)" })" } else { 'None outstanding.' })  Automatic restarts by the deployment: $($rc.automaticRestarts).")
+        foreach ($h in @($rc.history)) { $l.Add("  $($h.atUtc)  automatic restart $($h.restart): $(@($h.reasons) -join '; ')") }
+        $l.Add('')
+    }
+    if ($Report.Contains('updateRecheck') -and $Report.updateRecheck) {
+        $l.Add('Windows Update re-check (after the stages finished)')
+        $l.Add("  $($Report.updateRecheck['status']): $($Report.updateRecheck['message'])")
         $l.Add('')
     }
     if ($Report.Contains('recoveries') -and @($Report.recoveries).Count) {
@@ -446,7 +506,11 @@ function Complete-WddDeployment {
     if ($overall -eq 'Succeeded' -and $Manifest.ContainsKey('updatePolicy') -and $Manifest.updatePolicy -and -not ($State.ContainsKey('updatePolicy') -and $State.updatePolicy -and $State.updatePolicy.status -in 'Applied', 'AlreadyApplied')) { $overall = 'CompletedWithFollowUp' }
     # Orchestrator 1.2.0: devices that still need attention are a follow-up too.
     $State.deviceReport = Get-WddDeviceReport
+    # Orchestrator 1.3.0: the check runs after the deployment's last restart (the boot it ran in is recorded).
+    try { $State.deviceReport.bootUtc = (Get-WddBootTime).ToString('o') } catch { }
     if ($overall -eq 'Succeeded' -and (@($State.deviceReport.unresolved).Count -or -not $State.deviceReport.checked)) { $overall = 'CompletedWithFollowUp' }
+    # A restart Windows still needs, or updates Windows still offers, is a follow-up too.
+    if ($overall -eq 'Succeeded' -and ((Test-WddRestartOutstanding $State) -or ($State['updateRecheck'] -is [hashtable] -and [string] $State['updateRecheck']['status'] -in 'Remaining', 'CheckFailed'))) { $overall = 'CompletedWithFollowUp' }
     $reason = if ($DeadlineReached -and -not $Snapshot.allFinal) { "The deployment deadline ($($State.deadlineUtc)) passed before every stage finished." } elseif (@($Snapshot.stages).Count -eq 0) { 'No post-installation stage was enabled.' } else { 'Every enabled stage has a final result.' }
     $report = New-WddReport $Manifest $Paths $State $Snapshot $overall $reason
     Write-WddReport $report $Paths

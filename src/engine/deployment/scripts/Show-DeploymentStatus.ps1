@@ -10,6 +10,10 @@
     (restarts, retries, failures, recoveries), whether a person needs to act, and the address of
     the LAN monitor when the package enables it.
 
+    Orchestrator 1.3.0: the window runs without elevation and cannot see the SYSTEM tasks, so it
+    never reports a task as missing itself (the SYSTEM monitor's own view is used); it shows the
+    restart Windows still needs and when the monitor last ran (overdue: needs attention).
+
     -Watch refreshes every 7 seconds until the deployment has finished. Orchestrator 1.2.0: the
     task \WindowsDeploymentBuilder\Progress opens it with -Watch -AutoStarted at every sign-in of
     the deployment user while the deployment runs. Only one window runs per session (a second one
@@ -79,7 +83,14 @@ function Format-WddStatus {
     if ($State) { $l.Add("Started (UTC)  : $($State.initializedUtc)   deadline: $($State.deadlineUtc)") }
     $l.Add("Current stage  : $(if ($s.currentStage) { $s.currentStage } else { '-' })")
     $l.Add("Last activity  : $(if ($s.Contains('lastActivityUtc') -and $s.lastActivityUtc) { "$(Format-WddAge $s.lastActivityUtc) ($($s.lastActivityUtc))" } else { 'none reported yet' })")
-    $l.Add("Restart pending: $(if ($s.restartPending) { 'yes (a restart has been scheduled)' } else { 'no' })")
+    # Orchestrator 1.3.0: the restart Windows needs, and whether the SYSTEM monitor still runs.
+    $rv = $(if ($s.Contains('restart')) { $s.restart } else { $null })
+    if ($rv -and $rv.status -in 'Announced', 'Blocked', 'Restarting', 'LimitReached', 'Failed') { $l.Add("Restart        : $($rv.status). $($rv.message)") }
+    else { $l.Add("Restart pending: $(if ($s.restartPending) { 'yes (a restart has been scheduled)' } else { 'no' })") }
+    if ($s.Contains('monitorLastRunUtc') -and $State -and $State.status -ne 'Completed') {
+        $l.Add("Monitor checks : $(if ($s.monitorLastRunUtc) { "last $(Format-WddAge $s.monitorLastRunUtc)" } else { 'not run yet' }), every $(Get-WddMonitorInterval $Manifest) min$(if ($s.monitorOverdue) { ' - OVERDUE (see NEEDS ATTENTION)' })")
+    }
+    if ($script:WddTaskVisibility -eq 'Limited') { $l.Add('Task view      : this window runs without administrator rights, so task problems are taken from the deployment monitor.') }
     if ($s.Contains('recovering') -and $s.recovering) { $l.Add('Recovering     : Windows restarted or a stage was recovered; unfinished tasks are being checked.') }
     foreach ($m in Format-WddMonitorLines $Manifest $Paths) { $l.Add($m) }
     $l.Add('')
@@ -154,6 +165,8 @@ if ($script:ShowMain) {
     $package = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
     $manifest = Read-WddManifest (Join-Path $package 'deployment-manifest.json')
     $paths = Get-WddPaths $manifest.dataRoot
+    # Orchestrator 1.3.0: without elevation the SYSTEM tasks are invisible; never report them as missing.
+    $script:WddTaskVisibility = Get-WddTaskVisibility
     $state = (Read-WddDeploymentState $paths).State
     # Opened at sign-in: nothing to show once the deployment has finished.
     if ($script:ShowArgs.AutoStarted -and -not (Test-WddShowAutomatically $state)) { exit 0 }

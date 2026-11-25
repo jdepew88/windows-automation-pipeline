@@ -34,6 +34,17 @@
       - The progress window and LAN monitor tasks are registered again if they are missing.
     Engines keep their own single-instance guards, so a recovery never runs an engine twice.
 
+    Orchestrator 1.3.0 (bare-metal review):
+      - Restart coordination (Step-WddRestartCoordinator): a restart Windows still needs (servicing
+        indicators, devices with code 14, applications that need one) is announced, then done
+        when nothing installs, under the install lock, after saving the state; at most
+        coordinatedRestarts per deployment, never twice in one boot.
+      - The deployment finishes only after that restart: Windows Update is searched again
+        (one more run of its stage when it offers more) and Device Manager is checked in the new
+        boot.
+      - Finalization never hangs: an error is logged and retried; after finalizeAttempts a
+        minimal report ends the deployment with a follow-up.
+
     Phase 5: a damaged deployment.json is replaced by its last good copy; if neither is usable the
     monitor stops (StateCorrupt) instead of acting on a guess, and the recovery tool rebuilds it.
     status.json carries the machine-readable outcome (outcome, outcomeCode, outcomeDetail).
@@ -172,6 +183,231 @@ function Step-WddStageActivity {
     $State.seenStages = $seen
 }
 
+# ------------------------------------------------------------------------------------------------
+# Orchestrator 1.3.0: restart coordination, update re-check, safe finalization
+# ------------------------------------------------------------------------------------------------
+
+# Stage phases during which a restart interrupts nothing (the engine is not working; it continues after the boot).
+$script:RestartSafePhases = @('RebootDeferred', 'WaitingForRestart', 'WaitingForReboot', 'WaitingForLock', 'WaitingForNetwork', 'WaitingForUpdates', 'WaitingForDrivers', 'Error')
+
+function Get-WddOrchestratorLimit {
+    param([hashtable] $Manifest, [string] $Name, [int] $Default)
+    $o = $Manifest.failureHandling['orchestrator']
+    if ($o -is [hashtable] -and $o.ContainsKey($Name) -and $null -ne $o[$Name]) { return [int] $o[$Name] }
+    return $Default
+}
+
+<#
+    Why Windows needs a restart now (empty: it does not): its own servicing indicators, devices
+    whose driver needs a restart (Device Manager code 14) and applications that finished with
+    "restart required". Device problems that a restart does not fix are not reasons.
+#>
+function Get-WddRestartNeed {
+    param($Snapshot)
+    $reasons = @(Get-WddServicingRestart | Where-Object { $_ })
+    try {
+        $dev = @(Get-WddPnpDevices | Where-Object { $_ -is [System.Collections.IDictionary] -and [int] $_['problemCode'] -eq 14 })
+        if ($dev.Count) { $reasons += "$($dev.Count) device(s) need a restart to finish installing their driver ($((@($dev | ForEach-Object { [string] $_['name'] }) | Select-Object -First 3) -join ', '))" }
+    } catch { }
+    foreach ($s in @($Snapshot.stages)) {
+        if ($s.state -ne 'Final' -or $s.result -isnot [hashtable] -or -not $s.result.ContainsKey('packages')) { continue }
+        $apps = @(@($s.result['packages']) | Where-Object { $_ -is [hashtable] -and [string] $_['status'] -eq 'RequiresRestart' })
+        if ($apps.Count) { $reasons += "$($apps.Count) application(s) need a restart to finish ($((@($apps | ForEach-Object { [string] $_['name'] }) | Select-Object -First 3) -join ', '))" }
+    }
+    return @{ Required = ($reasons.Count -gt 0); Reasons = $reasons }
+}
+
+<#
+    Restarts the computer when Windows needs it and nothing is being installed. The engines restart
+    for themselves while they run; this covers what they cannot: a restart still required when a
+    stage (or every stage) has finished, and a restart an engine had to defer.
+      1. A restart is needed (Get-WddRestartNeed) and no engine has scheduled one in this boot.
+      2. First sighting: announced (activity feed, progress window); the restart happens at the
+         next run at the earliest, so an engine that is about to restart itself goes first.
+      3. Blockers, re-checked at every run: a stage that is working (installing, downloading,
+         scanning ...), the Windows Update installer busy, an MSI installation running, a stage
+         task that would not resume after the boot, the install lock held by an engine.
+      4. Then: install lock taken (and held through the warning), restart marker written, state
+         saved, shutdown /r with a warning; the restart is recorded and expected at the next boot.
+    Loop prevention: at most coordinatedRestarts per deployment, never twice in the same boot; when
+    the limit is reached Windows' pending restart is reported for the technician instead.
+    Returns the restart view status: NotRequired, EngineRestartScheduled, Announced, Blocked,
+    Restarting, LimitReached, Failed.
+#>
+function Step-WddRestartCoordinator {
+    param([hashtable] $Manifest, [hashtable] $Paths, [hashtable] $State, $Snapshot)
+    $max = Get-WddOrchestratorLimit $Manifest 'coordinatedRestarts' 3
+    $warn = Get-WddOrchestratorLimit $Manifest 'restartWarningSeconds' 120
+    $rc = $(if ($State['restartCoordinator'] -is [hashtable]) { $State['restartCoordinator'] } else { @{ restarts = 0; status = 'NotRequired'; reasons = @(); blockers = @(); history = @() } })
+    $State.restartCoordinator = $rc
+    $boot = $(try { (Get-WddBootTime).ToString('o') } catch { '' })
+    if ($rc['lastRestartBoot'] -and [string] $rc['lastRestartBoot'] -eq $boot -and $rc['status'] -eq 'Restarting') { return 'Restarting' }
+    if ($Snapshot.restartPending) { $rc.status = 'EngineRestartScheduled'; $rc.message = 'An engine has scheduled a restart.'; return $rc.status }
+    $need = Get-WddRestartNeed $Snapshot
+    if (-not $need.Required) {
+        if ($rc['status'] -in 'Announced', 'Blocked') { Add-WddActivity $Paths 'Windows no longer reports a pending restart; no restart is needed.' }
+        $rc.status = 'NotRequired'; $rc.reasons = @(); $rc.blockers = @(); $rc.message = ''; $rc.pendingSinceUtc = $null
+        return $rc.status
+    }
+    $rc.reasons = @($need.Reasons)
+    if ([int] $rc['restarts'] -ge $max) {
+        if ($rc['status'] -ne 'LimitReached') {
+            $rc.message = "Windows still needs a restart ($(@($need.Reasons) -join '; ')) after $max automatic restart(s); no further automatic restart (restart-loop protection). Restart the computer once by hand, then check the report."
+            Add-WddActivity $Paths $rc.message 'error'
+            Write-WddEvent 3010 $rc.message 'Error'
+        }
+        $rc.status = 'LimitReached'
+        return $rc.status
+    }
+    $blockers = @()
+    foreach ($s in @($Snapshot.stages)) {
+        if ($s.state -eq 'Final') { continue }
+        if ($s.state -eq 'Running' -and [string] $s.status -notin $script:RestartSafePhases) { $blockers += "$($s.name) is working ($($s.status))" }
+        $stage = Get-WddStage $Manifest $s.id
+        if ($stage -and $s.state -in 'Running', 'Pending' -and -not (Get-WddTask $stage.task.path $stage.task.name)) { $blockers += "the task of $($s.name) is missing, so it would not continue after the restart" }
+        if ($s.state -in 'Stalled', 'LaunchFailed') { $blockers += "$($s.name) is $($s.state) and would not continue after the restart" }
+    }
+    $inst = Test-WddInstallerActive
+    if ($inst) { $blockers += $inst }
+    $now = Get-WddNow
+    if ($rc['status'] -notin 'Announced', 'Blocked' -or -not $rc['pendingSinceUtc']) {
+        $rc.pendingSinceUtc = $now.ToString('o'); $rc.status = 'Announced'; $rc.blockers = @($blockers)
+        $rc.message = "Windows needs a restart: $(@($need.Reasons) -join '; '). The deployment restarts the computer automatically at its next check (in about $(Get-WddMonitorInterval $Manifest) minutes) when nothing is being installed."
+        Add-WddActivity $Paths $rc.message
+        return $rc.status
+    }
+    if ($blockers.Count) {
+        $sig = ($blockers -join '|')
+        if ([string] $rc['blockedBy'] -ne $sig) {
+            $rc.blockedBy = $sig
+            Add-WddActivity $Paths "A restart is needed but waits: $($blockers -join '; '). It happens automatically once this clears." 'warning'
+        }
+        $rc.status = 'Blocked'; $rc.blockers = @($blockers)
+        $rc.message = "A restart is needed ($(@($need.Reasons) -join '; ')) but waits: $($blockers -join '; ')."
+        return $rc.status
+    }
+    $lock = Enter-WddInstallLock $Paths
+    if (-not $lock) {
+        $rc.status = 'Blocked'; $rc.blockers = @('another installation holds the install lock')
+        $rc.message = "A restart is needed ($(@($need.Reasons) -join '; ')) but an installation holds the install lock; it waits for it to finish."
+        return $rc.status
+    }
+    try {
+        $reason = "Windows needs a restart ($(@($need.Reasons) -join '; '))"
+        $rc.restarts = [int] $rc['restarts'] + 1
+        $rc.status = 'Restarting'; $rc.blockers = @(); $rc.blockedBy = ''; $rc.lastRestartBoot = $boot; $rc.lastRestartUtc = $now.ToString('o'); $rc.pendingSinceUtc = $null
+        $rc.history = @(@(@($rc['history']) | Where-Object { $_ }) + @([ordered]@{ atUtc = $now.ToString('o'); reasons = @($need.Reasons); restart = [int] $rc.restarts }) | Select-Object -Last 20)
+        $rc.message = "$reason. Restarting the computer (automatic restart $($rc.restarts) of at most $max); the deployment continues after the restart."
+        # Durable before anything else: the next boot is recognised as planned, the engines start nothing new.
+        Set-WddRestartMarker $Paths $reason
+        Save-WddState $Paths $State
+        Add-WddActivity $Paths $rc.message
+        Write-WddEvent 3009 $rc.message 'Information'
+        Write-WddLog $rc.message 'WARN'
+        Invoke-WddRestart $warn $reason
+        Wait-WddRestart ($warn + 60)
+    } catch {
+        $rc.status = 'Failed'; $rc.message = "The automatic restart could not be started: $($_.Exception.Message) Restart the computer by hand."
+        Add-WddActivity $Paths $rc.message 'error'
+        Write-WddLog $rc.message 'ERROR'
+        Remove-Item -LiteralPath $Paths.RestartMarker -Force -ErrorAction SilentlyContinue
+    } finally {
+        Exit-WddInstallLock $lock
+    }
+    return $rc.status
+}
+
+<#
+    After the stages have finished and Windows needs no further restart: a read-only Windows Update
+    search under the deployment's own policy. Updates Windows offers only now (often after a
+    restart) get one more run of the Windows Update stage (updateRechecks, 1 by default); after
+    that, what is still offered is reported, never hidden behind "no updates remain".
+    Returns Relaunched, NothingOffered, Remaining, CheckFailed or Skipped.
+#>
+function Step-WddUpdateRecheck {
+    param([hashtable] $Manifest, [hashtable] $Paths, [hashtable] $State, $Snapshot)
+    $wu = @(@($Snapshot.stages) | Where-Object { $_.id -eq 'windowsUpdate' } | Select-Object -First 1)
+    if (-not $wu.Count -or $wu[0].state -ne 'Final' -or $wu[0].status -eq 'Offline') { return 'Skipped' }
+    $rk = $(if ($State['updateRecheck'] -is [hashtable]) { $State['updateRecheck'] } else { @{ relaunches = 0; status = '' } })
+    $State.updateRecheck = $rk
+    # Once per final result of the stage: a relaunched stage that finishes again is checked again.
+    $sig = "$($wu[0].status)|$($wu[0].updatedUtc)"
+    if ([string] $rk['checkedFor'] -eq $sig) { return [string] $rk['status'] }
+    $cfg = Read-WddJson (Join-Path $Paths.Root 'Updates\config.json')
+    $list = $null
+    try { $list = @(Get-WddOfferedUpdates $cfg | Where-Object { $_ -is [System.Collections.IDictionary] }) }
+    catch {
+        $rk.checkedFor = $sig; $rk.status = 'CheckFailed'; $rk.checkedUtc = (Get-WddNow).ToString('o'); $rk.message = "Windows Update could not be searched again: $($_.Exception.Message)"
+        Add-WddActivity $Paths $rk.message 'warning'
+        return $rk.status
+    }
+    $rk.checkedFor = $sig; $rk.checkedUtc = (Get-WddNow).ToString('o'); $rk.remaining = @($list)
+    if (-not $list.Count) { $rk.status = 'NothingOffered'; $rk.message = 'Windows Update was searched again after the stages finished: nothing the deployment installs is offered.'; Add-WddActivity $Paths $rk.message; return $rk.status }
+    $names = (@($list | ForEach-Object { "$((@($_['kbs']) -join ',')) $($_['title'])".Trim() }) | Select-Object -First 5) -join '; '
+    $max = Get-WddOrchestratorLimit $Manifest 'updateRechecks' 1
+    $stage = Get-WddStage $Manifest 'windowsUpdate'
+    if ([int] $rk['relaunches'] -lt $max -and $stage) {
+        $rk.relaunches = [int] $rk['relaunches'] + 1
+        $State.stages['windowsUpdate'] = @{ launchResult = ''; attempts = 0; launchedUtc = $null; exitCode = $null; message = "Run again: Windows Update offered $($list.Count) more update(s) after the stage finished."; user = 'SYSTEM' }
+        $r = Invoke-WddLaunchStage $stage $Paths $State (Get-WddIdentity) ([int] $Manifest.failureHandling.orchestrator.launchAttempts)
+        if ($r.launchResult -eq 'Launched') {
+            $rk.status = 'Relaunched'
+            $rk.message = "Windows Update offers $($list.Count) more update(s) ($names); the Windows Update stage runs once more ($($rk.relaunches) of $max)."
+            Add-WddActivity $Paths $rk.message
+            return $rk.status
+        }
+        Add-WddActivity $Paths "Windows Update offers $($list.Count) more update(s), but its stage could not be started again: $($r.message)" 'warning'
+    }
+    $rk.status = 'Remaining'
+    $rk.message = "Windows Update still offers $($list.Count) update(s) the deployment would install ($names). Install them from Settings > Windows Update."
+    Add-WddActivity $Paths $rk.message 'warning'
+    return $rk.status
+}
+
+<#
+    Finishes the deployment and never leaves it hanging: an error while writing the report is
+    logged with its location and retried at the next run; after finalizeAttempts failures a minimal
+    report is written and the deployment ends with a follow-up (the error is in the report).
+#>
+function Invoke-WddFinalize {
+    param([hashtable] $Manifest, [hashtable] $Paths, [hashtable] $State, $Snapshot, [switch] $DeadlineReached)
+    try {
+        $overall = Complete-WddDeployment $Manifest $Paths $State $Snapshot -DeadlineReached:$DeadlineReached
+        return "Completed:$overall"
+    } catch {
+        $err = $_
+        $State.finalizeFailures = [int] $State['finalizeFailures'] + 1
+        $State.lastFinalizeError = "$($err.Exception.Message) ($(@($err.ScriptStackTrace -split "`n")[0]))"
+        Write-WddLog "Finishing the deployment failed ($($State.finalizeFailures)): $($err.Exception.Message)`r`n$($err.ScriptStackTrace)" 'ERROR'
+        $max = Get-WddOrchestratorLimit $Manifest 'finalizeAttempts' 3
+        if ([int] $State.finalizeFailures -lt $max) {
+            Add-WddActivity $Paths "Writing the final report failed (attempt $($State.finalizeFailures) of $max): $($err.Exception.Message). Tried again at the next check." 'error'
+            Save-WddState $Paths $State
+            $Snapshot.finalizeError = $State.lastFinalizeError
+            Set-WddSnapshotOutcome $Snapshot $State
+            Write-WddJson $Paths.Status $Snapshot
+            return 'FinalizeFailed'
+        }
+        $overall = Get-WddOverall $Snapshot.stages -DeadlineReached:$DeadlineReached
+        if ($overall -eq 'Succeeded') { $overall = 'CompletedWithFollowUp' }
+        $now = (Get-WddNow).ToString('o')
+        $msg = "The final report could not be written after $max attempts ($($State.lastFinalizeError)); this minimal report lists the stage results. See $($Paths.Log)."
+        $report = [ordered]@{ packageId = $Manifest.packageId; generatedUtc = $now; overall = $overall; reason = $msg; minimal = $true
+                              stages = @(@($Snapshot.stages) | ForEach-Object { [ordered]@{ id = $_.id; name = $_.name; state = $_.state; status = $_.status; detail = $_.detail } }) }
+        try { Write-WddJson $Paths.ReportJson $report; [IO.File]::WriteAllText($Paths.ReportText, "Windows Deployment Builder - deployment report (minimal)`r`nOverall: $overall`r`n$msg`r`n" + ((@($report.stages) | ForEach-Object { "$($_.name): $($_.state) $($_.status) $($_.detail)" }) -join "`r`n"), (New-Object System.Text.UTF8Encoding($true))) } catch { }
+        Write-WddJson $Paths.Marker ([ordered]@{ status = $overall; finishedUtc = $now; report = $Paths.ReportJson })
+        $State.status = 'Completed'; $State.overall = $overall; $State.completedUtc = $now; $State.message = $msg
+        Save-WddState $Paths $State
+        $Snapshot.deploymentState = 'Completed'; $Snapshot.overall = $overall
+        Set-WddSnapshotOutcome $Snapshot $State
+        Write-WddJson $Paths.Status $Snapshot
+        Add-WddActivity $Paths "Deployment finished: $overall. $msg" 'error'
+        Write-WddEvent 3105 $msg 'Error'
+        try { Unregister-WddTask '\WindowsDeploymentBuilder\' 'Deployment'; Unregister-WddTask '\WindowsDeploymentBuilder\' 'Progress' } catch { }
+        return "Completed:$overall"
+    }
+}
+
 <# The progress window and LAN monitor tasks, registered again if they were removed while the deployment runs. #>
 function Confirm-WddHelperTasks {
     param([hashtable] $Manifest, [hashtable] $Paths, [hashtable] $State)
@@ -235,20 +471,40 @@ function Invoke-WddMonitor {
             $policy = Step-WddUpdatePolicy $manifest $Paths $state $snapshot
             if ($policy) { $snapshot.updatePolicy = $policy }
         }
+        $deadline = ConvertTo-WddDate $state.deadlineUtc
+        $deadlineReached = [bool] ($deadline -and (Get-WddNow) -ge $deadline)
+        # Orchestrator 1.3.0: a restart Windows needs, before finishing and whenever no stage is working.
+        $restart = 'NotRequired'
+        if (-not $deadlineReached) {
+            try { $restart = Step-WddRestartCoordinator $manifest $Paths $state $snapshot } catch { Write-WddLog "Restart coordination: $($_.Exception.Message)" 'WARN' }
+            $snapshot.restart = Get-WddRestartView $state
+        }
+        # After the stages and any restart: Windows Update is searched again (one more run if it offers more).
+        $recheck = ''
+        if ($snapshot.allFinal -and $restart -in 'NotRequired', 'LimitReached', 'Failed') {
+            try { $recheck = Step-WddUpdateRecheck $manifest $Paths $state $snapshot } catch { Write-WddLog "Windows Update re-check: $($_.Exception.Message)" 'WARN' }
+            if ($recheck -eq 'Relaunched') { $snapshot = Get-WddSnapshot $manifest $Paths $state }
+        }
+        Set-WddSnapshotOutcome $snapshot $state
+        $snapshot.condition = Get-WddCondition $snapshot $state
         Save-WddState $Paths $state
         Write-WddJson $Paths.Status $snapshot
         $summary = (@($snapshot.stages) | ForEach-Object { "$($_.id)=$($_.state)$(if ($_.status) { "/$($_.status)" })" }) -join ', '
-        Write-WddLog "Monitor run $($state.monitorRuns): $summary"
+        Write-WddLog "Monitor run $($state.monitorRuns): $summary; restart: $restart$(if ($recheck) { "; update re-check: $recheck" })"
 
         if ($snapshot.allFinal) {
-            $overall = Complete-WddDeployment $manifest $Paths $state $snapshot
-            return "Completed:$overall"
+            # Finished only when no restart is still to be done (a blocked one waits at most restartWaitMinutes).
+            $hold = $restart -in 'Announced', 'Restarting', 'EngineRestartScheduled'
+            if ($restart -eq 'Blocked') {
+                $since = ConvertTo-WddDate $state.restartCoordinator['pendingSinceUtc']
+                $hold = -not $since -or ((Get-WddNow) - $since).TotalMinutes -lt (Get-WddOrchestratorLimit $manifest 'restartWaitMinutes' 120)
+            }
+            if ($hold) { return 'WaitingForRestart' }
+            return (Invoke-WddFinalize $manifest $Paths $state $snapshot)
         }
-        $deadline = ConvertTo-WddDate $state.deadlineUtc
-        if ($deadline -and (Get-WddNow) -ge $deadline) {
+        if ($deadlineReached) {
             Write-WddLog "Deadline $($state.deadlineUtc) reached with unfinished stages." 'WARN'
-            $overall = Complete-WddDeployment $manifest $Paths $state $snapshot -DeadlineReached
-            return "Completed:$overall"
+            return (Invoke-WddFinalize $manifest $Paths $state $snapshot -DeadlineReached)
         }
         return 'InProgress'
     } finally {

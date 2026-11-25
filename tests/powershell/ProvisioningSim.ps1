@@ -40,6 +40,17 @@ function Reset-Sim {
     $script:SimDevices = @()
     $script:SimDevicesThrow = $false
     $script:HelperRegistrationFails = $false
+    # Orchestrator 1.3.0: what Windows reports about a pending restart, installers running, restarts
+    # requested, and what a Windows Update re-check finds. Nothing real is ever restarted or searched.
+    $script:SimServicingRestart = @()
+    $script:SimInstallerActive = ''
+    $script:SimRestarts = New-Object System.Collections.Generic.List[string]
+    $script:SimRestartThrows = $false
+    $script:SimRestartWaits = 0
+    $script:SimOffered = @()
+    $script:SimOfferedThrows = $false
+    $script:SimOfferedCalls = 0
+    $script:WddTaskVisibility = 'Full'
     $script:Paths = Get-WddPaths (Join-Path $script:Tmp 'ProgramData\WindowsDeploymentBuilder')
     $script:Manifest = Read-WddManifest $manifestPath
     # Phase 4.3 ongoing update policy: edition, management and the AU policy values.
@@ -66,6 +77,13 @@ function Get-WddTaskInfo {
     @{ Exists = $true; State = $(if ($script:SimTaskStates.ContainsKey($k)) { $script:SimTaskStates[$k] } else { 'Ready' }); LastRunUtc = $null; LastResult = $(if ($script:SimTaskResults.ContainsKey($k)) { $script:SimTaskResults[$k] } else { 0 }) }
 }
 function Test-WddUpdateServicing { $script:SimServicing }
+function Get-WddServicingRestart { @($script:SimServicingRestart) }
+function Test-WddInstallerActive { $script:SimInstallerActive }
+function Invoke-WddRestart { param([int] $WarningSeconds, [string] $Reason) if ($script:SimRestartThrows) { throw 'shutdown.exe failed with exit code 1190 (simulated)' }; $script:SimRestarts.Add($Reason) }
+function Wait-WddRestart { param([int] $Seconds) $script:SimRestartWaits += $Seconds }
+function Get-WddOfferedUpdates { param($Config) $script:SimOfferedCalls++; if ($script:SimOfferedThrows) { throw 'Windows Update search failed (simulated)' }; @($script:SimOffered) }
+<# Simulated restart: a new boot, the pending restart and the engines' restart marker are gone. #>
+function Invoke-SimBoot { $script:SimNow = $script:SimNow.AddMinutes(3); $script:SimBoot = $script:SimNow; $script:SimServicingRestart = @(); $script:SimNow = $script:SimNow.AddMinutes(2) }
 function Register-WddProgressTask {
     param([hashtable] $Paths, [string] $User, [int] $IntervalSeconds = 7)
     if ($script:HelperRegistrationFails) { throw 'Access is denied (simulated)' }
@@ -228,8 +246,13 @@ function Get-SimAppConfig {
     $c.coordination.windowsUpdate.resultFile = Join-Path $script:Paths.Root 'Updates\result.json'
     $c.gatePollMinutes = 1
     $c.lockWaitMinutes = 0
+    # Engine 1.5.0: scenarios that use a hash mismatch as "a permanent failure" turn the delayed retry off.
+    if ($script:AppSim -and $script:AppSim.ContainsKey('IntegrityRetryMinutes')) { $c.integrityRetryMinutes = $script:AppSim.IntegrityRetryMinutes }
     return $c
 }
+# Engine 1.5.0 adapters: never a real source update or task in the simulation.
+function Update-WdaSource { param([string] $Source, [string] $LogFile = '') if ($script:AppSim) { $script:AppSim['SourceUpdates'] = [int] $script:AppSim['SourceUpdates'] + 1 } }
+function Install-WdaPackageAsUser { param([hashtable] $P, [int] $TimeoutMinutes, [string] $LogFile = '') @{ ExitCode = $null; TimedOut = $false; Output = ''; Error = 'not available in the simulation' } }
 function Get-WdrAppConfig { param([hashtable] $Paths) Get-SimAppConfig }
 function Invoke-WdrAppInstaller {
     param([hashtable] $Paths)

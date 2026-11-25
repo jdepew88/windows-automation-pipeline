@@ -193,7 +193,8 @@ function Get-WddMonitorStatus {
     $m.overall = [string] $state['overall']
     $m.startedUtc = $state['initializedUtc']; $m.completedUtc = $state['completedUtc']
     $m.lastActivityUtc = $snap.lastActivityUtc
-    $m.restartPending = [bool] $snap.restartPending
+    # Orchestrator 1.3.0: also a restart Windows needs that the deployment is about to do.
+    $m.restartPending = [bool] ($snap.restartPending -or ($snap.Contains('restart') -and $snap.restart.status -in 'Announced', 'Blocked', 'Restarting'))
     $m.attention = @(@($snap.needsAttention) | Select-Object -First 10 | ForEach-Object { Protect-WddText $_ })
     $stage = @{}
     foreach ($s in @($snap.stages)) { $stage[$s.id] = $s }

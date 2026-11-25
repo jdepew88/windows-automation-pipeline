@@ -49,6 +49,8 @@ function Reset-Sim {
         Shortcuts = @{}; Order = @()
         # Phase 5 fault injection
         Diagnoses = @(); SourceDown = @(); Random = 0.5; Waits = @(); OnlineAt = $null
+        # Engine 1.5.0: source refreshes, installations without elevation and their result
+        SourceUpdates = New-Object System.Collections.Generic.List[string]; UserInstalls = New-Object System.Collections.Generic.List[string]; UserInstallResult = $null
     }
 }
 
@@ -120,12 +122,18 @@ function Install-WdaPackage {
     $s.InstallCalls++
     $script:Sim.Order += $s.Id
     $s.Args = Get-WdaArguments 'install' $P
+    if (-not $s.ContainsKey('AllArgs')) { $s.AllArgs = @() }
+    $s.AllArgs += , @($s.Args)
     $code = 0
     switch ($s.Behavior) {
         'ok'            { $s.Installed = $true; if ($s.Method -eq 'portable') { New-SimPortableFiles $s } }
         'fail'          { $code = 0x8A150008 }
         'fail-once'     { if ($s.InstallCalls -ge 2) { $s.Installed = $true } else { $code = 0x8A150008 } }
         'hash'          { $code = 0x8A150011 }
+        # Engine 1.5.0: the manifest catches up with the publisher's installer once the source is refreshed.
+        'hash-once'     { if ($script:Sim.SourceUpdates.Count -ge 1) { $s.Installed = $true } else { $code = 0x8A150011 } }
+        # The package's manifest forbids an elevated installation (INSTALLER_PROHIBITS_ELEVATION).
+        'no-elevation'  { $code = 0x8A150056 }
         'cancel'        { $code = 0x8A15010C }
         'reboot-finish' { $s.Installed = $false; $s.InstalledAfterBoot = $script:Sim.Boots + 1; $code = 0x8A150109 }
         'reboot-now'    { if ($script:Sim.Boots -ge 1) { $s.Installed = $true } else { $code = 0x8A15010A } }
@@ -145,6 +153,17 @@ function Install-WdaPackage {
         'installer-fail' { return @{ ExitCode = [int] 0x8A150006; TimedOut = $false; Output = "Starting package install...`r`nInstaller failed with exit code: 1603`r`n" } }
     }
     @{ ExitCode = [int] $code; TimedOut = $false; Output = '' }
+}
+
+function Update-WdaSource { param([string] $Source, [string] $LogFile = '') $script:Sim.SourceUpdates.Add($Source) }
+function Install-WdaPackageAsUser {
+    param([hashtable] $P, [int] $TimeoutMinutes, [string] $LogFile = '')
+    $s = Get-SimPackage $P
+    $script:Sim.UserInstalls.Add($s.Id)
+    foreach ($t in (Get-WdaArguments 'install' $P)) { if ($t -cnotmatch $script:SafeToken) { throw "unsafe $t" } }
+    if ($script:Sim.UserInstallResult) { return $script:Sim.UserInstallResult }
+    $s.Installed = $true
+    @{ ExitCode = 0; TimedOut = $false; Output = ''; Error = '' }
 }
 
 # Bootstrap adapters
@@ -305,14 +324,72 @@ $tests['a persistent failure is given up after maxAttempts: CompletedWithFailure
     Save-Result $c 'failures'
 }
 
-$tests['hash mismatch is not retried'] = {
+$tests['hash mismatch with the delayed retry turned off is not retried'] = {
     Reset-Sim @((New-SimPackage 'Git.Git' 'hash'))
-    $c = New-AppTestConfig $script:Sim.Packages
+    $c = New-AppTestConfig $script:Sim.Packages -Overrides @{ integrityRetryMinutes = 0 }
     [void] (Invoke-Logons $c)
     $p = Get-Pkg (Get-Result $c) 'Git.Git'
     Assert-Equal $p.status 'Failed' 'status'
     Assert-Equal $script:Sim.Packages[0].InstallCalls 1 'one attempt only'
     Assert-True ($p.message -match 'hash') 'reason'
+    Assert-Equal $script:Sim.SourceUpdates.Count 0 'no source refresh'
+}
+
+$tests['engine 1.5.0: hash mismatch: one retry 30 min later from a refreshed source; the hash is still checked; a second mismatch is final'] = {
+    Reset-Sim @((New-SimPackage 'Google.Chrome' 'hash'), (New-SimPackage 'Git.Git'))
+    $c = New-AppTestConfig $script:Sim.Packages -Overrides @{ maxAttemptsPerPackage = 3 }
+    $start = $script:Sim.Now
+    [void] (Invoke-Logons $c)
+    $r = Get-Result $c
+    $p = Get-Pkg $r 'Google.Chrome'
+    Assert-Equal "$($p.status) $($p.lifecycle) $($p.failureClass) $($p.exitCode)" 'Failed FailedPermanent Integrity 0x8A150011' 'second mismatch is final and permanent'
+    Assert-Equal $script:Sim.Packages[0].InstallCalls 2 'exactly one retry'
+    Assert-Equal (($script:Sim.SourceUpdates) -join ',') 'winget' 'the source was refreshed once, before the retry'
+    Assert-True (($script:Sim.Now - $start).TotalMinutes -ge 30) 'the retry waited the configured delay'
+    foreach ($a in @($script:Sim.Packages[0].AllArgs)) { Assert-True (-not (@($a) -match 'ignore-security-hash')) 'the hash check is never skipped' }
+    Assert-Equal (Get-Pkg $r 'Git.Git').status 'Succeeded' 'other applications are not held back'
+    Assert-True (@($p.history | Where-Object { $_.message -match 'refreshed' }).Count -ge 1) 'the retry is explained in the history'
+}
+
+$tests['engine 1.5.0: hash mismatch fixed by the publisher: the retry from the refreshed source installs it'] = {
+    Reset-Sim @((New-SimPackage 'Google.Chrome' 'hash-once'))
+    $c = New-AppTestConfig $script:Sim.Packages
+    $o = Invoke-Logons $c
+    Assert-Equal $o[-1] 'Finished:Succeeded' 'installed after the source refresh'
+    $p = Get-Pkg (Get-Result $c) 'Google.Chrome'
+    Assert-Equal "$($p.status) $($p.detection)" 'Succeeded Installed' 'verified by winget list'
+}
+
+$tests['engine 1.5.0: an installer that refuses elevation (Spotify) is run once as the signed-in user without elevation'] = {
+    Reset-Sim @((New-SimPackage 'Spotify.Spotify' 'no-elevation'), (New-SimPackage 'Git.Git'))
+    $c = New-AppTestConfig $script:Sim.Packages
+    $o = Invoke-Logons $c
+    Assert-Equal $o[-1] 'Finished:Succeeded' 'outcome'
+    $p = Get-Pkg (Get-Result $c) 'Spotify.Spotify'
+    Assert-Equal "$($p.status) $($p.detection)" 'Succeeded Installed' 'installed and verified'
+    Assert-Equal "$($script:Sim.Packages[0].InstallCalls) $($script:Sim.UserInstalls.Count)" '1 1' 'one elevated attempt, one without elevation'
+    Assert-True ($p.message -match 'without administrator rights') 'how it was installed'
+}
+
+$tests['engine 1.5.0: refusing elevation and failing without it too: a person is asked, nothing loops'] = {
+    Reset-Sim @((New-SimPackage 'Spotify.Spotify' 'no-elevation'))
+    $script:Sim.UserInstallResult = @{ ExitCode = $null; TimedOut = $false; Output = ''; Error = 'The task could not be registered (simulated).' }
+    $c = New-AppTestConfig $script:Sim.Packages -Overrides @{ maxAttemptsPerPackage = 3 }
+    $o = Invoke-Logons $c
+    Assert-Equal $o[-1] 'Finished:CompletedWithFollowUp' 'follow-up, not a failure loop'
+    $p = Get-Pkg (Get-Result $c) 'Spotify.Spotify'
+    Assert-Equal "$($p.status) $($p.lifecycle)" 'RequiresInteraction ManualActionRequired' 'needs a person'
+    Assert-True ($p.message -match 'non-administrator') 'what to do'
+    Assert-Equal "$($script:Sim.Packages[0].InstallCalls) $($script:Sim.UserInstalls.Count)" '1 1' 'tried once each way'
+}
+
+$tests['engine 1.5.0: without the fallback (userContextFallback off) elevation refusal is a permanent failure'] = {
+    Reset-Sim @((New-SimPackage 'Spotify.Spotify' 'no-elevation'))
+    $c = New-AppTestConfig $script:Sim.Packages -Overrides @{ userContextFallback = $false }
+    [void] (Invoke-Logons $c)
+    $p = Get-Pkg (Get-Result $c) 'Spotify.Spotify'
+    Assert-Equal "$($p.status) $($p.failureClass) $($p.exitCode)" 'Failed Elevation 0x8A150056' 'recorded with its code'
+    Assert-Equal $script:Sim.UserInstalls.Count 0 'nothing run without elevation'
 }
 
 $tests['a package missing from the source is Unavailable without an install attempt'] = {
@@ -948,7 +1025,7 @@ $tests['exhausted retry budget: FailedRetryable, outstanding, exactly maxAttempt
 
 $tests['permanent failures are never retried automatically (integrity, policy, cancelled, not found)'] = {
     Reset-Sim @((New-SimPackage 'Vendor.Hash' 'hash'), (New-SimPackage 'Vendor.Cancel' 'cancel'), (New-SimPackage 'Vendor.Gone' 'notfound'))
-    $c = New-AppTestConfig $script:Sim.Packages -Overrides @{ maxAttemptsPerPackage = 3 }
+    $c = New-AppTestConfig $script:Sim.Packages -Overrides @{ maxAttemptsPerPackage = 3; integrityRetryMinutes = 0 }
     [void] (Invoke-Logons $c)
     $r = Get-Result $c
     Assert-Equal "$((Get-Pkg $r 'Vendor.Hash').lifecycle) $((Get-Pkg $r 'Vendor.Hash').failureClass)" 'FailedPermanent Integrity' 'hash mismatch'
@@ -963,7 +1040,7 @@ $tests['permanent failures are never retried automatically (integrity, policy, c
 $tests['portable download integrity failure: not retried, no shortcut, permanent'] = {
     $pkg = New-SimPackage 'Rufus.Rufus' 'hash' -Method portable -Portable @{ executable = 'rufus*.exe'; shortcut = 'Rufus' }
     Reset-Sim @($pkg)
-    $c = New-AppTestConfig $script:Sim.Packages -Overrides @{ maxAttemptsPerPackage = 3 }
+    $c = New-AppTestConfig $script:Sim.Packages -Overrides @{ maxAttemptsPerPackage = 3; integrityRetryMinutes = 0 }
     [void] (Invoke-Logons $c)
     $p = Get-Pkg (Get-Result $c) 'Rufus.Rufus'
     Assert-Equal "$($p.status) $($p.lifecycle) $($p.exitCode)" 'Failed FailedPermanent 0x8A150011' 'integrity'
@@ -1147,7 +1224,7 @@ $tests['runtime limit: finished work kept, the rest Failed (Budget, retryable), 
 
 $tests['continue after a failure off: the queue stops, the rest stays outstanding, resume finishes it'] = {
     Reset-Sim @((New-SimPackage 'Vendor.Bad' 'hash'), (New-SimPackage 'Git.Git'), (New-SimPackage '7zip.7zip'))
-    $c = New-AppTestConfig $script:Sim.Packages -Overrides @{ retry = @{ continueAfterFailure = $false } }
+    $c = New-AppTestConfig $script:Sim.Packages -Overrides @{ retry = @{ continueAfterFailure = $false }; integrityRetryMinutes = 0 }
     $o = Invoke-Logons $c
     Assert-Equal $o[-1] 'Finished:CompletedWithFailures' 'outcome'
     $r = Get-Result $c
@@ -1196,6 +1273,7 @@ $tests['recovery: retry one failed application; successful ones are not repeated
 $tests['recovery: refuses deselected, manual, installed, invalid and unknown operations; permanent needs -IncludePermanent'] = {
     Reset-Sim @((New-SimPackage 'Git.Git'), (New-SimPackage 'Vendor.Hash' 'hash'))
     $c = New-AppTestConfig $script:Sim.Packages -Overrides @{
+        integrityRetryMinutes = 0
         manual = @(@{ key = 'catalog:rustdesk'; displayName = 'RustDesk'; instructions = 'Install it from the publisher.'; url = 'https://rustdesk.com/' })
         deselected = @(@{ key = 'winget:mozilla.firefox'; packageIdentifier = 'Mozilla.Firefox'; source = 'winget'; displayName = 'Firefox' }) }
     [void] (Invoke-Logons $c)

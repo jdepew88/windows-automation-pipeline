@@ -7,6 +7,10 @@ here changes Windows Setup, disk selection, partitioning or formatting, and noth
 driver-signature or installer-integrity checks. The NTFS permission fix from `b97998a` is not
 touched (`Acl.Tests.ps1` still passes).
 
+**Follow-up (orchestrator 1.3.0):** the second bare-metal run (exit code 40, no restart after the
+updates) is analysed in [bare-metal-review.md](bare-metal-review.md): restart coordination, final
+state reconciliation, the Windows Update re-check, non-elevated installers and the next checklist.
+
 ## What changed
 
 ### Windows Update (WindowsUpdateEngine.ps1 1.2.0)

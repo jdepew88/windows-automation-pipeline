@@ -49,6 +49,11 @@
     application being installed, the installed/failed counts and the last failure. WinGet does not
     report download progress to a redirected process, so no percentage or speed is shown.
 
+    Engine 1.5.0 (bare-metal review): a package whose installer refuses administrator rights
+    (INSTALLER_PROHIBITS_ELEVATION) is run once as the same signed-in user without elevation (a
+    one-time task, limited run level, the same validated arguments); an installer hash mismatch is
+    retried once, integrityRetryMinutes later, after "winget source update" - the hash is still
+    checked, and a second mismatch is final.
     Modes:
       Run   (default) Full engine.
       Plan  Read-only dry run: WinGet check, installed/available state and the exact command for
@@ -71,7 +76,7 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-$script:EngineVersion = '1.4.0'
+$script:EngineVersion = '1.5.0'
 $script:StateVersion = 3
 $script:EventSource = 'WindowsDeploymentBuilder'
 $script:LogFile = $null
@@ -126,6 +131,9 @@ $script:ExitCodes = @{
     '0x8A150106' = @('Failed', $true, 'none', 'Not enough memory (INSTALL_INSUFFICIENT_MEMORY).', 'Resource')
     # The package's own installer exited with an error; its exit code is taken from WinGet's output.
     '0x8A150006' = @('Failed', $true, 'none', 'The installer reported a failure (SHELLEXEC_INSTALL_FAILED).', 'Unknown')
+    # Engine 1.5.0: the package declares that its installer must not run elevated (for example
+    # Spotify). It is run once more as the signed-in user without administrator rights.
+    '0x8A150056' = @('Failed', $false, 'none', 'The installer refuses to run with administrator rights (INSTALLER_PROHIBITS_ELEVATION).', 'Elevation')
 }
 
 $script:Terminal = @('Succeeded', 'AlreadyInstalled', 'Skipped', 'SkippedByUser', 'RequiresInteraction', 'Failed', 'Unavailable')
@@ -230,6 +238,11 @@ function Get-WdaConfig {
         maxErrors             = 5
         rebootWarningSeconds  = 60
         retryDelaySeconds     = 30
+        # Engine 1.5.0: run an installer that refuses elevation once without it; one delayed retry
+        # after a WinGet source refresh when the published installer hash does not match (the hash
+        # check itself always applies).
+        userContextFallback   = $true
+        integrityRetryMinutes = 30
         packages              = @()
         unresolved            = @()
         additionalSoftware    = @()
@@ -606,6 +619,66 @@ function Install-WdaPackage {
     Invoke-WdaWinGet (Get-WdaArguments 'install' $P) $TimeoutMinutes $LogFile
 }
 
+<# Engine 1.5.0: "winget source update" for one source before a retry after a hash mismatch. #>
+function Update-WdaSource {
+    param([string] $Source, [string] $LogFile = '')
+    if ($Source -cnotmatch $script:SafeToken) { return }
+    try { [void] (Invoke-WdaWinGet @('source', 'update', '--name', $Source, '--disable-interactivity') 5 $LogFile) } catch { Write-WdaLog "WinGet source update failed: $($_.Exception.Message)" 'WARN' }
+}
+
+<#
+    Engine 1.5.0: the same validated "winget install" run as the signed-in user WITHOUT elevation,
+    for installers that refuse administrator rights. A one-time task of this user (interactive
+    logon, limited run level: never more rights than the user's normal session) runs it; the exit
+    code and output come back through a folder in the user's temp directory. The task is removed
+    afterwards. Returns @{ ExitCode; TimedOut; Output; Error }.
+#>
+function Install-WdaPackageAsUser {
+    param([hashtable] $P, [int] $TimeoutMinutes, [string] $LogFile = '')
+    $arguments = Get-WdaArguments 'install' $P
+    foreach ($t in $arguments) { if ($t -cnotmatch $script:SafeToken) { throw "Refusing unsafe WinGet argument '$t'." } }
+    if (-not $script:WinGet) { throw 'WinGet path not resolved.' }
+    $q = { param([string] $x) "'" + ($x -replace "'", "''") + "'" }
+    $dir = Join-Path ([IO.Path]::GetTempPath()) ('wdb-user-install-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    $out = Join-Path $dir 'output.txt'; $codeFile = Join-Path $dir 'exitcode.txt'; $runner = Join-Path $dir 'run.ps1'
+    $body = @(
+        "`$a = @($((@($arguments) | ForEach-Object { & $q $_ }) -join ', '))",
+        "`$o = & $(& $q $script:WinGet) @a 2>&1 | Out-String",
+        "[IO.File]::WriteAllText($(& $q $out), [string] `$o)",
+        "[IO.File]::WriteAllText($(& $q $codeFile), [string] `$LASTEXITCODE)"
+    ) -join "`r`n"
+    [IO.File]::WriteAllText($runner, $body, (New-Object System.Text.UTF8Encoding($true)))
+    $name = 'ApplicationAsUser-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+    $path = '\WindowsDeploymentBuilder\'
+    $user = (Get-WdaContext).User
+    $registered = $false
+    try {
+        $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        $action = New-ScheduledTaskAction -Execute $ps -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$runner`""
+        $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
+        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes ($TimeoutMinutes + 5))
+        Register-ScheduledTask -TaskName $name -TaskPath $path -Action $action -Principal $principal -Settings $settings -Force -Description 'Windows Deployment Builder: one application installation without administrator rights (removed afterwards).' | Out-Null
+        $registered = $true
+        Start-ScheduledTask -TaskName $name -TaskPath $path
+        $deadline = (Get-Date).AddMinutes($TimeoutMinutes)
+        $code = $null
+        while ((Get-Date) -lt $deadline) {
+            if (Test-Path -LiteralPath $codeFile) { $txt = ''; try { $txt = [IO.File]::ReadAllText($codeFile).Trim() } catch { }; $n = 0; if ([int]::TryParse($txt, [ref] $n)) { $code = $n; break } }
+            Start-Sleep -Seconds 5
+        }
+        $text = $(if (Test-Path -LiteralPath $out) { try { [IO.File]::ReadAllText($out) } catch { '' } } else { '' })
+        if ($LogFile) { try { [IO.File]::AppendAllText($LogFile, ("`r`n> (as $user, not elevated) winget {0}`r`n{1}`r`nexit {2}`r`n" -f ($arguments -join ' '), $text.Trim(), $(if ($null -eq $code) { 'timeout' } else { Format-WdaHResult $code }))) } catch { } }
+        if ($null -eq $code) { try { Stop-ScheduledTask -TaskName $name -TaskPath $path } catch { }; return @{ ExitCode = $null; TimedOut = $true; Output = $text; Error = '' } }
+        return @{ ExitCode = $code; TimedOut = $false; Output = $text; Error = '' }
+    } catch {
+        return @{ ExitCode = $null; TimedOut = $false; Output = ''; Error = $_.Exception.Message }
+    } finally {
+        if ($registered) { try { Unregister-ScheduledTask -TaskName $name -TaskPath $path -Confirm:$false } catch { } }
+        Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
 <# Folders where WinGet puts machine-scope portable packages (its documented defaults). #>
 function Get-WdaPortableRoots {
     @($env:ProgramFiles, ${env:ProgramFiles(x86)}) | Where-Object { $_ } | ForEach-Object { Join-Path $_ 'WinGet\Packages' } | Select-Object -Unique
@@ -944,7 +1017,7 @@ function Set-WdaPackage {
 # ------------------------------------------------------------------------------------------------
 
 # Never retried automatically; a technician may retry them after fixing the cause (-IncludePermanent).
-$script:PermanentClasses = @('Permanent', 'Integrity', 'Policy', 'User', 'Manual')
+$script:PermanentClasses = @('Permanent', 'Integrity', 'Policy', 'User', 'Manual', 'Elevation')
 
 <#
     Retry settings from applications-config.json "retry" (engine 1.2.0). Configurations written for
@@ -1687,6 +1760,8 @@ function Invoke-WdaQueue {
                 Save-WdaState $State $Paths
                 Set-WdaStatus 'Installing' $p.name $State
                 $started = Get-WdaNow
+                # Engine 1.5.0: the retry after a hash mismatch starts from a freshly updated source.
+                if ($e.ContainsKey('refreshSource') -and $e.refreshSource) { $e.refreshSource = $false; Update-WdaSource $p.source $log }
                 Write-WdaLog ("  installing {0} ({1}:{2}) attempt {3}/{4}" -f $p.name, $p.source, $p.packageIdentifier, $e.attempts, $policy.maxAttempts)
                 $r = Install-WdaPackage $p ([int] $Config.packageTimeoutMinutes) $log
                 if ($r.TimedOut -and $p.interaction -eq 'mayPrompt') {
@@ -1696,6 +1771,24 @@ function Invoke-WdaQueue {
                 } elseif ($r.TimedOut) {
                     $m = @{ Status = 'Failed'; Retry = $true; Restart = 'none'; Message = "Timed out after $($Config.packageTimeoutMinutes) min."; Code = 'timeout'; Class = 'Timeout' }
                 } else { $m = ConvertFrom-WdaExitCode $r.ExitCode }
+                # Engine 1.5.0: an installer that refuses elevation runs once as the signed-in user without it.
+                if ($m.Class -eq 'Elevation' -and $Config.userContextFallback -and -not ($e.ContainsKey('userContextTried') -and $e.userContextTried)) {
+                    $e.userContextTried = $true
+                    Write-WdaLog "  $($p.name): the installer refuses administrator rights; running it once as $((Get-WdaContext).User) without elevation."
+                    Set-WdaStatus 'Installing' "$($p.name) (without administrator rights)" $State
+                    $r2 = Install-WdaPackageAsUser $p ([int] $Config.packageTimeoutMinutes) $log
+                    $e.installContext = 'user (not elevated)'
+                    if ($r2.Error) {
+                        $m = @{ Status = 'RequiresInteraction'; Retry = $false; Restart = 'none'; Message = "The installer refuses administrator rights, and running it without them failed ($($r2.Error)). Install it from a normal (non-administrator) session: winget install --id $($p.packageIdentifier) --exact."; Code = $m.Code; Class = 'Elevation' }
+                    } elseif ($r2.TimedOut) {
+                        $m = @{ Status = 'RequiresInteraction'; Retry = $false; Restart = 'none'; Message = "Run without administrator rights, it did not finish within $($Config.packageTimeoutMinutes) min; it may wait for a person. Install it from a normal session."; Code = 'timeout'; Class = 'User' }
+                    } else {
+                        $r = $r2
+                        $m = ConvertFrom-WdaExitCode $r2.ExitCode
+                        $m.Message = "$($m.Message) (run without administrator rights, as the installer requires)"
+                        if ($m.Class -eq 'Elevation') { $m.Status = 'RequiresInteraction'; $m.Message = "$($m.Message). Install it from a normal (non-administrator) session." }
+                    }
+                }
                 $installerCode = $(if ($r.ContainsKey('Output')) { Get-WdaInstallerExitCode ([string] $r.Output) } else { '' })
                 if ($installerCode) { $e.installerExitCode = $installerCode; $m.Message = "$($m.Message) Installer exit code: $installerCode." }
                 $status = $m.Status
@@ -1723,6 +1816,16 @@ function Invoke-WdaQueue {
                     $e.nextAttemptUtc = (Get-WdaNow).AddSeconds($delay).ToString('o')
                     $status = 'Pending'
                     $next = "retry after $delay s"
+                }
+                # Engine 1.5.0: an installer hash mismatch usually means the publisher replaced the installer
+                # before the WinGet manifest was updated. One retry later, from a refreshed source; the hash
+                # is still verified (WinGet's option to skip the hash check is never used). A second mismatch is final.
+                if ($status -eq 'Failed' -and $m.Code -eq '0x8A150011' -and [int] $Config.integrityRetryMinutes -gt 0 -and -not ($e.ContainsKey('integrityRetried') -and $e.integrityRetried) -and [int] $e.attempts -lt [int] $policy.maxAttempts) {
+                    $e.integrityRetried = $true; $e.refreshSource = $true
+                    $e.nextAttemptUtc = (Get-WdaNow).AddMinutes([int] $Config.integrityRetryMinutes).ToString('o')
+                    $status = 'Pending'
+                    $next = "retry in $($Config.integrityRetryMinutes) min after refreshing the WinGet source"
+                    $m.Message = "$($m.Message) The published hash often lags behind a new installer release: the source is refreshed and it is tried once more in $($Config.integrityRetryMinutes) min. The hash check still applies."
                 }
                 if ($status -eq 'Succeeded') {
                     # Do not rely on the exit code alone.

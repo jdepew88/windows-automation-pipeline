@@ -9,6 +9,9 @@
 $ErrorActionPreference = 'Stop'
 $enginePath = Join-Path $PSScriptRoot '..\..\src\engine\windows-update\scripts\WindowsUpdateEngine.ps1'
 . $enginePath
+# Engine 1.3.0 scenarios call the real WUA adapters with a failing collection (nothing reaches Windows).
+$script:RealWduInstall = ${function:Invoke-WduInstall}
+$script:RealWduDownload = ${function:Invoke-WduDownload}
 
 $script:Failures = 0
 $script:Passed = 0
@@ -93,6 +96,8 @@ function Invoke-WduInstall {
             'reoffer'   { $out.Results[$u.Id] = @{ Result = 'Succeeded'; HResult = 0 } }
             'fail'      { $out.Results[$u.Id] = @{ Result = 'Failed'; HResult = -2145124330 } }
             'fail-once' { if ($u.InstallCalls -ge 2) { $u.Installed = $true; $out.Results[$u.Id] = @{ Result = 'Succeeded'; HResult = 0 } } else { $out.Results[$u.Id] = @{ Result = 'Failed'; HResult = -2145124330 } } }
+            # Engine 1.3.0: fails while Windows waits for a restart (like KB890830/KB4052623 in the field), installs after it.
+            'fail-pending' { if ($script:Sim.RebootPending) { $out.Results[$u.Id] = @{ Result = 'Failed'; HResult = -2146233080 } } else { $u.Installed = $true; $out.Results[$u.Id] = @{ Result = 'Succeeded'; HResult = 0 } } }
         }
     }
     $out
@@ -492,6 +497,49 @@ $tests['coordination: restart marker written and lock held through the warning']
         $script:Sim.Boots++
         Assert-True (-not (Test-WdbRestartPending $c.dataRoot)) 'marker is stale after the restart'
     } finally { $script:SeenDuringReboot = $null }
+}
+
+$tests['engine 1.3.0: an update failing on its last attempt while a restart is pending is retried once after the restart'] = {
+    Reset-Sim @((New-SimUpdate KB5500001 'ok-reboot'), (New-SimUpdate KB890830 'fail-pending'))
+    $c = New-TestConfig @{ maxAttemptsPerUpdate = 1; resetComponentsOnce = $false }
+    $o = Invoke-Boots $c
+    Assert-Equal $o[-1] 'Finished:Succeeded' 'installed after the restart'
+    Assert-Equal "$($script:Sim.Updates[1].InstallCalls) $($script:Sim.Boots)" '2 1' 'one extra attempt, in the next boot'
+    $log = Get-Content -LiteralPath (Join-Path $c.dataRoot 'Updates\logs\engine.log') -Raw
+    Assert-True ($log -match 'KB890830 .*while Windows has a restart pending; retried once more after the restart') 'explained in the log'
+}
+
+$tests['engine 1.3.0: still failing after that restart: given up once, never looped; reported with the retry and the error source'] = {
+    Reset-Sim @((New-SimUpdate KB5500001 'ok-reboot'), (New-SimUpdate KB4052623 'fail'))
+    $script:Sim.Updates[1].Behavior = 'fail'
+    $c = New-TestConfig @{ maxAttemptsPerUpdate = 1; resetComponentsOnce = $false }
+    $o = Invoke-Boots $c
+    Assert-Equal $o[-1] 'Finished:CompletedWithFailures' 'outcome'
+    Assert-Equal $script:Sim.Updates[1].InstallCalls 2 'the first attempt plus exactly one after the restart'
+    $f = @((Get-Result $c).failed)[0]
+    Assert-Equal "$($f.kbs[0]) $($f.retriedAfterRestart) $($f.errorSource)" 'KB4052623 True windowsUpdate' 'retry and source reported'
+}
+
+$tests['engine 1.3.0: an exception in the engine''s own Windows Update call (0x80131508) is recorded as an engine error, with a new session next time'] = {
+    Reset-Sim
+    function New-WduCollection { param([object[]] $Updates) throw (New-Object System.IndexOutOfRangeException('Index was outside the bounds of the array.')) }
+    function Get-WduSession { 'session' }
+    $script:Session = 'stale session'
+    $u = New-SimUpdate KB890830
+    $r = (& $script:RealWduInstall @($u)).Results[$u.Id]
+    Assert-Equal "$($r.Result) $($r.Source) $(Format-WduHResult $r.HResult)" 'Failed engine 0x80131508' 'result'
+    Assert-True ($r.Exception -match 'IndexOutOfRangeException: Index was outside') 'exception kept'
+    Assert-Equal "$($script:Session)" '' 'the next attempt uses a new Windows Update session'
+    $script:Session = 'stale session'
+    $d = (& $script:RealWduDownload @($u))[$u.Id]
+    Assert-Equal "$($d.Source) $(Format-WduHResult $d.HResult)" 'engine 0x80131508' 'download path too'
+    Assert-Equal "$($script:Session)" '' 'download resets the session too'
+    $c = New-TestConfig
+    $script:LogFile = Join-Path $c.dataRoot 'test.log'; New-Item -ItemType Directory -Path $c.dataRoot -Force | Out-Null
+    $a = @{ count = 1; title = $u.Title; kbs = @('KB890830') }
+    Register-WduFailure $u $a $c 'install' 'Failed' $r.HResult $r
+    Assert-Equal "$($a.lastErrorSource) $($a.lastHResult)" 'engine 0x80131508' 'attempt record'
+    Assert-True ($script:Activity.lastError -match 'failed in the engine \(0x80131508 COR_E_INDEXOUTOFRANGE.*not a Windows Update result\); IndexOutOfRangeException') 'message names the engine, the code and the exception'
 }
 
 $tests['Get-WduConfig fills defaults and normalises KB numbers'] = {

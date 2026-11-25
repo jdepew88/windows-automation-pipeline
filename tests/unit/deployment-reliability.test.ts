@@ -5,6 +5,9 @@ import serverSource from '../../src/engine/deployment/scripts/DeploymentStatusSe
 import orchestratorSource from '../../src/engine/deployment/scripts/DeploymentOrchestrator.ps1?raw';
 import completeSource from '../../src/engine/deployment/scripts/Complete-Deployment.ps1?raw';
 import wuEngineSource from '../../src/engine/windows-update/scripts/WindowsUpdateEngine.ps1?raw';
+import commonSource from '../../src/engine/deployment/scripts/DeploymentCommon.ps1?raw';
+import appEngineSource from '../../src/engine/applications/scripts/ApplicationEngine.ps1?raw';
+import { WINGET_EXIT_CODES } from '../../src/engine/applications/results';
 import { buildManifest, MONITOR_FINAL_REPORT_HOURS, ORCHESTRATOR_LIMITS, packageFiles, PROGRESS_REFRESH_SECONDS, STATUS_SERVER_SCRIPT } from '../../src/engine/deployment';
 import { engineConfig } from '../../src/engine/windows-update';
 import { ownerDefaults } from '../../src/engine/profiles';
@@ -13,9 +16,10 @@ import { validateProfile } from '../../src/engine/validation/validate';
 import { generateOk, profile } from './helpers';
 
 /**
- * Deployment reliability (orchestrator 1.2.0, Windows Update engine 1.2.0, application engine
- * 1.4.0): what the generated package declares and static guarantees of the shipped scripts. The
- * behaviour itself is tested in tests/powershell (Engine, Applications, Deployment, Monitor).
+ * Deployment reliability (orchestrator 1.2.0/1.3.0, Windows Update engine 1.2.0/1.3.0, application
+ * engine 1.4.0/1.5.0): what the generated package declares and static guarantees of the shipped
+ * scripts. The behaviour itself is tested in tests/powershell (Engine, Applications, Deployment,
+ * Monitor).
  */
 
 const fnBody = (src: string, name: string) => {
@@ -158,5 +162,64 @@ describe('shipped scripts: static guarantees', () => {
     expect(skip).not.toMatch(/NeedsUserInput/);
     expect(skip).toMatch(/Insider Preview build \(never installed\)/);
     expect(wuEngineSource).toMatch(/try \{ \$inst\.ForceQuiet = \$true \} catch \{ \}/);
+  });
+});
+
+describe('orchestrator 1.3.0: restart coordination, final state, task visibility', () => {
+  it('the manifest carries the restart-loop limit, the restart warning and the update re-check budget', () => {
+    expect(ORCHESTRATOR_LIMITS).toMatchObject({ coordinatedRestarts: 3, restartWarningSeconds: 120, restartWaitMinutes: 120, updateRechecks: 1, finalizeAttempts: 3 });
+    expect(buildManifest(profile()).manifest.failureHandling.orchestrator).toMatchObject({ coordinatedRestarts: 3, updateRechecks: 1 });
+  });
+
+  it('a coordinated restart takes the install lock, writes the marker and saves the state before shutdown.exe; nothing else restarts', () => {
+    const body = fnBody(orchestratorSource, 'Step-WddRestartCoordinator');
+    const order = ['Enter-WddInstallLock', 'Set-WddRestartMarker', 'Save-WddState', 'Invoke-WddRestart', 'Wait-WddRestart', 'Exit-WddInstallLock'].map((s) => body.indexOf(s));
+    expect(order.every((i) => i > 0)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+    expect(body).toMatch(/if \(\[int\] \$rc\['restarts'\] -ge \$max\)/);
+    // Invoke-WddRestart is called from the coordinator only.
+    expect(orchestratorSource.split('Invoke-WddRestart ').length).toBe(body.split('Invoke-WddRestart ').length);
+  });
+
+  it('only Windows servicing indicators count as a pending restart (never PendingFileRenameOperations)', () => {
+    const body = fnBody(commonSource, 'Get-WddServicingRestart');
+    expect(body).toContain('Component Based Servicing\\RebootPending');
+    expect(body).toContain('WindowsUpdate\\Auto Update\\RebootRequired');
+    expect(body).not.toContain('PendingFileRenameOperations\'');
+    expect(body).not.toMatch(/Get-ItemProperty/);
+  });
+
+  it('a deployment whose stages are all final is never described as starting', () => {
+    const body = fnBody(commonSource, 'Get-WddDeploymentOutcome');
+    expect(body).not.toContain('Stages are starting');
+    expect(body.indexOf('Every stage has finished')).toBeGreaterThan(0);
+    expect(body.indexOf('Every stage has finished')).toBeLessThan(body.indexOf('Launching the deployment stages'));
+  });
+
+  it('the progress window never decides that a SYSTEM task is missing without elevation', () => {
+    expect(showSource).toContain('$script:WddTaskVisibility = Get-WddTaskVisibility');
+    expect(fnBody(commonSource, 'Get-WddStageSnapshot')).toContain("$taskKnown = $script:WddTaskVisibility -ne 'Limited'");
+  });
+});
+
+describe('engines: Windows Update 1.3.0, applications 1.5.0', () => {
+  it('Windows Update keeps .NET errors apart from Windows Update results and retries an update once after a pending restart', () => {
+    expect(wuEngineSource).toContain("'0x80131508' = @('COR_E_INDEXOUTOFRANGE'");
+    expect(fnBody(wuEngineSource, 'Register-WduFailure')).toContain('lastErrorSource');
+    expect(fnBody(wuEngineSource, 'Get-WduPlan')).toContain('restartChance');
+  });
+
+  it('a hash mismatch is retried at most once from a refreshed source and the hash check is never skipped', () => {
+    expect(appEngineSource).not.toMatch(/ignore-security-hash|ignore-local-archive-malware-scan/i);
+    expect(appEngineSource).toContain("-not ($e.ContainsKey('integrityRetried') -and $e.integrityRetried)");
+    expect(WINGET_EXIT_CODES['0x8A150011']).toMatchObject({ retry: false, class: 'Integrity' });
+  });
+
+  it('an installer that refuses elevation runs once with the user\'s own limited rights, through validated arguments', () => {
+    const body = fnBody(appEngineSource, 'Install-WdaPackageAsUser');
+    expect(body).toContain('-LogonType Interactive -RunLevel Limited');
+    expect(body).toContain('-cnotmatch $script:SafeToken');
+    expect(body).toContain('Unregister-ScheduledTask');
+    expect(WINGET_EXIT_CODES['0x8A150056']).toMatchObject({ retry: false, class: 'Elevation', symbol: 'INSTALLER_PROHIBITS_ELEVATION' });
   });
 });

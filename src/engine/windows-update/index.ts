@@ -9,7 +9,7 @@ import type { Profile } from '../schema/profile';
  * profile can change goes into config.json, which both scripts read at run time.
  */
 
-export const ENGINE_VERSION = '1.2.0';
+export const ENGINE_VERSION = '1.3.0';
 export const DATA_ROOT = 'C:\\ProgramData\\WindowsDeploymentBuilder';
 /** Where the answer file extracts the assets during specialize (Administrators-only by default). */
 export const STAGING_DIR = 'C:\\Windows\\Setup\\Scripts\\WindowsUpdate';

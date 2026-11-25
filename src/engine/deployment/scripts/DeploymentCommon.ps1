@@ -33,7 +33,7 @@
 
 Set-StrictMode -Version 2.0
 
-$script:DeployVersion = '1.2.0'
+$script:DeployVersion = '1.3.0'
 $script:DeployStateVersion = 2
 $script:EventSource = 'WindowsDeploymentBuilder'
 $script:ManifestFormat = 'windows-deployment-builder/deployment-manifest'
@@ -88,6 +88,106 @@ function Get-WddTaskInfo {
 function Test-WddUpdateServicing {
     try { if ((New-Object -ComObject 'Microsoft.Update.Installer').IsBusy) { return $true } } catch { }
     return [bool] (Get-Process -Name 'TiWorker' -ErrorAction SilentlyContinue)
+}
+
+<#
+    Orchestrator 1.3.0: restart coordination adapters.
+    Get-WddServicingRestart  what Windows itself reports as a pending servicing restart (Windows
+                             Update and component servicing). PendingFileRenameOperations is
+                             deliberately not used: many installers leave entries there that do not
+                             need a restart, and acting on it would restart for nothing.
+    Test-WddInstallerActive  why restarting now would interrupt an installation ('' = nothing runs):
+                             the Windows Update installer is busy, or a Windows Installer (MSI)
+                             installation holds its machine-wide mutex.
+#>
+function Get-WddServicingRestart {
+    $r = @()
+    $wu = $false
+    try { $wu = [bool] (New-Object -ComObject 'Microsoft.Update.SystemInfo').RebootRequired } catch { }
+    if ($wu -or (Test-Path -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired')) { $r += 'Windows Update reports that a restart is required to finish installed updates' }
+    if (Test-Path -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending') { $r += 'Windows component servicing has a pending restart' }
+    $r
+}
+
+function Test-WddInstallerActive {
+    try { if ((New-Object -ComObject 'Microsoft.Update.Installer').IsBusy) { return 'the Windows Update installer is busy' } } catch { }
+    $m = $null
+    try { if ([System.Threading.Mutex]::TryOpenExisting('Global\_MSIExecute', [ref] $m)) { $m.Dispose(); return 'a Windows Installer (MSI) installation is running' } }
+    catch [System.UnauthorizedAccessException] { return 'a Windows Installer (MSI) installation is running' } catch { }
+    return ''
+}
+
+<# The machine-wide install lock shared with the engines (<dataRoot>\state\install.lock); $null when another installation holds it. #>
+function Enter-WddInstallLock {
+    param([hashtable] $Paths)
+    if (-not (Test-Path -LiteralPath $Paths.StateDir)) { New-Item -ItemType Directory -Path $Paths.StateDir -Force | Out-Null }
+    try {
+        $fs = [System.IO.File]::Open((Join-Path $Paths.StateDir 'install.lock'), [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::Read)
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes(('{{"owner":"Deployment","pid":{0},"sinceUtc":"{1}"}}' -f $PID, [DateTime]::UtcNow.ToString('o')))
+        $fs.SetLength(0); $fs.Write($bytes, 0, $bytes.Length); $fs.Flush()
+        return $fs
+    } catch [System.IO.IOException] { return $null }
+}
+
+function Exit-WddInstallLock { param($Lock) if ($Lock) { try { $Lock.Dispose() } catch { } } }
+
+<# The restart marker in the engines' format, so they start nothing new before the restart. #>
+function Set-WddRestartMarker {
+    param([hashtable] $Paths, [string] $Reason)
+    $boot = $(try { (Get-WddBootTime).ToString('yyyy-MM-ddTHH:mm:ssZ') } catch { 'unknown' })
+    Write-WddJson $Paths.RestartMarker ([ordered]@{ owner = 'Deployment'; reason = $Reason; requestedUtc = (Get-WddNow).ToString('o'); bootTimeUtc = $boot })
+}
+
+function Invoke-WddRestart {
+    param([int] $WarningSeconds, [string] $Reason)
+    # p:2:17 = planned, Operating System: Hot fix
+    & "$env:SystemRoot\System32\shutdown.exe" /r /t $WarningSeconds /d p:2:17 /c "Windows Deployment Builder: $Reason. The computer restarts in $WarningSeconds seconds; the deployment continues automatically."
+    if ($LASTEXITCODE -ne 0) { throw "shutdown.exe failed with exit code $LASTEXITCODE" }
+}
+
+<#
+    Read-only Windows Update search (the documented WUA COM API, as SYSTEM) under the Windows Update
+    engine's own policy ($Config = its config.json): what it would install if it ran now. Feature
+    updates and Insider builds are never counted; optional updates and drivers only when the policy
+    installs them. Installs, downloads and hides nothing.
+#>
+function Get-WddOfferedUpdates {
+    param($Config)
+    $c = $(if ($Config -is [hashtable]) { $Config } else { @{} })
+    $session = New-Object -ComObject 'Microsoft.Update.Session'
+    $session.ClientApplicationID = 'Windows Deployment Builder (re-check)'
+    $searcher = $session.CreateUpdateSearcher()
+    if ($c['microsoftUpdate']) { $searcher.ServerSelection = 3; $searcher.ServiceID = '7971f918-a847-4430-9279-4a52d1efe18d' }
+    $criteria = 'IsInstalled=0 and IsHidden=0'
+    if ([string] $c['drivers'] -ne 'include') { $criteria += " and Type='Software'" }
+    $result = $searcher.Search($criteria)
+    if ($result.ResultCode -notin 2, 3) { throw "Windows Update search returned result code $($result.ResultCode)." }
+    $excluded = @(@($c['excludedKbs']) | Where-Object { $_ } | ForEach-Object { ([string] $_).ToUpperInvariant() })
+    foreach ($u in $result.Updates) {
+        $title = [string] $u.Title
+        $cats = @(foreach ($x in $u.Categories) { ([string] $x.CategoryID).ToLowerInvariant() })
+        if ($cats -contains '3689bdc8-b205-4af4-8d4b-a63924c5e9d5' -or $title -match '(?i)^\s*(Feature update to Windows|Upgrade to Windows)\b' -or $title -match '(?i)\bInsider Preview\b') { continue }
+        if ([bool] $u.BrowseOnly -and [string] $c['optionalUpdates'] -ne 'install') { continue }
+        $kbs = @(foreach ($k in $u.KBArticleIDs) { "KB$k" })
+        if (@($kbs | Where-Object { $excluded -contains $_.ToUpperInvariant() }).Count) { continue }
+        @{ id = [string] $u.Identity.UpdateID; title = $title; kbs = $kbs; optional = [bool] $u.BrowseOnly; driver = ([int] $u.Type -eq 2) }
+    }
+}
+
+<# Holds the install lock through the restart warning, so nothing starts installing before the restart. #>
+function Wait-WddRestart { param([int] $Seconds) if ($Seconds -gt 0) { Start-Sleep -Seconds $Seconds } }
+
+<#
+    Orchestrator 1.3.0: whether this process can see the deployment's scheduled tasks. The tasks
+    of SYSTEM and of an elevated user are not readable with a filtered (non-elevated) token, so
+    the progress window, which runs without elevation, must never conclude that a task is missing:
+    'Limited' makes the snapshot rely on the SYSTEM monitor's own view (status.json) instead.
+#>
+$script:WddTaskVisibility = 'Full'
+function Get-WddTaskVisibility {
+    $id = Get-WddIdentity
+    if ($id.IsSystem -or $id['IsAdmin']) { return 'Full' }
+    return 'Limited'
 }
 
 function Write-WddEvent {
@@ -452,6 +552,16 @@ function Test-WddRestartPending {
       NotStarted  not launched (yet)
       LaunchFailed the installer could not register the task
 #>
+<# The SYSTEM monitor's last view of one stage (from its status.json, if written in the last 30 minutes), or $null. #>
+function Get-WddMonitorStageView {
+    param([hashtable] $Paths, [string] $Id)
+    $s = Read-WddJson $Paths.Status
+    if ($s -isnot [hashtable] -or -not $s.ContainsKey('stages')) { return $null }
+    $at = ConvertTo-WddDate $s['updatedUtc']
+    if (-not $at -or ((Get-WddNow) - $at).TotalMinutes -gt 30) { return $null }
+    return (@($s['stages']) | Where-Object { $_ -is [hashtable] -and $_['id'] -eq $Id } | Select-Object -First 1)
+}
+
 function Get-WddStageSnapshot {
     param([hashtable] $Stage, [hashtable] $Paths, [hashtable] $State)
     $root = $Paths.Root
@@ -468,7 +578,9 @@ function Get-WddStageSnapshot {
     }
     $status = Read-WddJson (Join-Path $root $Stage.status)
     $o.engine = $status
-    $taskExists = Get-WddTask $Stage.task.path $Stage.task.name
+    # Orchestrator 1.3.0: a non-elevated process cannot see the SYSTEM tasks; it never concludes "missing".
+    $taskKnown = $script:WddTaskVisibility -ne 'Limited'
+    $taskExists = $(if ($taskKnown) { Get-WddTask $Stage.task.path $Stage.task.name } else { $false })
     if ($status) {
         $o.status = [string] $status.phase; $o.detail = [string] $status.detail; $o.updatedUtc = $status.updatedUtc
         if ($status.ContainsKey('reboots')) { $o.reboots = [int] $status.reboots }
@@ -479,6 +591,16 @@ function Get-WddStageSnapshot {
     if ($launch.launchResult -eq 'LaunchFailed') { $o.state = 'LaunchFailed'; $o.detail = [string] $launch.message; Set-WddStageNarrative $o $Stage $status $launch $State; return $o }
     $since = ConvertTo-WddDate $launch.launchedUtc
     $age = if ($since) { ((Get-WddNow) - $since).TotalMinutes } else { 0 }
+    if (-not $taskKnown) {
+        # What the SYSTEM monitor saw at its last run decides Stalled; otherwise the task is assumed present.
+        $mv = Get-WddMonitorStageView $Paths $Stage.id
+        if ($mv -and [string] $mv['state'] -in 'Stalled', 'LaunchFailed') {
+            $o.state = [string] $mv['state']; $o.detail = "$([string] $mv['detail']) (reported by the deployment monitor)".Trim()
+            Set-WddStageNarrative $o $Stage $status $launch $State
+            return $o
+        }
+        $taskExists = $true
+    }
     if ($taskExists) {
         $o.state = $(if ($status) { 'Running' } else { 'Pending' })
         # Phase 5: the user-context stage runs only while its user is signed in; say so when it has
@@ -610,6 +732,15 @@ function Get-WddSnapshot {
         lastActivityUtc = (Get-WddLastActivity $engine)
         recovering      = [bool] ($State -and $State['recoveringUntilUtc'] -and (ConvertTo-WddDate $State['recoveringUntilUtc']) -gt (Get-WddNow))
         restarts        = @(if ($State -and $State['restarts']) { @($State['restarts']) | Select-Object -Last 10 })
+        # Orchestrator 1.3.0: the coordinated restart, finalization and whether the monitor still runs.
+        restart         = (Get-WddRestartView $State)
+        finalizing      = [bool] ($allFinal -and $State -and [string] $State['status'] -notin 'Completed', 'StagingFailed', 'IntegrityFailed')
+        finalizeError   = $(if ($State -and $State['lastFinalizeError']) { [string] $State['lastFinalizeError'] } else { '' })
+        monitorLastRunUtc = $(if ($State) { $State['lastMonitorUtc'] } else { $null })
+        monitorOverdue  = (Test-WddMonitorOverdue $Manifest $State)
+    }
+    if ($snap.monitorOverdue) {
+        $snap.needsAttention = @(@($snap.needsAttention) + @("Deployment monitor: it has not run since $(if ($snap.monitorLastRunUtc) { Format-WddAge $snap.monitorLastRunUtc } else { 'the deployment started' }) (it should run every $(Get-WddMonitorInterval $Manifest) minutes as SYSTEM, task \WindowsDeploymentBuilder\Deployment). Nothing is finished or restarted automatically until it runs again; run Resume-Deployment.ps1 as administrator."))
     }
     Set-WddSnapshotOutcome $snap $State
     $snap.condition = Get-WddCondition $snap $State
@@ -625,6 +756,44 @@ function Get-WddLastActivity {
     return $null
 }
 
+<# Minutes between monitor runs (orchestrator 1.2.0 packages: 5; older: 15). #>
+function Get-WddMonitorInterval {
+    param([hashtable] $Manifest)
+    $o = $(if ($Manifest -and $Manifest['failureHandling'] -is [hashtable]) { $Manifest.failureHandling['orchestrator'] } else { $null })
+    if ($o -is [hashtable] -and $o.ContainsKey('monitorIntervalMinutes') -and [int] $o.monitorIntervalMinutes -ge 1) { return [int] $o.monitorIntervalMinutes }
+    return 15
+}
+
+<#
+    Orchestrator 1.3.0: the SYSTEM monitor has not run for three intervals (plus 5 minutes) although
+    Windows has been running that long. Nothing finishes or restarts automatically without it, so
+    the progress window says so instead of looking busy.
+#>
+function Test-WddMonitorOverdue {
+    param([hashtable] $Manifest, $State)
+    if (-not $State -or [string] $State['status'] -notin 'Launching', 'InProgress') { return $false }
+    $limit = 3 * (Get-WddMonitorInterval $Manifest) + 5
+    $last = ConvertTo-WddDate $(if ($State['lastMonitorUtc']) { $State['lastMonitorUtc'] } else { $State['initializedUtc'] })
+    if (-not $last -or ((Get-WddNow) - $last).TotalMinutes -lt $limit) { return $false }
+    try { $boot = Get-WddBootTime } catch { return $false }
+    return ((Get-WddNow) - $boot).TotalMinutes -ge $limit
+}
+
+<# True when Windows still needed a restart the deployment did not do (limit reached, blocked, failed, or not done yet). #>
+function Test-WddRestartOutstanding {
+    param($State)
+    return ((Get-WddRestartView $State).status -in 'Announced', 'Blocked', 'LimitReached', 'Failed')
+}
+
+<# The coordinated restart as the progress window and the LAN monitor show it. #>
+function Get-WddRestartView {
+    param($State)
+    $rc = $(if ($State -and $State['restartCoordinator'] -is [hashtable]) { $State['restartCoordinator'] } else { $null })
+    if (-not $rc) { return [ordered]@{ status = 'NotRequired'; reasons = @(); blockers = @(); restarts = 0; message = '' } }
+    [ordered]@{ status = [string] $rc['status']; reasons = @($rc['reasons'] | Where-Object { $_ }); blockers = @($rc['blockers'] | Where-Object { $_ })
+                restarts = [int] $rc['restarts']; message = [string] $rc['message'] }
+}
+
 <#
     One word for the whole deployment (progress window, LAN monitor):
       complete   finished (see overall)            attention  something needs a person
@@ -637,6 +806,7 @@ function Get-WddCondition {
     if (-not $State -or [string] $State['status'] -in 'StagingFailed', 'IntegrityFailed') { return 'attention' }
     if (@($Snapshot.needsAttention).Count) { return 'attention' }
     if ($Snapshot.recovering) { return 'recovering' }
+    if ($Snapshot.Contains('restart') -and $Snapshot.restart.status -in 'Announced', 'Restarting', 'Blocked') { return 'waiting' }
     if (@($Snapshot.stages | Where-Object { $_.condition -eq 'active' }).Count) { return 'active' }
     if (@($Snapshot.stages | Where-Object { $_.condition -ne 'finished' }).Count -eq 0) { return 'active' }
     return 'waiting'
@@ -752,11 +922,25 @@ function Get-WddDeploymentOutcome {
     }
     $stages = @(if ($Snapshot) { @($Snapshot.stages) } else { @() })
     $live = @($stages | Where-Object { $_ -and $_.state -ne 'Final' })
+    # Orchestrator 1.3.0: every stage has its final result, the deployment is not finished yet
+    # (the bare-metal run showed code 40 with a startup message here): say exactly what is left.
+    if ($stages.Count -and -not $live.Count) {
+        $results = ($stages | ForEach-Object { "$($_.name): $($_.status)" }) -join '; '
+        $rv = $(if ($Snapshot.Contains('restart')) { $Snapshot.restart } else { $null })
+        if ($rv -and $rv.status -in 'Announced', 'Restarting', 'Blocked') {
+            $what = $(if ($rv.status -eq 'Blocked') { "It waits because $(@($rv.blockers) -join '; ')." } elseif ($rv.status -eq 'Restarting') { 'The restart has been started.' } else { 'The deployment restarts the computer automatically at its next check when nothing is installing.' })
+            return & $o 'PausedAwaitingReboot' "Every stage has finished ($results). Windows needs a restart: $(@($rv.reasons) -join '; '). $what After the restart Windows Update and Device Manager are checked again and the final report is written."
+        }
+        if ($Snapshot.Contains('finalizeError') -and $Snapshot.finalizeError) { return & $o 'InProgress' "Every stage has finished ($results), but writing the final report failed: $($Snapshot.finalizeError) It is tried again at the monitor's next run." }
+        if ($Snapshot.Contains('monitorOverdue') -and $Snapshot.monitorOverdue) { return & $o 'PausedAwaitingUser' "Every stage has finished ($results), but the deployment monitor has not run to finish the deployment. Run Resume-Deployment.ps1 as administrator." }
+        return & $o 'InProgress' "Every stage has finished ($results). The deployment monitor is finishing the deployment (restart check, Windows Update and Device Manager check, final report) at its next run."
+    }
     if (($Snapshot -and $Snapshot.restartPending) -or @($live | Where-Object { $_.status -in 'Rebooting', 'RebootDeferred' }).Count) { return & $o 'PausedAwaitingReboot' 'A restart is scheduled or in progress; the deployment continues after it.' }
     $net = @($live | Where-Object { $_.status -eq 'WaitingForNetwork' })
     # Phase 8: offline because no network adapter has a driver: say so, the network will not appear by itself.
     if ($Snapshot -and $Snapshot.Contains('networkDriverMissing') -and $Snapshot.networkDriverMissing) { return & $o 'PausedAwaitingNetwork' ([string] $Snapshot.networkDriverMissing) }
     if ($net.Count) { return & $o 'PausedAwaitingNetwork' ("$(($net | ForEach-Object { $_.name }) -join ', '): waiting for the network. $(($net | ForEach-Object { $_.detail } | Where-Object { $_ }) -join '; ')".Trim()) }
+    if ($Snapshot -and $Snapshot.Contains('monitorOverdue') -and $Snapshot.monitorOverdue) { return & $o 'PausedAwaitingUser' (@($Snapshot.needsAttention) | Select-Object -Last 1) }
     $user = @($live | Where-Object { $_.state -in 'Stalled', 'LaunchFailed' -or $_.idle })
     if ($user.Count) { return & $o 'PausedAwaitingUser' (($user | ForEach-Object { "$($_.name): $(if ($_.idle) { $_.idle } else { "$($_.state). $($_.detail)" })" }) -join ' ') }
     if ($Snapshot -and $Snapshot.currentStage) {

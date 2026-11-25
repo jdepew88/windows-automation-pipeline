@@ -675,6 +675,243 @@ Test-Scenario 'progress window: one per session, refreshes every 7 seconds, open
     Assert-True ($text -match 'Recent activity') 'recent activity section'
 }
 
+# ------------------------------------------------------------------------------------------------
+# Orchestrator 1.3.0: final-state reconciliation (exit code 40), restart coordination, update re-check
+# ------------------------------------------------------------------------------------------------
+
+Test-Scenario 'exit code 40 (bare-metal run): every stage final but not finished is never "starting"; the monitor finishes it; an overdue monitor is flagged' {
+    Initialize-Embedded | Out-Null
+    Set-EngineResult 'windowsUpdate' 'CompletedWithFailures' @{ failed = @(@{ kbs = @('KB890830'); title = 'Windows Malicious Software Removal Tool'; attempts = 3; lastResult = 'Failed'; lastHResult = '0x80131508' }) }
+    Set-EngineResult 'applications' 'CompletedWithFailures' @{ packages = @(@{ name = 'Google Chrome'; packageIdentifier = 'Google.Chrome'; source = 'winget'; status = 'Failed'; attempts = 2; exitCode = '0x8A150011'; message = 'Installer hash mismatch' }) }
+    $st = Read-WddJson $script:Paths.State
+    $snap = Get-WddSnapshot $script:Manifest $script:Paths $st
+    Assert-Equal "$($snap.allFinal) $($snap.finalizing) $($snap.outcomeCode)" 'True True 40' 'still in progress until the monitor has finished it'
+    Assert-True ($snap.outcomeDetail -like 'Every stage has finished (Windows Update: CompletedWithFailures; Applications*: CompletedWithFailures)*final report*') "detail: $($snap.outcomeDetail)"
+    Assert-True ($snap.outcomeDetail -notmatch '(?i)starting|launching|no engine has reported') 'never reported as starting'
+    $view = (Format-WddStatus $script:Manifest $script:Paths $st).Text
+    Assert-True ($view -notmatch 'Stages are starting') 'progress window'
+    # The monitor did not run for 30 minutes although Windows was running: flagged for a technician.
+    $script:SimBoot = $script:SimNow.AddMinutes(-60); $script:SimNow = $script:SimNow.AddMinutes(30)
+    $snap = Get-WddSnapshot $script:Manifest $script:Paths $st
+    Assert-Equal "$($snap.monitorOverdue) $($snap.outcome) $($snap.outcomeCode) $($snap.condition)" 'True PausedAwaitingUser 32 attention' 'overdue monitor'
+    Assert-True (@($snap.needsAttention) -match '^Deployment monitor: it has not run').Count 'needs attention'
+    Assert-True ((Format-WddStatus $script:Manifest $script:Paths $st).Text -match 'Monitor checks : .*OVERDUE') 'progress window shows it'
+    # The monitor runs: the stage results are reconciled into the final outcome.
+    Assert-Equal (Invoke-WddMonitor $script:Paths) 'Completed:CompletedWithFailures' 'finished'
+    $snap = Get-WddSnapshot $script:Manifest $script:Paths (Read-WddJson $script:Paths.State)
+    Assert-Equal "$($snap.outcome) $($snap.outcomeCode) $($snap.monitorOverdue)" 'CompletedWithFailures 20 False' 'final outcome'
+    $r = Read-WddJson $script:Paths.ReportJson
+    Assert-Equal "$($r.outcome) $($r.outcomeCode)" 'CompletedWithFailures 20' 'report matches the state'
+}
+
+Test-Scenario 'finalization failure: logged and retried at the next run; after three failures a minimal report ends the deployment' {
+    Initialize-Embedded | Out-Null
+    Set-EngineResult 'windowsUpdate' 'Succeeded'
+    Set-EngineResult 'applications' 'Succeeded'
+    function New-WddReport { throw 'Simulated report failure' }
+    Assert-Equal (Invoke-WddMonitor $script:Paths) 'FinalizeFailed' 'run 1'
+    $s = Read-WddJson $script:Paths.Status
+    Assert-True ($s.outcomeDetail -match 'writing the final report failed: Simulated report failure') "status: $($s.outcomeDetail)"
+    Assert-Equal "$((Read-WddJson $script:Paths.State).status) $((Read-WddJson $script:Paths.State).finalizeFailures)" 'InProgress 1' 'not finished yet'
+    Assert-True (@(Read-WddActivity $script:Paths 10 | Where-Object { $_.level -eq 'error' -and $_.message -like 'Writing the final report failed (attempt 1 of 3)*' }).Count -eq 1) 'activity'
+    Assert-Equal (Invoke-WddMonitor $script:Paths) 'FinalizeFailed' 'run 2'
+    Assert-Equal (Invoke-WddMonitor $script:Paths) 'Completed:CompletedWithFollowUp' 'run 3: minimal report, never a silent success'
+    $r = Read-WddJson $script:Paths.ReportJson
+    Assert-True ($r.minimal -and $r.reason -match 'could not be written after 3 attempts \(Simulated report failure') 'minimal report with the error'
+    Assert-Equal @($r.stages).Count 2 'stage results listed'
+    Assert-Equal (Read-WddJson $script:Paths.State).status 'Completed' 'deployment ended'
+    Assert-True ($script:Events -contains 3105) 'event 3105'
+    Assert-True (-not $script:SimTasks.ContainsKey('\WindowsDeploymentBuilder\Deployment')) 'monitor task removed'
+}
+
+Test-Scenario 'restart coordination: every stage final but Windows needs a restart: announced, restarted once under the install lock, devices and updates re-checked after the boot, then finished' {
+    Initialize-Embedded | Out-Null
+    Set-EngineResult 'windowsUpdate' 'Succeeded'
+    Set-EngineResult 'applications' 'Succeeded'
+    $script:SimServicingRestart = @('Windows Update reports that a restart is required to finish installed updates')
+    $script:SimDevices = @(@{ name = 'Intel(R) SM Bus Controller'; class = 'System'; problemCode = 14; hardwareIds = @('PCI\VEN_8086&DEV_A323') })
+    Assert-Equal (Invoke-WddMonitor $script:Paths) 'WaitingForRestart' 'run 1: announced, not finished'
+    $s = Read-WddJson $script:Paths.Status
+    Assert-Equal "$($s.outcome) $($s.outcomeCode) $($s.restart.status) $($s.condition)" 'PausedAwaitingReboot 31 Announced waiting' 'paused for the restart'
+    Assert-True ($s.outcomeDetail -match 'Every stage has finished .*Windows needs a restart: Windows Update reports .*1 device\(s\) need a restart .*Intel\(R\) SM Bus Controller') "detail: $($s.outcomeDetail)"
+    Assert-Equal $script:SimRestarts.Count 0 'never on the first sighting'
+    Assert-True ((Format-WddStatus $script:Manifest $script:Paths (Read-WddJson $script:Paths.State)).Text -match 'Restart        : Announced') 'progress window'
+    $script:SimNow = $script:SimNow.AddMinutes(5)
+    Assert-Equal (Invoke-WddMonitor $script:Paths) 'WaitingForRestart' 'run 2: restarting'
+    Assert-Equal $script:SimRestarts.Count 1 'restart requested'
+    $m = Read-WddJson $script:Paths.RestartMarker
+    Assert-Equal "$($m.owner) $($m.bootTimeUtc)" "Deployment $($script:SimBoot.ToString('yyyy-MM-ddTHH:mm:ssZ'))" 'restart marker in the engines'' format'
+    $st = Read-WddJson $script:Paths.State
+    Assert-Equal "$($st.restartCoordinator.status) $($st.restartCoordinator.restarts)" 'Restarting 1' 'saved before restarting'
+    Assert-True ($script:Events -contains 3009) 'event 3009'
+    Assert-True ($script:SimRestartWaits -ge 180) 'the install lock was held through the warning'
+    $l = Enter-WddInstallLock $script:Paths; Assert-True $l 'lock released afterwards'; Exit-WddInstallLock $l
+    $script:SimNow = $script:SimNow.AddMinutes(1)
+    [void] (Invoke-WddMonitor $script:Paths)
+    Assert-Equal $script:SimRestarts.Count 1 'never a second restart in the same boot'
+    # The restart: the driver works now.
+    Invoke-SimBoot
+    $script:SimDevices = @(@{ name = 'Intel(R) SM Bus Controller'; class = 'System'; problemCode = 0; hardwareIds = @('PCI\VEN_8086&DEV_A323') })
+    Assert-Equal (Invoke-WddMonitor $script:Paths) 'Completed:Succeeded' 'finished after the restart'
+    $st = Read-WddJson $script:Paths.State
+    Assert-True ($st.restarts[-1].planned -and $st.restarts[-1].by -eq 'Deployment') 'the boot is recognised as the planned restart'
+    $r = Read-WddJson $script:Paths.ReportJson
+    Assert-Equal "$($r.restartCoordination.outstanding) $($r.restartCoordination.automaticRestarts) $(@($r.restartCoordination.history).Count)" 'False 1 1' 'restart in the report'
+    Assert-Equal "$(@($r.devices.unresolved).Count) $($r.devices.bootUtc)" "0 $($script:SimBoot.ToString('o'))" 'devices checked after the restart'
+    Assert-Equal "$($r.updateRecheck.status) $script:SimOfferedCalls" 'NothingOffered 1' 'Windows Update searched again'
+    Assert-True ((Get-Content -LiteralPath $script:Paths.ReportText -Raw) -match 'automatic restart 1: Windows Update reports') 'text report'
+}
+
+Test-Scenario 'restart coordination: never while something installs (a working stage, the Windows Update installer, MSI, the install lock); it waits, then restarts' {
+    Initialize-Embedded | Out-Null
+    Set-EngineResult 'windowsUpdate' 'Succeeded'
+    Set-EngineStatus 'applications' 'Installing' 'Git'
+    $script:SimServicingRestart = @('Windows component servicing has a pending restart')
+    Assert-Equal (Invoke-WddMonitor $script:Paths) 'InProgress' 'run 1'
+    Assert-Equal (Read-WddJson $script:Paths.State).restartCoordinator.status 'Announced' 'announced'
+    $script:SimNow = $script:SimNow.AddMinutes(5); Set-EngineStatus 'applications' 'Installing' 'Git'
+    [void] (Invoke-WddMonitor $script:Paths)
+    $rc = (Read-WddJson $script:Paths.State).restartCoordinator
+    Assert-True ($rc.status -eq 'Blocked' -and (@($rc.blockers) -join ';') -match 'Applications.* is working \(Installing\)') "blocked by the installing stage: $(@($rc.blockers) -join ';')"
+    Assert-True (@(Read-WddActivity $script:Paths 20 | Where-Object { $_.level -eq 'warning' -and $_.message -like 'A restart is needed but waits:*is working (Installing)*' }).Count -eq 1) 'activity'
+    $script:SimNow = $script:SimNow.AddMinutes(5); Set-EngineStatus 'applications' 'WaitingForNetwork' 'no network'
+    $script:SimInstallerActive = 'a Windows Installer (MSI) installation is running'
+    [void] (Invoke-WddMonitor $script:Paths)
+    Assert-True ((@((Read-WddJson $script:Paths.State).restartCoordinator.blockers) -join ';') -match 'MSI') 'blocked by an MSI installation'
+    $script:SimInstallerActive = ''
+    $held = Enter-WddInstallLock $script:Paths
+    try {
+        $script:SimNow = $script:SimNow.AddMinutes(5); Set-EngineStatus 'applications' 'WaitingForNetwork' 'no network'
+        [void] (Invoke-WddMonitor $script:Paths)
+        Assert-True ((@((Read-WddJson $script:Paths.State).restartCoordinator.blockers) -join ';') -match 'install lock') 'blocked by the install lock'
+    } finally { Exit-WddInstallLock $held }
+    Assert-Equal $script:SimRestarts.Count 0 'nothing restarted while anything installed'
+    $script:SimNow = $script:SimNow.AddMinutes(5); Set-EngineStatus 'applications' 'WaitingForNetwork' 'no network'
+    [void] (Invoke-WddMonitor $script:Paths)
+    Assert-Equal $script:SimRestarts.Count 1 'restarted once nothing was installing'
+}
+
+Test-Scenario 'restart-loop protection: a restart Windows keeps asking for is done at most three times, never twice in one boot, then reported' {
+    Initialize-Embedded | Out-Null
+    Set-EngineResult 'windowsUpdate' 'Succeeded'
+    Set-EngineResult 'applications' 'Succeeded'
+    $pending = @('Windows component servicing has a pending restart')
+    $script:SimServicingRestart = $pending
+    for ($i = 1; $i -le 3; $i++) {
+        Assert-Equal (Invoke-WddMonitor $script:Paths) 'WaitingForRestart' "cycle $i announce"
+        $script:SimNow = $script:SimNow.AddMinutes(5)
+        [void] (Invoke-WddMonitor $script:Paths)
+        Assert-Equal $script:SimRestarts.Count $i "cycle $i restart"
+        Invoke-SimBoot
+        $script:SimServicingRestart = $pending   # Windows still asks for a restart after the boot
+    }
+    Assert-Equal (Invoke-WddMonitor $script:Paths) 'Completed:CompletedWithFollowUp' 'limit reached: finished with a follow-up'
+    Assert-Equal $script:SimRestarts.Count 3 'no fourth restart'
+    Assert-True ($script:Events -contains 3010) 'event 3010'
+    $r = Read-WddJson $script:Paths.ReportJson
+    Assert-Equal "$($r.restartCoordination.status) $($r.restartCoordination.outstanding)" 'LimitReached True' 'reported'
+    Assert-True (@($r.remainingTasks) -match '^Restart: Windows still needs a restart .*automatic restart limit').Count 'what to do'
+}
+
+Test-Scenario 'restart coordination: a restart that cannot be started is reported (marker removed), the deployment finishes with a follow-up' {
+    Initialize-Embedded | Out-Null
+    Set-EngineResult 'windowsUpdate' 'Succeeded'
+    Set-EngineResult 'applications' 'Succeeded'
+    $script:SimServicingRestart = @('Windows component servicing has a pending restart')
+    $script:SimRestartThrows = $true
+    [void] (Invoke-WddMonitor $script:Paths)
+    $script:SimNow = $script:SimNow.AddMinutes(5)
+    Assert-Equal (Invoke-WddMonitor $script:Paths) 'Completed:CompletedWithFollowUp' 'finished, with the restart outstanding'
+    Assert-True (-not (Test-Path -LiteralPath $script:Paths.RestartMarker)) 'no marker left that would stop the engines'
+    Assert-True (@(Read-WddActivity $script:Paths 20 | Where-Object { $_.level -eq 'error' -and $_.message -like 'The automatic restart could not be started: shutdown.exe failed*' }).Count -eq 1) 'activity'
+    Assert-True (@((Read-WddJson $script:Paths.ReportJson).remainingTasks) -match '^Restart: Windows still needs a restart').Count 'follow-up'
+}
+
+Test-Scenario 'restart reasons: applications that need a restart and devices with code 14 count; other device problems do not' {
+    Initialize-Embedded | Out-Null
+    Set-EngineResult 'windowsUpdate' 'Succeeded'
+    Set-EngineResult 'applications' 'CompletedWithFollowUp' @{ packages = @(@{ name = 'Visual C++ Redistributable'; packageIdentifier = 'Microsoft.VCRedist.2015+.x64'; source = 'winget'; status = 'RequiresRestart'; attempts = 1; exitCode = '0x00000BC2'; message = '3010' }) }
+    $script:SimDevices = @(@{ name = 'PCI Memory Controller'; class = ''; problemCode = 28; hardwareIds = @('PCI\VEN_8086&DEV_A2A1') })
+    $need = Get-WddRestartNeed (Get-WddSnapshot $script:Manifest $script:Paths (Read-WddJson $script:Paths.State))
+    Assert-Equal "$($need.Required) $(@($need.Reasons).Count)" 'True 1' 'one reason'
+    Assert-True ($need.Reasons[0] -like '1 application(s) need a restart to finish (Visual C++ Redistributable)') $need.Reasons[0]
+    $script:SimDevices = @()
+    Set-EngineResult 'applications' 'Succeeded'
+    Assert-True (-not (Get-WddRestartNeed (Get-WddSnapshot $script:Manifest $script:Paths (Read-WddJson $script:Paths.State))).Required) 'nothing needs a restart'
+}
+
+Test-Scenario 'Windows Update re-check: updates offered after the stage finished get one more run; what is still offered afterwards is reported, never hidden' {
+    Initialize-Embedded | Out-Null
+    Set-EngineResult 'windowsUpdate' 'Succeeded'
+    Set-EngineResult 'applications' 'Succeeded'
+    $script:SimOffered = @(@{ id = 'u1'; title = '2026-11 Cumulative Update Preview'; kbs = @('KB5099999'); optional = $true; driver = $false })
+    $n = $script:Installers.Count
+    Assert-Equal (Invoke-WddMonitor $script:Paths) 'InProgress' 'Windows Update runs once more'
+    Assert-Equal "$($script:Installers.Count) $($script:Installers[-1])" "$($n + 1) Install-UpdateEngine.ps1" 'its stage was launched again'
+    $st = Read-WddJson $script:Paths.State
+    Assert-Equal "$($st.updateRecheck.status) $($st.updateRecheck.relaunches)" 'Relaunched 1' 'recorded'
+    Assert-True (@(Read-WddActivity $script:Paths 10 | Where-Object { $_.message -like 'Windows Update offers 1 more update(s) (KB5099999 2026-11 Cumulative Update Preview); the Windows Update stage runs once more (1 of 1).' }).Count -eq 1) 'activity'
+    $script:SimNow = $script:SimNow.AddMinutes(40)
+    Set-EngineResult 'windowsUpdate' 'CompletedWithFailures'
+    Assert-Equal (Invoke-WddMonitor $script:Paths) 'Completed:CompletedWithFailures' 'finished'
+    Assert-Equal $script:Installers.Count ($n + 1) 'never a second extra run'
+    $r = Read-WddJson $script:Paths.ReportJson
+    Assert-Equal $r.updateRecheck.status 'Remaining' 'remaining'
+    Assert-True (@($r.remainingTasks) -match '^Windows Update: KB5099999 2026-11 Cumulative Update Preview is still offered').Count 'listed for the technician'
+}
+
+Test-Scenario 'Windows Update re-check that cannot search is a follow-up, never a silent success' {
+    Initialize-Embedded | Out-Null
+    Set-EngineResult 'windowsUpdate' 'Succeeded'
+    Set-EngineResult 'applications' 'Succeeded'
+    $script:SimOfferedThrows = $true
+    Assert-Equal (Invoke-WddMonitor $script:Paths) 'Completed:CompletedWithFollowUp' 'follow-up'
+    Assert-True (@((Read-WddJson $script:Paths.ReportJson).remainingTasks) -match '^Windows Update: Windows Update could not be searched again').Count 'reported'
+}
+
+Test-Scenario 'progress window without elevation: SYSTEM tasks it cannot see are never reported missing; the monitor''s own finding is shown' {
+    Initialize-Embedded | Out-Null
+    Set-EngineStatus 'windowsUpdate' 'Installing' 'Installing 2 update(s)'
+    [void] $script:SimTasks.Remove('\WindowsDeploymentBuilder\WindowsUpdate')   # what a filtered token sees
+    $script:SimNow = $script:SimNow.AddMinutes(180); Set-EngineStatus 'windowsUpdate' 'Installing' 'Installing 2 update(s)'
+    $script:SimIdentity = @{ Name = 'PC\Alex'; IsSystem = $false; IsAdmin = $false }
+    Assert-Equal (Get-WddTaskVisibility) 'Limited' 'non-elevated'
+    $script:WddTaskVisibility = 'Limited'
+    $st = Read-WddJson $script:Paths.State
+    $st.lastMonitorUtc = $script:SimNow.AddMinutes(-3).ToString('o')   # the monitor itself runs normally
+    $snap = Get-WddSnapshot $script:Manifest $script:Paths $st
+    $wu = @($snap.stages | Where-Object { $_.id -eq 'windowsUpdate' })[0]
+    Assert-Equal $wu.state 'Running' 'not Stalled'
+    Assert-Equal @($snap.needsAttention).Count 0 'no false warning'
+    Assert-True ((Format-WddStatus $script:Manifest $script:Paths $st).Text -match 'Task view      : this window runs without administrator rights') 'explained in the window'
+    # The SYSTEM monitor (full view) finds the task really gone: its finding is shown.
+    $script:WddTaskVisibility = 'Full'
+    Write-WddJson $script:Paths.Status (Get-WddSnapshot $script:Manifest $script:Paths $st)
+    $script:WddTaskVisibility = 'Limited'
+    $wu = @((Get-WddSnapshot $script:Manifest $script:Paths $st).stages | Where-Object { $_.id -eq 'windowsUpdate' })[0]
+    Assert-True ($wu.state -eq 'Stalled' -and $wu.detail -like '*(reported by the deployment monitor)') "monitor's view: $($wu.state) $($wu.detail)"
+    $script:SimIdentity = @{ Name = 'NT AUTHORITY\SYSTEM'; IsSystem = $true; IsAdmin = $true }
+    Assert-Equal (Get-WddTaskVisibility) 'Full' 'SYSTEM sees every task'
+}
+
+Test-Scenario 'devices: chipset and graphics hints name the official source by vendor; a generic display driver is a follow-up; USB descriptor failures get no driver hint' {
+    Initialize-Embedded | Out-Null
+    $script:SimDevices = @(
+        @{ name = 'SM Bus Controller'; class = ''; problemCode = 28; hardwareIds = @('PCI\VEN_8086&DEV_A323&SUBSYS_86941043') },
+        @{ name = 'PCI Memory Controller'; class = ''; problemCode = 28; hardwareIds = @('PCI\VEN_1022&DEV_1649') },
+        @{ name = 'Microsoft Basic Display Adapter'; class = 'Display'; problemCode = 0; hardwareIds = @('PCI\VEN_10DE&DEV_2484') },
+        @{ name = 'Unknown USB Device (Device Descriptor Request Failed)'; class = 'USB'; problemCode = 43; hardwareIds = @('USB\DEVICE_DESCRIPTOR_FAILURE') })
+    Set-EngineResult 'windowsUpdate' 'Succeeded'
+    Set-EngineResult 'applications' 'Succeeded'
+    Assert-Equal (Invoke-WddMonitor $script:Paths) 'Completed:CompletedWithFollowUp' 'follow-up'
+    $u = @((Read-WddJson $script:Paths.ReportJson).devices.unresolved)
+    Assert-Equal (($u | ForEach-Object { "$($_.kind)/$($_.vendor)" }) -join ',') 'NoDriver/Intel,NoDriver/AMD,GenericDriver/NVIDIA,HardwareOrConnection/' 'kinds and vendors'
+    Assert-True ($u[0].driverSource -match 'Intel Chipset Device Software') 'Intel chipset'
+    Assert-True ($u[1].driverSource -match 'AMD Chipset Software') 'AMD chipset'
+    Assert-True ($u[2].driverSource -match 'nvidia\.com/drivers') 'NVIDIA graphics'
+    Assert-Equal "$($u[3].driverSource)" '' 'no driver hint for a USB descriptor failure'
+}
+
 Test-Scenario 'integrity: a modified staged script stops the monitor; nothing is completed or run' {
     Initialize-Embedded | Out-Null
     Add-Content -LiteralPath (Join-Path $script:Paths.Package 'scripts\finalization\Complete-Deployment.ps1') -Value '# tampered'
@@ -848,7 +1085,7 @@ Test-Scenario 'Phase 5 package: recovery tool shipped, embedded, staged; manifes
     Assert-Equal "$($script:Manifest.recovery.stateSchemas.deploymentState) $($script:Manifest.recovery.stateSchemas.applicationState) $($script:Manifest.recovery.stateSchemas.applicationResult)" '2 2 2' 'state schema versions'
     Assert-Equal $script:Manifest.recovery.outcomeCodes.PausedAwaitingNetwork 30 'outcome codes'
     $cfg = Read-WddJson (Join-Path $pkgRoot 'scripts\applications\applications-config.json')
-    Assert-Equal "$($cfg.engineVersion) $($cfg.maxAttemptsPerPackage) $($cfg.retry.automatic) $($cfg.retry.baseDelaySeconds)" '1.4.0 3 True 60' 'retry configuration'
+    Assert-Equal "$($cfg.engineVersion) $($cfg.maxAttemptsPerPackage) $($cfg.retry.automatic) $($cfg.retry.baseDelaySeconds)" '1.5.0 3 True 60' 'retry configuration'
     Initialize-Embedded | Out-Null
     Assert-True (Test-Path -LiteralPath (Join-Path $script:Paths.Package 'scripts\recovery\DeploymentRecovery.ps1')) 'staged on the computer'
     Assert-True $script:Shortcuts.ContainsKey('Deployment recovery') 'recovery shortcut'
@@ -930,6 +1167,7 @@ Test-Scenario 'Phase 5 lifecycle: USB and setup files gone after staging; engine
 
 Test-Scenario 'Phase 5 recovery: retry failed after CompletedWithFailures; successful apps untouched; permanent failure needs -IncludePermanent' {
     Reset-AppSim @{ 'Git.Git' = 'fail'; 'Bitwarden.Bitwarden' = 'hash' }
+    $script:AppSim.IntegrityRetryMinutes = 0
     Initialize-Embedded | Out-Null
     Set-EngineResult 'windowsUpdate' 'Succeeded'
     [void] (Invoke-AppRuns)

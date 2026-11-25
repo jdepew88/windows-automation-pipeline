@@ -142,13 +142,6 @@ function Get-WddProgressShortcut {
 # ------------------------------------------------------------------------------------------------
 
 <# Minutes between monitor runs (the manifest's value; 15 for manifests written before 1.2.0). #>
-function Get-WddMonitorInterval {
-    param([hashtable] $Manifest)
-    $o = $Manifest.failureHandling.orchestrator
-    if ($o -is [hashtable] -and $o.ContainsKey('monitorIntervalMinutes') -and [int] $o.monitorIntervalMinutes -ge 1) { return [int] $o.monitorIntervalMinutes }
-    return 15
-}
-
 <# The LAN monitor block of the manifest (absent or disabled: $null). #>
 function Get-WddMonitorConfig {
     param([hashtable] $Manifest)
