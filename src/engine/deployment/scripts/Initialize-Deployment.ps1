@@ -19,9 +19,16 @@
          applications   Install-ApplicationEngine.ps1 registers a task for this user (WinGet is not
                         supported as SYSTEM, so this script must run as the user, not SYSTEM)
        Each launch is recorded before it starts, so a crash cannot launch a stage twice.
-    5. Registers \WindowsDeploymentBuilder\Deployment (SYSTEM; at startup and every 15 minutes),
-       which follows the engines, writes status.json and, at the end, the deployment report.
-    6. Opens a progress window for the signed-in user (unless -NoConsole).
+    5. Registers \WindowsDeploymentBuilder\Deployment (SYSTEM; at startup and every
+       monitorIntervalMinutes), which follows the engines, writes status.json, recovers stalled
+       stages within a bound and, at the end, writes the deployment report.
+    6. Orchestrator 1.2.0: registers \WindowsDeploymentBuilder\Progress for the signed-in user (at
+       every sign-in while the deployment runs; opens the read-only progress window, which can be
+       closed at any time) and, when the package enables it, \WindowsDeploymentBuilder\StatusServer
+       (SYSTEM, at startup: the read-only LAN monitor). Every task is checked after registration.
+       A stage whose task could not be registered ends initialization with InitializedWithProblems
+       (exit code 1) and the reason, never with a plain success.
+    7. Opens the progress window for the signed-in user (unless -NoConsole).
 #>
 [CmdletBinding()]
 param(
@@ -39,6 +46,9 @@ $script:InitArgs = @{ SourceMode = $SourceMode; SourceRoot = $SourceRoot; Embedd
 . (Join-Path $PSScriptRoot 'Stage-Deployment.ps1')
 
 $script:MonitorTask = @{ path = '\WindowsDeploymentBuilder\'; name = 'Deployment' }
+$script:ProgressTask = @{ path = '\WindowsDeploymentBuilder\'; name = 'Progress' }
+$script:StatusServerTask = @{ path = '\WindowsDeploymentBuilder\'; name = 'StatusServer' }
+$script:StatusServerScript = 'scripts\monitor\DeploymentStatusServer.ps1'
 
 # ------------------------------------------------------------------------------------------------
 # Adapters
@@ -61,13 +71,49 @@ function Register-WddMonitorTask {
     $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     $action = New-ScheduledTaskAction -Execute $ps -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$script`""
     $atStartup = New-ScheduledTaskTrigger -AtStartup
-    $atStartup.Delay = 'PT3M'
+    $atStartup.Delay = 'PT2M'
     $days = [Math]::Ceiling(([double] $Manifest.failureHandling.orchestrator.deadlineHours) / 24) + 1
-    $every = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(2) -RepetitionInterval (New-TimeSpan -Minutes 15) -RepetitionDuration (New-TimeSpan -Days $days)
+    $every = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(2) -RepetitionInterval (New-TimeSpan -Minutes (Get-WddMonitorInterval $Manifest)) -RepetitionDuration (New-TimeSpan -Days $days)
     $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 30)
     Register-ScheduledTask -TaskName $script:MonitorTask.name -TaskPath $script:MonitorTask.path -Action $action -Trigger @($atStartup, $every) -Principal $principal -Settings $settings -Force `
         -Description 'Windows Deployment Builder: follows the deployment stages, writes status.json and the final report, then removes itself.' | Out-Null
+}
+
+<#
+    Orchestrator 1.2.0: opens the progress window at every sign-in of the deployment user while the
+    deployment runs. It runs as that user without elevation (a viewer, not an engine); a second
+    copy exits at once (single instance), and the task is removed when the deployment finishes.
+#>
+function Register-WddProgressTask {
+    param([hashtable] $Paths, [string] $User, [int] $IntervalSeconds = 7)
+    $show = Join-Path $Paths.Package 'scripts\orchestrator\Show-DeploymentStatus.ps1'
+    $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $action = New-ScheduledTaskAction -Execute $ps -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$show`" -Watch -AutoStarted -IntervalSeconds $IntervalSeconds"
+    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $User
+    $trigger.Delay = 'PT20S'
+    $principal = New-ScheduledTaskPrincipal -UserId $User -LogonType Interactive -RunLevel Limited
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero)
+    Register-ScheduledTask -TaskName $script:ProgressTask.name -TaskPath $script:ProgressTask.path -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force `
+        -Description 'Windows Deployment Builder: opens the read-only deployment progress window at sign-in while the deployment runs. Closing the window does not stop the deployment. Removed when the deployment finishes.' | Out-Null
+}
+
+<#
+    Orchestrator 1.2.0: the read-only LAN monitor (DeploymentStatusServer.ps1) as SYSTEM, started at
+    every startup and restarted if it stops. It serves status only; it ends itself after the
+    deployment (see the script).
+#>
+function Register-WddStatusServerTask {
+    param([hashtable] $Paths)
+    $server = Join-Path $Paths.Package $script:StatusServerScript
+    $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $action = New-ScheduledTaskAction -Execute $ps -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$server`""
+    $trigger = New-ScheduledTaskTrigger -AtStartup
+    $trigger.Delay = 'PT1M'
+    $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 5 -RestartInterval (New-TimeSpan -Minutes 1)
+    Register-ScheduledTask -TaskName $script:StatusServerTask.name -TaskPath $script:StatusServerTask.path -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force `
+        -Description 'Windows Deployment Builder: read-only deployment monitor (HTTP). Serves status only; removes itself after the deployment.' | Out-Null
 }
 
 function Start-WddConsole {
@@ -95,9 +141,52 @@ function Get-WddProgressShortcut {
 # Initialization
 # ------------------------------------------------------------------------------------------------
 
+<# Minutes between monitor runs (the manifest's value; 15 for manifests written before 1.2.0). #>
+function Get-WddMonitorInterval {
+    param([hashtable] $Manifest)
+    $o = $Manifest.failureHandling.orchestrator
+    if ($o -is [hashtable] -and $o.ContainsKey('monitorIntervalMinutes') -and [int] $o.monitorIntervalMinutes -ge 1) { return [int] $o.monitorIntervalMinutes }
+    return 15
+}
+
+<# The LAN monitor block of the manifest (absent or disabled: $null). #>
+function Get-WddMonitorConfig {
+    param([hashtable] $Manifest)
+    if (-not $Manifest.ContainsKey('monitor') -or $Manifest.monitor -isnot [hashtable] -or -not $Manifest.monitor['enabled']) { return $null }
+    return $Manifest.monitor
+}
+
+<#
+    Registers the viewer tasks that follow the deployment user and the LAN monitor, and checks that
+    each one exists afterwards. Returns the problems (empty when everything is registered).
+#>
+function Register-WddHelperTasks {
+    param([hashtable] $Manifest, [hashtable] $Paths, [string] $User)
+    $problems = @()
+    if ($User -and $User -notmatch '(?i)^(NT AUTHORITY\\)?SYSTEM$') {
+        try { Register-WddProgressTask $Paths $User } catch { $problems += "progress window task: $($_.Exception.Message)" }
+        if (-not (Get-WddTask $script:ProgressTask.path $script:ProgressTask.name) -and -not ($problems -match 'progress window')) { $problems += 'progress window task: not found after registration' }
+    }
+    if (Get-WddMonitorConfig $Manifest) {
+        if (-not (Test-Path -LiteralPath (Join-Path $Paths.Package $script:StatusServerScript))) { $problems += "LAN monitor: $($script:StatusServerScript) is missing from the package" }
+        else {
+            try { Register-WddStatusServerTask $Paths } catch { $problems += "LAN monitor task: $($_.Exception.Message)" }
+            if (Get-WddTask $script:StatusServerTask.path $script:StatusServerTask.name) {
+                try { Start-WddTask $script:StatusServerTask.path $script:StatusServerTask.name } catch { Write-WddLog "Could not start the LAN monitor now; it starts at the next startup: $($_.Exception.Message)" 'WARN' }
+            } elseif (-not ($problems -match 'LAN monitor')) { $problems += 'LAN monitor task: not found after registration' }
+        }
+    }
+    foreach ($p in $problems) { Write-WddLog "Helper task: $p" 'WARN' }
+    # One problem per pipeline object; callers collect them with @().
+    return $problems
+}
+
 function New-WddState {
     param([hashtable] $Manifest, [string] $SourceMode, [hashtable] $Identity)
     $now = Get-WddNow
+    $o = $Manifest.failureHandling.orchestrator
+    $boot = $null
+    try { $boot = (Get-WddBootTime).ToString('o') } catch { }
     @{
         schemaVersion        = 2
         packageId            = $Manifest.packageId
@@ -109,6 +198,10 @@ function New-WddState {
         initializedBy        = $Identity.Name
         deadlineUtc          = $now.AddHours([double] $Manifest.failureHandling.orchestrator.deadlineHours).ToString('o')
         stalledAfterMinutes  = [int] $Manifest.failureHandling.orchestrator.stalledAfterMinutes
+        # Orchestrator 1.2.0: no-progress limit for long Windows Update phases, restart history.
+        longOperationMinutes = $(if ($o -is [hashtable] -and $o.ContainsKey('longOperationMinutes')) { [int] $o.longOperationMinutes } else { 240 })
+        lastBootUtc          = $boot
+        restarts             = @()
         stagedFiles          = @()
         stages               = @{}
         monitorRuns          = 0
@@ -236,16 +329,30 @@ function Invoke-WddInitialize {
 
         $state.status = 'InProgress'
         Save-WddState $Paths $state
-        try { Register-WddMonitorTask $Paths $Manifest }
-        catch {
+        $monitorError = $null
+        try { Register-WddMonitorTask $Paths $Manifest } catch { $monitorError = $_.Exception.Message }
+        if (-not $monitorError -and -not (Get-WddTask $script:MonitorTask.path $script:MonitorTask.name)) { $monitorError = 'the task was not found after registration.' }
+        if ($monitorError) {
             # Without the monitor nothing follows the stages: say so instead of failing silently.
-            $state.message = "The monitor task $($script:MonitorTask.path)$($script:MonitorTask.name) could not be registered: $($_.Exception.Message) Run Resume-Deployment.ps1 as administrator."
+            $state.message = "The monitor task $($script:MonitorTask.path)$($script:MonitorTask.name) could not be registered: $monitorError Run Resume-Deployment.ps1 as administrator."
             Save-WddState $Paths $state
             Write-WddLog $state.message 'ERROR'
             Write-WddEvent 3002 "Deployment $($Manifest.packageId): $($state.message)" 'Error'
             return 'MonitorRegistrationFailed'
         }
-        Write-WddLog "Registered $($script:MonitorTask.path)$($script:MonitorTask.name) (SYSTEM; at startup and every 15 minutes)."
+        Write-WddLog "Registered $($script:MonitorTask.path)$($script:MonitorTask.name) (SYSTEM; at startup and every $(Get-WddMonitorInterval $Manifest) minutes)."
+        $helperProblems = @(Register-WddHelperTasks $Manifest $Paths ([string] $identity.Name))
+        # Orchestrator 1.2.0: initialization is complete only when every stage task exists.
+        $notLaunched = @(Get-WddEngineStages $Manifest | Where-Object { [string] $state.stages[$_.id].launchResult -ne 'Launched' })
+        if ($notLaunched.Count) {
+            $state.message = "Initialized, but $($notLaunched.Count) stage(s) could not be started: $(($notLaunched | ForEach-Object { "$($_.name): $($state.stages[$_.id].message)" }) -join ' ') The monitor retries automatically where it can; see the progress window."
+            Write-WddLog $state.message 'ERROR'
+            Write-WddEvent 3002 "Deployment $($Manifest.packageId): $($state.message)" 'Warning'
+        } elseif ($helperProblems.Count) {
+            $state.message = "The deployment runs, but a helper task could not be registered: $($helperProblems -join '; ')"
+        }
+        Save-WddState $Paths $state
+        Add-WddActivity $Paths $(if ($notLaunched.Count) { $state.message } else { "Deployment started: $(@(Get-WddEngineStages $Manifest).Count) stage(s) scheduled ($((Get-WddEngineStages $Manifest | ForEach-Object { $_.name }) -join ', '))." }) $(if ($notLaunched.Count) { 'error' } else { 'info' })
         $snapshot = Get-WddSnapshot $Manifest $Paths $state
         Write-WddJson $Paths.Status $snapshot
         try {
@@ -259,8 +366,14 @@ function Invoke-WddInitialize {
             catch { Write-WddLog "Could not create the recovery shortcut: $($_.Exception.Message)" 'WARN' }
         }
         Write-WddEvent 3000 "Deployment $($Manifest.packageId) started. Status: $($Paths.Status)."
-        try { Start-WddTask $script:MonitorTask.path $script:MonitorTask.name } catch { Write-WddLog "Could not start the monitor now; it runs within 15 minutes: $($_.Exception.Message)" 'WARN' }
-        if (-not $NoConsole) { try { Start-WddConsole $Paths } catch { Write-WddLog "Could not open the progress window: $($_.Exception.Message)" 'WARN' } }
+        try { Start-WddTask $script:MonitorTask.path $script:MonitorTask.name } catch { Write-WddLog "Could not start the monitor now; it runs within $(Get-WddMonitorInterval $Manifest) minutes: $($_.Exception.Message)" 'WARN' }
+        if (-not $NoConsole) {
+            # The progress task opens the window without elevation (single instance); a direct start is the fallback.
+            $opened = $false
+            if (Get-WddTask $script:ProgressTask.path $script:ProgressTask.name) { try { Start-WddTask $script:ProgressTask.path $script:ProgressTask.name; $opened = $true } catch { Write-WddLog "Could not start the progress task: $($_.Exception.Message)" 'WARN' } }
+            if (-not $opened) { try { Start-WddConsole $Paths } catch { Write-WddLog "Could not open the progress window: $($_.Exception.Message)" 'WARN' } }
+        }
+        if ($notLaunched.Count) { return 'InitializedWithProblems' }
         return 'Initialized'
     } finally {
         Exit-WddMutex $mutex
@@ -280,7 +393,9 @@ if ($script:InitMain) {
     }
     $paths = Get-WddPaths $manifest.dataRoot
     $outcome = Invoke-WddInitialize $manifest $manifestPath $a.SourceMode $root $a.EmbeddedRoot $paths -NoConsole:$a.NoConsole
-    Write-Output "Deployment: $outcome. Log: $($paths.Log)"
+    $detail = ''
+    if ($outcome -eq 'InitializedWithProblems') { $s = (Read-WddDeploymentState $paths).State; if ($s) { $detail = " $($s.message)" } }
+    Write-Output "Deployment: $outcome.$detail Log: $($paths.Log)"
     if ($outcome -in 'Initialized', 'AlreadyCompleted', 'Busy') { exit 0 }
     exit 1
 }

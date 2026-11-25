@@ -115,16 +115,18 @@ describe('engine configuration', () => {
       dataRoot: 'C:\\ProgramData\\WindowsDeploymentBuilder',
       drivers: 'include',
       featureUpdates: 'skip',
-      optionalUpdates: 'skip',
+      // Recommended and optional updates (cumulative previews, optional drivers), three attempts each.
+      optionalUpdates: 'install',
       microsoftUpdate: false,
       maxReboots: 10,
-      maxAttemptsPerUpdate: 2,
+      maxAttemptsPerUpdate: 3,
       maxRuntimeHours: 6,
       networkWaitMinutes: 15,
       confirmationScans: 1,
       resetComponentsOnce: true,
       rebootWarningSeconds: 60,
       lockWaitMinutes: 60,
+      retryDelaySeconds: 120,
       excludedKbs: [],
     });
   });

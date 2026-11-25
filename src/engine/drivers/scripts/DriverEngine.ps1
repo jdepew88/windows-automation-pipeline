@@ -526,6 +526,21 @@ function Test-WdbRestartPending {
     return $false
 }
 
+<#
+    Appends one event to the deployment's activity feed <dataRoot>\Deployment\activity.jsonl
+    (retries, failures and restarts, for the progress window and the LAN monitor). Best effort:
+    the feed is information, never a reason for an installation to fail.
+#>
+function Add-WdbActivity {
+    param([string] $DataRoot, [string] $Source, [string] $Message, [string] $Level = 'info')
+    try {
+        $dir = Join-Path $DataRoot 'Deployment'
+        if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        $line = ([ordered]@{ utc = [DateTime]::UtcNow.ToString('o'); level = $Level; source = $Source; message = $Message } | ConvertTo-Json -Compress)
+        [System.IO.File]::AppendAllText((Join-Path $dir 'activity.jsonl'), $line + "`r`n", (New-Object System.Text.UTF8Encoding($false)))
+    } catch { }
+}
+
 # endregion WDB coordination
 
 # ------------------------------------------------------------------------------------------------

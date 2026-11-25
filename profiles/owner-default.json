@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 7,
+  "schemaVersion": 8,
   "profileName": "Owner default",
   "setup": {
     "languageMode": "unattended",
@@ -78,10 +78,10 @@
     "enabled": true,
     "drivers": "followPolicy",
     "featureUpdates": "skip",
-    "optionalUpdates": "skip",
+    "optionalUpdates": "install",
     "microsoftUpdate": false,
     "maxReboots": 10,
-    "maxAttemptsPerUpdate": 2,
+    "maxAttemptsPerUpdate": 3,
     "maxRuntimeHours": 6,
     "networkWaitMinutes": 15,
     "confirmationScans": 1,
@@ -157,6 +157,11 @@
     "networkRequirement": "auto",
     "optionalApps": [],
     "customerNotes": ""
+  },
+  "monitoring": {
+    "enabled": true,
+    "lanAccess": false,
+    "port": 8765
   },
   "system": {
     "disableFastStartup": true,

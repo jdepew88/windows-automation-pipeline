@@ -28,6 +28,8 @@ const Attempt = z
     endUtc: z.string().nullable().optional(),
     result: z.string(),
     exitCode: z.string().optional(),
+    /** Engine 1.4.0: the package installer's own exit code, when WinGet reports one. */
+    installerExitCode: z.string().optional(),
     class: z.string(),
     countsTowardLimit: z.boolean(),
     nextAction: z.string(),
@@ -62,6 +64,8 @@ const PackageResult = z
     status: z.enum(PACKAGE_STATUSES),
     attempts: z.number().int().min(0),
     exitCode: z.string(),
+    /** Engine 1.4.0: the package installer's own exit code, when WinGet reports one. */
+    installerExitCode: z.string().optional(),
     message: z.string(),
     timestampUtc: z.string(),
     ...Resilience,
@@ -213,7 +217,7 @@ export const RESULTS_JSON_SCHEMA = {
     },
     packages: {
       type: 'array',
-      items: item({ key: str, name: str, packageIdentifier: str, source: str }, ['key', 'name', 'packageIdentifier', 'source', 'status', 'attempts', 'exitCode', 'message', 'timestampUtc']),
+      items: item({ key: str, name: str, packageIdentifier: str, source: str, installerExitCode: str }, ['key', 'name', 'packageIdentifier', 'source', 'status', 'attempts', 'exitCode', 'message', 'timestampUtc']),
     },
     additionalSoftware: { type: 'array', items: item({ id: str, name: str }, ['id', 'name', 'status', 'attempts', 'exitCode', 'message', 'timestampUtc']) },
     followUp: { type: 'array', items: str },
@@ -319,4 +323,6 @@ export const WINGET_EXIT_CODES: Record<string, { status: (typeof PACKAGE_STATUSE
   '0x8A150104': { status: 'Failed', retry: true, restart: 'none', symbol: 'INSTALL_MISSING_DEPENDENCY' , class: 'Transient' },
   '0x8A150110': { status: 'Failed', retry: true, restart: 'none', symbol: 'INSTALL_DEPENDENCIES' , class: 'Transient' },
   '0x8A150106': { status: 'Failed', retry: true, restart: 'none', symbol: 'INSTALL_INSUFFICIENT_MEMORY' , class: 'Resource' },
+  // Engine 1.4.0: the package's own installer failed; its exit code is kept separately (installerExitCode).
+  '0x8A150006': { status: 'Failed', retry: true, restart: 'none', symbol: 'SHELLEXEC_INSTALL_FAILED' , class: 'Unknown' },
 };

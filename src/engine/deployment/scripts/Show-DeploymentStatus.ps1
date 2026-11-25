@@ -5,12 +5,17 @@
 
 .DESCRIPTION
     Reads the deployment state and what each engine wrote, live (it does not wait for the monitor):
-    current stage, finished stages, the application being installed, applications remaining,
-    pending restart, warnings, failures and whether a person needs to act.
+    current stage, what each stage is doing and why it waits, when it last made progress, the
+    application being installed, applications remaining, pending restart, recent activity
+    (restarts, retries, failures, recoveries), whether a person needs to act, and the address of
+    the LAN monitor when the package enables it.
 
-    -Watch refreshes every 15 seconds until the deployment has finished. The window that opens
-    after the first sign-in runs this with -Watch; it can be closed at any time without affecting
-    the deployment.
+    -Watch refreshes every 7 seconds until the deployment has finished. Orchestrator 1.2.0: the
+    task \WindowsDeploymentBuilder\Progress opens it with -Watch -AutoStarted at every sign-in of
+    the deployment user while the deployment runs. Only one window runs per session (a second one
+    exits at once). It is a viewer: closing it never affects the deployment, and it stops opening
+    once the deployment has finished (the task is removed then; -AutoStarted also exits at once
+    when the deployment is already complete).
 
     Phase 9: when the deployment verifies itself and its configuration asks for it, the watching
     window opens the technician health report once, when verification has written it (never at a
@@ -19,12 +24,46 @@
 [CmdletBinding()]
 param(
     [switch] $Watch,
-    [int] $IntervalSeconds = 15
+    [int] $IntervalSeconds = 7,
+    [switch] $AutoStarted
 )
 
 $script:ShowMain = $MyInvocation.InvocationName -ne '.'
-$script:ShowArgs = @{ Watch = [bool] $Watch; Interval = $IntervalSeconds }
+$script:ShowArgs = @{ Watch = [bool] $Watch; Interval = [Math]::Max(2, $IntervalSeconds); AutoStarted = [bool] $AutoStarted }
 . (Join-Path $PSScriptRoot '..\common\DeploymentCommon.ps1')
+
+$script:ProgressMutexName = 'Local\WindowsDeploymentBuilder-Progress'
+$script:ConditionText = @{ active = 'Working'; waiting = 'Waiting'; idle = 'Idle'; blocked = 'NEEDS ATTENTION'; finished = 'Finished' }
+
+<# The LAN monitor's address and token as the status server wrote them (state\monitor.json), or $null. #>
+function Get-WddMonitorInfo {
+    param([hashtable] $Paths)
+    if (-not $Paths.ContainsKey('MonitorInfo')) { return $null }
+    $m = Read-WddJson $Paths.MonitorInfo
+    if ($m -is [hashtable] -and $m['token'] -and $m['port']) { return $m }
+    return $null
+}
+
+<# Lines describing how to reach the LAN monitor (empty when the package has none). #>
+function Format-WddMonitorLines {
+    param([hashtable] $Manifest, [hashtable] $Paths)
+    $l = @()
+    if (-not $Manifest.ContainsKey('monitor') -or $Manifest.monitor -isnot [hashtable] -or -not $Manifest.monitor['enabled']) { return }
+    $m = Get-WddMonitorInfo $Paths
+    if (-not $m) { return 'Monitor        : starting (the address appears here once it runs)' }
+    if ([string] $m['mode'] -in 'stopped', 'error') { return "Monitor        : $($m['mode']). $($m['message'])" }
+    $fragment = "/#t=$($m['token'])"
+    $lan = @(@($m['urls']) | Where-Object { $_ -and $_ -notmatch '127\.0\.0\.1|localhost' })
+    if ($m['lanAccess'] -and $lan.Count) {
+        $l += "Monitor        : $($lan[0])$fragment"
+        foreach ($u in @($lan | Select-Object -Skip 1)) { $l += "                 $u$fragment" }
+        $l += '                 Open it in a browser on another computer, phone or tablet on this network (read-only).'
+    } else {
+        $l += "Monitor        : http://127.0.0.1:$($m['port'])$fragment  (this computer only)"
+    }
+    if ($m['message']) { $l += "                 $($m['message'])" }
+    return $l
+}
 
 function Format-WddStatus {
     param([hashtable] $Manifest, [hashtable] $Paths, [hashtable] $State)
@@ -33,28 +72,43 @@ function Format-WddStatus {
     $l.Add('Windows Deployment Builder - deployment progress')
     $l.Add('================================================')
     $overall = if ($State -and $State.status -eq 'Completed') { "Finished: $($State.overall)" } elseif ($State) { $State.status } else { 'Not started' }
-    $l.Add("Deployment     : $overall")
+    $cond = $(if ($s.Contains('condition')) { [string] $s.condition } else { '' })
+    $l.Add("Deployment     : $overall$(if ($cond -and $cond -ne 'complete') { " ($cond)" })")
     $l.Add("Outcome        : $($s.outcome) (code $($s.outcomeCode)) $($s.outcomeDetail)")
     if ($State -and $State.message) { $l.Add("                 $($State.message)") }
     if ($State) { $l.Add("Started (UTC)  : $($State.initializedUtc)   deadline: $($State.deadlineUtc)") }
     $l.Add("Current stage  : $(if ($s.currentStage) { $s.currentStage } else { '-' })")
+    $l.Add("Last activity  : $(if ($s.Contains('lastActivityUtc') -and $s.lastActivityUtc) { "$(Format-WddAge $s.lastActivityUtc) ($($s.lastActivityUtc))" } else { 'none reported yet' })")
     $l.Add("Restart pending: $(if ($s.restartPending) { 'yes (a restart has been scheduled)' } else { 'no' })")
+    if ($s.Contains('recovering') -and $s.recovering) { $l.Add('Recovering     : Windows restarted or a stage was recovered; unfinished tasks are being checked.') }
+    foreach ($m in Format-WddMonitorLines $Manifest $Paths) { $l.Add($m) }
     $l.Add('')
-    $l.Add(('{0,-22} {1,-12} {2,-22} {3}' -f 'Stage', 'State', 'Status', 'Detail'))
+    $l.Add(('{0,-22} {1,-16} {2}' -f 'Stage', 'State', 'What is happening'))
     foreach ($st in @($s.stages)) {
-        $l.Add(('{0,-22} {1,-12} {2,-22} {3}' -f $st.name, $st.state, $st.status, $st.detail))
+        $c = $(if ($st.Contains('condition') -and $script:ConditionText.ContainsKey([string] $st.condition)) { $script:ConditionText[[string] $st.condition] } else { $st.state })
+        $what = $(if ($st.Contains('activity') -and $st.activity) { $st.activity } else { "$($st.status) $($st.detail)".Trim() })
+        $l.Add(('{0,-22} {1,-16} {2}' -f $st.name, $c, $what))
         if ($st.id -eq 'applications') {
-            if ($st.current) { $l.Add("  installing now: $($st.current)") }
-            if ($null -ne $st.total -and [int] $st.total -gt 0) { $l.Add("  applications: $($st.done) of $($st.total) done, $([int] $st.total - [int] $st.done) remaining") }
+            if ($st.current) { $l.Add("  installing now: $($st.current) (progress unavailable: WinGet does not report it)") }
+            if ($null -ne $st.total -and [int] $st.total -gt 0) { $l.Add("  applications: $($st.done) of $($st.total) done, $([int] $st.total - [int] $st.done) remaining$(if ($st.Contains('counts') -and $st.counts.Contains('failed') -and [int] $st.counts.failed) { ", $($st.counts.failed) failed" })") }
         }
+        if ($st.Contains('lastError') -and $st.lastError -and $st.state -ne 'Final') { $l.Add("  last problem ($(Format-WddAge $st.lastErrorUtc)): $($st.lastError)") }
         if ($st.reboots) { $l.Add("  restarts so far: $($st.reboots)") }
-        if ($st.idle) { $l.Add("  note: $($st.idle)") }
         if ($st.outstanding) { $l.Add("  outstanding operations: $($st.outstanding) (retry them with the deployment recovery tool)") }
     }
-    if ($s.drivers.state -eq 'NotPartOfDeployment') { $l.Add(('{0,-22} {1,-12} {2,-22} {3}' -f 'Hardware & drivers', 'Off', '', 'Not part of this deployment')) }
-    elseif ($s.drivers.state -eq 'NotImplemented') { $l.Add(('{0,-22} {1,-12} {2,-22} {3}' -f 'Manufacturer drivers', 'NotImplemented', '', 'Not part of this version')) }
+    if ($s.drivers.state -eq 'NotPartOfDeployment') { $l.Add(('{0,-22} {1,-16} {2}' -f 'Hardware & drivers', 'Off', 'Not part of this deployment')) }
+    elseif ($s.drivers.state -eq 'NotImplemented') { $l.Add(('{0,-22} {1,-16} {2}' -f 'Manufacturer drivers', 'NotImplemented', 'Not part of this version')) }
     if ($s.Contains('networkDriverMissing') -and $s.networkDriverMissing) { $l.Add("NETWORK: $($s.networkDriverMissing)") }
     $l.Add('')
+    $recent = @(Read-WddActivity $Paths 6)
+    if ($recent.Count) {
+        $l.Add('Recent activity')
+        foreach ($e in $recent) {
+            $t = ConvertTo-WddDate $e['utc']
+            $l.Add(('  {0}  {1}' -f $(if ($t) { $t.ToLocalTime().ToString('HH:mm:ss') } else { '--:--:--' }), $e['message']))
+        }
+        $l.Add('')
+    }
     if (@($s.needsAttention).Count) {
         $l.Add('NEEDS ATTENTION')
         foreach ($n in $s.needsAttention) { $l.Add("  - $n") }
@@ -78,30 +132,61 @@ function Get-WddHealthReportToOpen {
     return ''
 }
 
+<#
+    Orchestrator 1.2.0: one progress window per session. Returns the held mutex, or $null when
+    another window already shows the progress.
+#>
+function Enter-WddProgressWindow {
+    $created = $false
+    $m = New-Object System.Threading.Mutex($false, $script:ProgressMutexName, [ref] $created)
+    try { if ($m.WaitOne(0)) { return $m } } catch [System.Threading.AbandonedMutexException] { return $m }
+    $m.Dispose()
+    return $null
+}
+
+<# What an automatically opened window does: $true = show the progress, $false = exit (finished or not started). #>
+function Test-WddShowAutomatically {
+    param($State)
+    return [bool] ($State -and [string] $State.status -notin 'Completed', 'StagingFailed')
+}
+
 if ($script:ShowMain) {
     $package = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
     $manifest = Read-WddManifest (Join-Path $package 'deployment-manifest.json')
     $paths = Get-WddPaths $manifest.dataRoot
-    do {
-        $state = (Read-WddDeploymentState $paths).State
-        $out = Format-WddStatus $manifest $paths $state
-        if ($script:ShowArgs.Watch) { Clear-Host }
-        Write-Output $out.Text
-        if (-not $script:ShowArgs.Watch -or $out.Done) { break }
-        Write-Output ''
-        Write-Output "Refreshing every $($script:ShowArgs.Interval) s. You can close this window; the deployment continues."
-        Start-Sleep -Seconds $script:ShowArgs.Interval
-    } while ($true)
-    if ($script:ShowArgs.Watch -and $state -and $state.status -eq 'Completed') {
-        # Verification runs right after completion: wait for its report (at most 5 minutes), open it once.
-        $html = ''
-        for ($i = 0; $i -lt 20 -and -not $html; $i++) { $html = Get-WddHealthReportToOpen $paths $state; if (-not $html) { Start-Sleep -Seconds 15; $state = (Read-WddDeploymentState $paths).State } }
-        if ($html) {
-            Write-Output ''
-            Write-Output "Health report: $html"
-            try { Start-Process -FilePath (Join-Path $env:SystemRoot 'explorer.exe') -ArgumentList "`"$html`"" } catch { Write-Output "Open it by hand: $($_.Exception.Message)" }
-        }
+    $state = (Read-WddDeploymentState $paths).State
+    # Opened at sign-in: nothing to show once the deployment has finished.
+    if ($script:ShowArgs.AutoStarted -and -not (Test-WddShowAutomatically $state)) { exit 0 }
+    $window = $null
+    if ($script:ShowArgs.Watch) {
+        $window = Enter-WddProgressWindow
+        if (-not $window) { Write-Output 'The deployment progress window is already open.'; exit 0 }
+        try { $Host.UI.RawUI.WindowTitle = 'Deployment Progress - Windows Deployment Builder' } catch { }
     }
-    if ($script:ShowArgs.Watch) { Write-Output ''; Read-Host 'Press Enter to close' | Out-Null }
+    try {
+        do {
+            $state = (Read-WddDeploymentState $paths).State
+            $out = Format-WddStatus $manifest $paths $state
+            if ($script:ShowArgs.Watch) { Clear-Host }
+            Write-Output $out.Text
+            if (-not $script:ShowArgs.Watch -or $out.Done) { break }
+            Write-Output ''
+            Write-Output "Refreshing every $($script:ShowArgs.Interval) s ($((Get-Date).ToString('HH:mm:ss'))). You can close this window; the deployment continues."
+            Start-Sleep -Seconds $script:ShowArgs.Interval
+        } while ($true)
+        if ($script:ShowArgs.Watch -and $state -and $state.status -eq 'Completed') {
+            # Verification runs right after completion: wait for its report (at most 5 minutes), open it once.
+            $html = ''
+            for ($i = 0; $i -lt 20 -and -not $html; $i++) { $html = Get-WddHealthReportToOpen $paths $state; if (-not $html) { Start-Sleep -Seconds 15; $state = (Read-WddDeploymentState $paths).State } }
+            if ($html) {
+                Write-Output ''
+                Write-Output "Health report: $html"
+                try { Start-Process -FilePath (Join-Path $env:SystemRoot 'explorer.exe') -ArgumentList "`"$html`"" } catch { Write-Output "Open it by hand: $($_.Exception.Message)" }
+            }
+        }
+        if ($script:ShowArgs.Watch) { Write-Output ''; Read-Host 'Press Enter to close' | Out-Null }
+    } finally {
+        if ($window) { try { $window.ReleaseMutex() } catch { }; $window.Dispose() }
+    }
     exit 0
 }

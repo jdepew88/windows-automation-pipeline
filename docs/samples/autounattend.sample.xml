@@ -519,12 +519,14 @@ $scripts = @(
 
     Final states (result.json, Application event log source "WindowsDeploymentBuilder"):
       Succeeded               Nothing applicable remains.
+      CompletedWithFollowUp   Everything else is installed; some updates need a person to
+                              finish them (Windows reported that they need an interactive user).
       CompletedWithFailures   Everything else is installed, but some updates failed repeatedly
                               and were given up.
       Failed                  A limit was reached (reboots, runtime, errors) or scanning failed.
       Offline                 No network was available before the runtime limit.
 
-    On Succeeded and CompletedWithFailures the marker &lt;dataRoot&gt;\state\windows-update.done is
+    On Succeeded, CompletedWithFollowUp and CompletedWithFailures the marker &lt;dataRoot&gt;\state\windows-update.done is
     written for the deployment orchestrator. The scheduled task is removed on every final state.
 
     Coordination (1.1.0, Phase 3): updates are installed and restarts are scheduled only while
@@ -532,6 +534,26 @@ $scripts = @(
     never restarts the computer during an application installation. When the lock stays busy the
     engine exits with WaitingForLock or RebootDeferred (not final) and tries again at the next
     start or hourly trigger. The final states above are unchanged.
+
+    Engine 1.2.0 (deployment reliability):
+      - Selection: everything Windows Update offers as applicable (IsInstalled=0, IsHidden=0) is
+        installed: recommended updates, and with optionalUpdates=install the optional ones
+        (IUpdate.BrowseOnly: optional cumulative previews and optional driver updates). Feature
+        updates (category Upgrades, "Feature update to Windows ..." enablement packages) and Insider
+        builds are never installed unless featureUpdates=install (Insider: never).
+      - An update that CAN request user input (InstallationBehavior.CanRequestUserInput) is no
+        longer skipped on that flag alone: it is installed on its own, quietly (ForceQuiet). Only
+        when Windows answers that it needs an interactive user, or aborts it, is it reported as
+        requiring interaction (CompletedWithFollowUp), and never retried in a loop.
+      - Each update is downloaded on its own, so a failed download does not hold back the others
+        and the status names the update being downloaded. A transient failure is retried after a
+        delay, up to maxAttemptsPerUpdate attempts in total (download and installation count);
+        a permanent failure (for example WU_E_NOT_APPLICABLE) is not retried. The HRESULT and its
+        name are kept.
+      - status.json carries the current update, the attempt, the last error and the counts.
+        Download progress (bytes, speed) is not reported: the synchronous WUA calls used here do
+        not expose it, and nothing is estimated.
+    New final state: CompletedWithFollowUp (only updates that need a person remain).
 #&gt;
 [CmdletBinding()]
 param(
@@ -543,13 +565,39 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-$script:EngineVersion = '1.1.0'
+$script:EngineVersion = '1.2.0'
 $script:UpgradeCategoryId = '3689bdc8-b205-4af4-8d4b-a63924c5e9d5'   # WUA category "Upgrades"
 $script:MicrosoftUpdateServiceId = '7971f918-a847-4430-9279-4a52d1efe18d'
 $script:EventSource = 'WindowsDeploymentBuilder'
 $script:Session = $null
 $script:LogFile = $null
 $script:StatusFile = $null
+# What the engine is doing right now, added to every status.json (current update, attempt, last error).
+$script:Activity = @{}
+
+&lt;#
+    Windows Update Agent and Win32 results (wuerror.h, winerror.h, winhttp.h) that appear when
+    downloading or installing, with their documented names. Permanent ones are never retried: the
+    update is not applicable, or it can only be finished by a person.
+#&gt;
+$script:HResults = @{
+    '0x80240016' = @('WU_E_INSTALL_NOT_ALLOWED', 'another installation is in progress or a restart is pending', $false)
+    '0x80240017' = @('WU_E_NOT_APPLICABLE', 'the update is not applicable to this computer', $true)
+    '0x80240020' = @('WU_E_NO_INTERACTIVE_USER', 'the update needs a signed-in user to finish', $true)
+    '0x80240022' = @('WU_E_ALL_UPDATES_FAILED', 'every update in the operation failed', $false)
+    '0x8024000B' = @('WU_E_CALL_CANCELLED', 'the operation was cancelled', $false)
+    '0x8024200D' = @('WU_E_UH_NEEDANOTHERDOWNLOAD', 'more content must be downloaded', $false)
+    '0x8024402C' = @('WU_E_PT_WINHTTP_NAME_NOT_RESOLVED', 'the update server name could not be resolved', $false)
+    '0x80244022' = @('WU_E_PT_HTTP_STATUS_SERVICE_UNAVAIL', 'the update service was temporarily unavailable (HTTP 503)', $false)
+    '0x80246007' = @('WU_E_DM_NOTDOWNLOADED', 'the update has not been downloaded', $false)
+    '0x80246008' = @('WU_E_DM_FAILTOCONNECTTOBITS', 'the Background Intelligent Transfer Service could not be reached', $false)
+    '0x80070422' = @('ERROR_SERVICE_DISABLED', 'a required service is disabled', $false)
+    '0x80072EE2' = @('ERROR_INTERNET_TIMEOUT', 'the connection timed out', $false)
+    '0x80072EFD' = @('ERROR_INTERNET_CANNOT_CONNECT', 'the server could not be reached', $false)
+    '0x80072F8F' = @('ERROR_INTERNET_SECURE_FAILURE', 'the secure connection failed (check the date and time)', $false)
+    '0x800F0922' = @('CBS_E_INSTALLERS_FAILED', 'the servicing stack could not apply the update', $false)
+    '0x80073701' = @('ERROR_SXS_ASSEMBLY_MISSING', 'a component the update needs is missing', $false)
+}
 
 # ------------------------------------------------------------------------------------------------
 # Small helpers (time, waiting, JSON) - kept as functions so tests can replace them.
@@ -569,6 +617,22 @@ function Format-WduHResult {
     param($HResult)
     if ($null -eq $HResult) { return '' }
     '0x{0:X8}' -f ([int64] $HResult -band [int64] 4294967295)
+}
+
+&lt;# "0x80240017 WU_E_NOT_APPLICABLE (the update is not applicable to this computer)", or the code alone. #&gt;
+function Get-WduHResultText {
+    param([string] $Hex)
+    if (-not $Hex) { return '' }
+    $m = $script:HResults[$Hex]
+    if ($m) { return "$Hex $($m[0]) ($($m[1]))" }
+    return $Hex
+}
+
+&lt;# A failure that another attempt cannot fix. #&gt;
+function Test-WduPermanentHResult {
+    param([string] $Hex)
+    $m = $script:HResults[$Hex]
+    return [bool] ($m -and $m[2])
 }
 
 function ConvertTo-WduHashtable {
@@ -623,7 +687,8 @@ function Get-WduConfig {
         optionalUpdates      = 'skip'
         microsoftUpdate      = $false
         maxReboots           = 10
-        maxAttemptsPerUpdate = 2
+        maxAttemptsPerUpdate = 3
+        retryDelaySeconds    = 120
         maxRuntimeHours      = 6
         maxErrors            = 5
         networkWaitMinutes   = 15
@@ -687,7 +752,12 @@ function Set-WduStatus {
         $o.starts = $State.starts
         $o.reboots = $State.reboots
         $o.installed = @($State.installed).Count
+        # Given up so far (permanent or out of attempts), and updates that need a person.
+        $o.failed = @($State.attempts.Values | Where-Object { $_ -and $_['gaveUp'] }).Count
     }
+    # Engine 1.2.0: what it is doing now. Download progress is never estimated (not exposed by the calls used).
+    foreach ($k in 'current', 'attempt', 'maxAttempts', 'lastError', 'lastErrorUtc', 'queued') { if ($script:Activity.ContainsKey($k)) { $o[$k] = $script:Activity[$k] } }
+    $o.progress = 'unavailable'
     try { Write-WduJson $script:StatusFile $o } catch { Write-WduLog "Could not write status: $($_.Exception.Message)" 'WARN' }
 }
 
@@ -776,20 +846,30 @@ function Get-WduAvailableUpdates {
         foreach ($c in $u.Categories) { $cats += ([string] $c.CategoryID).ToLowerInvariant() }
         $kbs = @()
         foreach ($k in $u.KBArticleIDs) { $kbs += "KB$k" }
+        $title = [string] $u.Title
         $list += @{
             Id             = [string] $u.Identity.UpdateID
             Revision       = [int] $u.Identity.RevisionNumber
-            Title          = [string] $u.Title
+            Title          = $title
             Kbs            = $kbs
             IsDriver       = ([int] $u.Type -eq 2)
-            IsUpgrade      = ($cats -contains $script:UpgradeCategoryId)
+            # A feature update by category, or an enablement package that switches the Windows version.
+            IsUpgrade      = ($cats -contains $script:UpgradeCategoryId) -or (Test-WduFeatureTitle $title)
+            IsInsider      = ($title -match '(?i)\bInsider Preview\b')
             IsOptional     = [bool] $u.BrowseOnly
             NeedsUserInput = [bool] $u.InstallationBehavior.CanRequestUserInput
             IsDownloaded   = [bool] $u.IsDownloaded
+            SizeBytes      = $(try { [int64] $u.MaxDownloadSize } catch { [int64] 0 })
             Native         = $u
         }
     }
     return , $list
+}
+
+&lt;# Titles of updates that move Windows to another version, whatever their category. #&gt;
+function Test-WduFeatureTitle {
+    param([string] $Title)
+    return ($Title -match '(?i)^\s*(Feature update to Windows|Upgrade to Windows)\b')
 }
 
 function ConvertTo-WduResultCode {
@@ -1010,6 +1090,21 @@ function Test-WdbRestartPending {
     return $false
 }
 
+&lt;#
+    Appends one event to the deployment's activity feed &lt;dataRoot&gt;\Deployment\activity.jsonl
+    (retries, failures and restarts, for the progress window and the LAN monitor). Best effort:
+    the feed is information, never a reason for an installation to fail.
+#&gt;
+function Add-WdbActivity {
+    param([string] $DataRoot, [string] $Source, [string] $Message, [string] $Level = 'info')
+    try {
+        $dir = Join-Path $DataRoot 'Deployment'
+        if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        $line = ([ordered]@{ utc = [DateTime]::UtcNow.ToString('o'); level = $Level; source = $Source; message = $Message } | ConvertTo-Json -Compress)
+        [System.IO.File]::AppendAllText((Join-Path $dir 'activity.jsonl'), $line + "`r`n", (New-Object System.Text.UTF8Encoding($false)))
+    } catch { }
+}
+
 # endregion WDB coordination
 
 # ------------------------------------------------------------------------------------------------
@@ -1037,29 +1132,54 @@ function Exit-WduMutex {
 # Planning
 # ------------------------------------------------------------------------------------------------
 
+&lt;#
+    Why an offered update is not installed now, or $null. "Can request user input" is deliberately
+    not a reason: such an update is tried quietly on its own, and only Windows' own answer
+    (WU_E_NO_INTERACTIVE_USER, Aborted) marks it as needing a person.
+#&gt;
 function Get-WduSkipReason {
     param([hashtable] $Update, [hashtable] $Config, [hashtable] $State)
+    if ($Update.ContainsKey('IsInsider') -and $Update.IsInsider) { return 'Insider Preview build (never installed)' }
     if ($Update.IsUpgrade -and $Config.featureUpdates -ne 'install') { return 'feature update (policy: skip)' }
     if ($Update.IsDriver -and $Config.drivers -ne 'include') { return 'driver (policy: exclude)' }
     if ($Update.IsOptional -and $Config.optionalUpdates -ne 'install') { return 'optional update (policy: skip)' }
     foreach ($kb in $Update.Kbs) { if ($Config.excludedKbs -contains $kb.ToUpperInvariant()) { return "excluded by configuration ($kb)" } }
-    if ($Update.NeedsUserInput) { return 'requires user input' }
     $a = $State.attempts[$Update.Id]
+    if ($a -and $a['interaction']) { return 'gave up: Windows reported that it needs a signed-in person to install it' }
+    if ($a -and $a['permanent']) { return "gave up: $(Get-WduHResultText ([string] $a.lastHResult)) (not retried)" }
     if ($a -and [int] $a.count -ge [int] $Config.maxAttemptsPerUpdate) { return "gave up after $($a.count) attempt(s)" }
     return $null
 }
 
+&lt;# "Driver", "Optional driver", "Optional", "Feature update" or "Update": how the report groups an update. #&gt;
+function Get-WduKind {
+    param([hashtable] $U)
+    $optional = [bool] $U.IsOptional
+    if ($U.IsDriver) { return $(if ($optional) { 'Optional driver' } else { 'Driver' }) }
+    if ($U.IsUpgrade) { return 'Feature update' }
+    if ($optional) { return 'Optional' }
+    return 'Update'
+}
+
 function Get-WduPlan {
     param([object[]] $Updates, [hashtable] $Config, [hashtable] $State)
-    $plan = @{ Install = @(); Skipped = @(); GaveUp = @() }
+    # Deferred: a failed download or installation waiting for its retry delay (not given up).
+    $plan = @{ Install = @(); Skipped = @(); GaveUp = @(); Interaction = @(); Deferred = @() }
     foreach ($u in $Updates) {
         $reason = Get-WduSkipReason $u $Config $State
-        if (-not $reason) { $plan.Install += $u; continue }
-        $entry = @{ id = $u.Id; title = $u.Title; kbs = @($u.Kbs); reason = $reason }
+        if (-not $reason) {
+            $a = $State.attempts[$u.Id]
+            $due = $(if ($a -and $a['nextAttemptUtc']) { ConvertTo-WduDate $a['nextAttemptUtc'] } else { $null })
+            if ($due -and $due -gt (Get-WduNow)) { $plan.Deferred += @{ Update = $u; Due = $due }; continue }
+            $plan.Install += $u
+            continue
+        }
+        $entry = @{ id = $u.Id; title = $u.Title; kbs = @($u.Kbs); reason = $reason; kind = (Get-WduKind $u) }
         if ($reason -like 'gave up*') {
             $a = $State.attempts[$u.Id]
             $entry.attempts = $a.count; $entry.lastResult = $a.lastResult; $entry.lastHResult = $a.lastHResult
-            $plan.GaveUp += $entry
+            $entry.error = Get-WduHResultText ([string] $a.lastHResult)
+            if ($a['interaction']) { $plan.Interaction += $entry } else { $plan.GaveUp += $entry }
         } else {
             $plan.Skipped += $entry
         }
@@ -1068,6 +1188,43 @@ function Get-WduPlan {
 }
 
 function Get-WduLabel { param([hashtable] $U) $kb = if (@($U.Kbs).Count) { ($U.Kbs -join ',') + ' ' } else { '' }; "$kb$($U.Title)" }
+
+&lt;#
+    Records a failed download or installation of one update and decides what happens next:
+      permanent HRESULT or Windows needs a person -&gt; given up now, not retried
+      attempts used up                             -&gt; given up (one more chance after a component reset)
+      otherwise                                    -&gt; retried after retryDelaySeconds x attempt
+    The other updates and the application stage carry on either way.
+#&gt;
+function Register-WduFailure {
+    param([hashtable] $U, [hashtable] $A, [hashtable] $Config, [string] $Step, [string] $Result, $HResult)
+    $hex = Format-WduHResult $HResult
+    $A.lastResult = $Result
+    $A.lastHResult = $hex
+    $A.lastErrorUtc = (Get-WduNow).ToString('o')
+    $max = [int] $Config.maxAttemptsPerUpdate
+    $what = $(if ($Step -eq 'download') { 'download' } else { 'install' })
+    $why = $(if ($hex) { Get-WduHResultText $hex } else { $Result })
+    $label = Get-WduLabel $U
+    if ($A['interaction']) {
+        $A.gaveUp = $true
+        $msg = "$label needs a person to install it ($why). Recorded for follow-up; the other updates continue."
+    } elseif (Test-WduPermanentHResult $hex) {
+        $A.permanent = $true; $A.gaveUp = $true
+        $msg = "Unable to $what ${label}: $why. Not retried; the other updates continue."
+    } elseif ([int] $A.count -ge $max) {
+        $A.gaveUp = $true
+        $msg = "Unable to $what ${label}: $why. Attempt $($A.count) of $max; given up. Other operations continue."
+    } else {
+        $delay = [int] $Config.retryDelaySeconds * [int] $A.count
+        $A.nextAttemptUtc = (Get-WduNow).AddSeconds($delay).ToString('o')
+        $msg = "Unable to $what ${label}: $why. Attempt $($A.count) of $max; retrying in $delay s. Other operations will continue where possible."
+    }
+    $script:Activity.lastError = $msg
+    $script:Activity.lastErrorUtc = $A.lastErrorUtc
+    Write-WduLog "  $msg" 'WARN'
+    Add-WdbActivity $Config.dataRoot 'windowsUpdate' $msg 'warning'
+}
 
 # ------------------------------------------------------------------------------------------------
 # Outcomes
@@ -1088,21 +1245,34 @@ function Complete-Wdu {
         installed     = @($State.installed)
         failed        = @(if ($Plan) { $Plan.GaveUp })
         skipped       = @(if ($Plan) { $Plan.Skipped })
+        # Engine 1.2.0: updates Windows said need a person, and the counts by kind.
+        requiresInteraction = @(if ($Plan -and $Plan.ContainsKey('Interaction')) { $Plan.Interaction })
+        counts        = [ordered]@{
+            installed         = @($State.installed).Count
+            installedOptional = @($State.installed | Where-Object { $_ -is [hashtable] -and $_['optional'] }).Count
+            installedDrivers  = @($State.installed | Where-Object { $_ -is [hashtable] -and $_['driver'] }).Count
+            failed            = @(if ($Plan) { $Plan.GaveUp }).Count
+            requiresInteraction = @(if ($Plan -and $Plan.ContainsKey('Interaction')) { $Plan.Interaction }).Count
+            skipped           = @(if ($Plan) { $Plan.Skipped }).Count
+        }
+        policy        = [ordered]@{ optionalUpdates = $Config.optionalUpdates; drivers = $Config.drivers; featureUpdates = $Config.featureUpdates; maxAttemptsPerUpdate = $Config.maxAttemptsPerUpdate }
     }
     Write-WduJson $Paths.Result $result
     $State.final = $Status
     Save-WduState $State $Paths
-    if ($Status -in 'Succeeded', 'CompletedWithFailures') {
+    if ($Status -in 'Succeeded', 'CompletedWithFollowUp', 'CompletedWithFailures') {
         if (-not (Test-Path -LiteralPath $Paths.MarkerDir)) { New-Item -ItemType Directory -Path $Paths.MarkerDir -Force | Out-Null }
         Write-WduJson $Paths.Marker ([ordered]@{ status = $Status; finishedUtc = $now; result = $Paths.Result })
     }
-    $level = switch ($Status) { 'Succeeded' { 'INFO' } 'CompletedWithFailures' { 'WARN' } default { 'ERROR' } }
-    Write-WduLog ("FINISHED: {0}. {1} Installed {2}, failed {3}, skipped {4}, reboots {5}." -f $Status, $Reason, @($result.installed).Count, @($result.failed).Count, @($result.skipped).Count, $State.reboots) $level
-    foreach ($f in $result.failed) { Write-WduLog ("  FAILED   {0} {1} ({2} attempts, last {3} {4})" -f ($f.kbs -join ','), $f.title, $f.attempts, $f.lastResult, $f.lastHResult) 'WARN' }
+    $level = switch ($Status) { 'Succeeded' { 'INFO' } 'CompletedWithFailures' { 'WARN' } 'CompletedWithFollowUp' { 'WARN' } default { 'ERROR' } }
+    Write-WduLog ("FINISHED: {0}. {1} Installed {2} (optional {3}, drivers {4}), failed {5}, need a person {6}, skipped {7}, reboots {8}." -f $Status, $Reason, @($result.installed).Count, $result.counts.installedOptional, $result.counts.installedDrivers, @($result.failed).Count, @($result.requiresInteraction).Count, @($result.skipped).Count, $State.reboots) $level
+    foreach ($f in $result.failed) { Write-WduLog ("  FAILED   {0} {1} ({2} attempts, last {3} {4})" -f ($f.kbs -join ','), $f.title, $f.attempts, $f.lastResult, (Get-WduHResultText ([string] $f.lastHResult))) 'WARN' }
+    foreach ($f in $result.requiresInteraction) { Write-WduLog ("  PERSON   {0} {1}: {2}" -f ($f.kbs -join ','), $f.title, $f.reason) 'WARN' }
     foreach ($s in $result.skipped) { Write-WduLog ("  SKIPPED  {0} {1}: {2}" -f ($s.kbs -join ','), $s.title, $s.reason) }
-    $eventId = switch ($Status) { 'Succeeded' { 1100 } 'CompletedWithFailures' { 1101 } 'Failed' { 1102 } default { 1103 } }
-    $entryType = switch ($Status) { 'Succeeded' { 'Information' } 'CompletedWithFailures' { 'Warning' } default { 'Error' } }
+    $eventId = switch ($Status) { 'Succeeded' { 1100 } 'CompletedWithFailures' { 1101 } 'CompletedWithFollowUp' { 1104 } 'Failed' { 1102 } default { 1103 } }
+    $entryType = switch ($Status) { 'Succeeded' { 'Information' } 'CompletedWithFailures' { 'Warning' } 'CompletedWithFollowUp' { 'Warning' } default { 'Error' } }
     Write-WduEvent $eventId "Windows Update automation finished: $Status. $Reason See $($Paths.Result)." $entryType
+    Add-WdbActivity $Config.dataRoot 'windowsUpdate' ("Windows Update finished: {0}. {1} Installed {2} update(s) ({3} optional, {4} drivers)." -f $Status, $Reason, @($result.installed).Count, $result.counts.installedOptional, $result.counts.installedDrivers) $(if ($Status -eq 'Succeeded') { 'info' } elseif ($Status -in 'CompletedWithFollowUp', 'CompletedWithFailures') { 'warning' } else { 'error' })
     Set-WduStatus $Status $Reason $State
     Unregister-WduTask $Config
     return "Finished:$Status"
@@ -1126,6 +1296,7 @@ function Request-WduReboot {
         Write-WduLog "Restart $($State.reboots)/$($Config.maxReboots): $Reason. Resuming after boot."
         Set-WduStatus 'Rebooting' $Reason $State
         Write-WduEvent 1001 "Restarting to continue Windows Update ($Reason)."
+        Add-WdbActivity $Config.dataRoot 'windowsUpdate' "Windows Update restarts the computer ($Reason); updating continues after the restart (restart $($State.reboots) of at most $($Config.maxReboots))." 'info'
         Set-WdbRestartPending $Config.dataRoot 'WindowsUpdate' $Reason
         Invoke-WduReboot -WarningSeconds ([int] $Config.rebootWarningSeconds) -Reason $Reason
         # Hold the lock through the warning period so nothing starts installing before the restart.
@@ -1196,7 +1367,7 @@ function Invoke-WduRun {
     # Another update operation (for example Windows' own automatic updates) may be installing.
     for ($i = 0; $i -lt 60 -and (Test-WduInstallerBusy); $i++) {
         if ($i -eq 0) { Write-WduLog 'Windows Update installer is busy; waiting (max 30 min).' }
-        Set-WduStatus 'WaitingForInstaller' '' $State
+        Set-WduStatus 'WaitingForInstaller' 'Windows is already installing updates (for example its own automatic updates); waiting for it to finish.' $State
         Wait-Wdu 30
     }
 
@@ -1228,9 +1399,19 @@ function Invoke-WduRun {
         }
 
         $plan = Get-WduPlan $updates $Config $State
-        Write-WduLog ("Found {0} update(s): {1} to install, {2} skipped by policy, {3} given up." -f @($updates).Count, @($plan.Install).Count, @($plan.Skipped).Count, @($plan.GaveUp).Count)
+        Write-WduLog ("Found {0} update(s): {1} to install, {2} skipped by policy, {3} given up, {4} need a person, {5} waiting to retry." -f @($updates).Count, @($plan.Install).Count, @($plan.Skipped).Count, @($plan.GaveUp).Count, @($plan.Interaction).Count, @($plan.Deferred).Count)
 
         if (@($plan.Install).Count -eq 0) {
+            if (@($plan.Deferred).Count -gt 0) {
+                # A failed download or installation is retried after its delay; nothing else is waiting.
+                $next = @($plan.Deferred | Sort-Object { $_.Due })[0]
+                $wait = [int] [Math]::Max(1, [Math]::Ceiling(($next.Due - (Get-WduNow)).TotalSeconds))
+                Set-WduStatus 'WaitingForRetry' "Retrying $(Get-WduLabel $next.Update) in $wait s." $State
+                Write-WduLog "Waiting $wait s before retrying $(Get-WduLabel $next.Update)."
+                Wait-Wdu $wait
+                $emptyScans = 0
+                continue
+            }
             if (Test-WduRebootPending) { return Request-WduReboot $Config $Paths $State 'a restart is pending to finish installed updates' $plan }
             $emptyScans++
             if ($emptyScans -le [int] $Config.confirmationScans) {
@@ -1240,7 +1421,10 @@ function Invoke-WduRun {
                 continue
             }
             if (@($plan.GaveUp).Count -gt 0) {
-                return Complete-Wdu $Config $Paths $State 'CompletedWithFailures' "$(@($plan.GaveUp).Count) update(s) failed repeatedly and were given up." $plan
+                return Complete-Wdu $Config $Paths $State 'CompletedWithFailures' "$(@($plan.GaveUp).Count) update(s) could not be installed and were given up.$(if (@($plan.Interaction).Count) { " $(@($plan.Interaction).Count) update(s) need a person to install them." })" $plan
+            }
+            if (@($plan.Interaction).Count -gt 0) {
+                return Complete-Wdu $Config $Paths $State 'CompletedWithFollowUp' "$(@($plan.Interaction).Count) update(s) need a person to install them (Windows reported that they need a signed-in user); everything else is installed." $plan
             }
             return Complete-Wdu $Config $Paths $State 'Succeeded' 'No applicable updates remain.' $plan
         }
@@ -1250,65 +1434,77 @@ function Invoke-WduRun {
         $lock = Enter-WdbInstallLock $Config.dataRoot 'WindowsUpdate' ([int] $Config.lockWaitMinutes * 60)
         if (-not $lock) {
             Write-WduLog 'Another installation holds the install lock; trying again at the next start.' 'WARN'
-            Set-WduStatus 'WaitingForLock' '' $State
+            Set-WduStatus 'WaitingForLock' 'Waiting for an application installation to finish before installing updates.' $State
             return 'WaitingForLock'
         }
-        try {
-        # Count the attempt before acting, so a crash or hang mid-install still counts.
-        foreach ($u in $plan.Install) {
-            $a = $State.attempts[$u.Id]
-            if (-not $a) { $a = @{ count = 0; title = $u.Title; kbs = @($u.Kbs); lastResult = ''; lastHResult = '' }; $State.attempts[$u.Id] = $a }
-            $a.count = [int] $a.count + 1
-            Write-WduLog ("  queued   {0} (attempt {1}/{2})" -f (Get-WduLabel $u), $a.count, $Config.maxAttemptsPerUpdate)
-        }
-        Save-WduState $State $Paths
-
-        Set-WduStatus 'Downloading' "$(@($plan.Install).Count) update(s)" $State
-        $dl = Invoke-WduDownload $plan.Install
-        $ready = @()
-        foreach ($u in $plan.Install) {
-            $r = $dl[$u.Id]
-            if ($r -and $r.Result -in 'Succeeded', 'SucceededWithErrors') { $ready += $u; continue }
-            $a = $State.attempts[$u.Id]
-            $a.lastResult = if ($r) { "Download$($r.Result)" } else { 'DownloadMissing' }
-            $a.lastHResult = if ($r) { Format-WduHResult $r.HResult } else { '' }
-            Write-WduLog ("  download failed {0}: {1} {2}" -f (Get-WduLabel $u), $a.lastResult, $a.lastHResult) 'WARN'
-        }
-
         $rebootRequired = $false
-        if ($ready.Count -gt 0) {
-            Set-WduStatus 'Installing' "$($ready.Count) update(s)" $State
-            $in = Invoke-WduInstall $ready
-            $rebootRequired = [bool] $in.RebootRequired
-            foreach ($u in $ready) {
-                $r = $in.Results[$u.Id]
+        try {
+            $max = [int] $Config.maxAttemptsPerUpdate
+            $ready = @()
+            $i = 0
+            foreach ($u in $plan.Install) {
+                $i++
+                # Count the attempt before acting, so a crash or hang mid-download or mid-install still counts.
                 $a = $State.attempts[$u.Id]
-                $a.lastResult = if ($r) { $r.Result } else { 'Missing' }
-                $a.lastHResult = if ($r) { Format-WduHResult $r.HResult } else { '' }
-                if ($r -and $r.Result -in 'Succeeded', 'SucceededWithErrors') {
-                    $State.installed += @{ id = $u.Id; title = $u.Title; kbs = @($u.Kbs); result = $r.Result; atUtc = (Get-WduNow).ToString('o') }
-                    Write-WduLog ("  installed {0} ({1})" -f (Get-WduLabel $u), $r.Result)
-                } else {
-                    Write-WduLog ("  install failed {0}: {1} {2}" -f (Get-WduLabel $u), $a.lastResult, $a.lastHResult) 'WARN'
-                }
+                if (-not $a) { $a = @{ count = 0; title = $u.Title; kbs = @($u.Kbs); kind = (Get-WduKind $u); lastResult = ''; lastHResult = '' }; $State.attempts[$u.Id] = $a }
+                $a.count = [int] $a.count + 1
+                $a.nextAttemptUtc = $null
+                $label = Get-WduLabel $u
+                Write-WduLog ("  queued   {0} [{1}] (attempt {2}/{3})" -f $label, (Get-WduKind $u), $a.count, $max)
+                Save-WduState $State $Paths
+                $script:Activity.current = $label; $script:Activity.attempt = [int] $a.count; $script:Activity.maxAttempts = $max; $script:Activity.queued = @($plan.Install).Count
+                $size = $(if ($u.ContainsKey('SizeBytes') -and [int64] $u.SizeBytes -gt 0) { " ($([Math]::Round([double] $u.SizeBytes / 1MB, 1)) MB)" } else { '' })
+                Set-WduStatus 'Downloading' "Downloading $label$size, update $i of $(@($plan.Install).Count), attempt $($a.count) of $max. Progress unavailable." $State
+                # One update per call: a failed download never holds back the others.
+                $r = (Invoke-WduDownload @($u))[$u.Id]
+                if ($r -and $r.Result -in 'Succeeded', 'SucceededWithErrors') { $ready += $u; continue }
+                Register-WduFailure $u $a $Config 'download' $(if ($r) { "Download$($r.Result)" } else { 'DownloadMissing' }) $(if ($r) { $r.HResult } else { $null })
             }
-        }
-        Save-WduState $State $Paths
+            Save-WduState $State $Paths
+
+            # Ordinary updates are installed together; one that can ask for input is installed on its own, quietly.
+            $batches = @()
+            $normal = @($ready | Where-Object { -not $_.NeedsUserInput })
+            if ($normal.Count) { $batches += , $normal }
+            foreach ($u in @($ready | Where-Object { $_.NeedsUserInput })) { $batches += , @($u) }
+            foreach ($batch in $batches) {
+                $labels = @($batch | ForEach-Object { Get-WduLabel $_ })
+                $script:Activity.current = ($labels -join '; ')
+                Set-WduStatus 'Installing' "Installing $(@($batch).Count) update(s): $($labels -join '; ')" $State
+                $in = Invoke-WduInstall $batch
+                if ($in.RebootRequired) { $rebootRequired = $true }
+                foreach ($u in $batch) {
+                    $r = $in.Results[$u.Id]
+                    $a = $State.attempts[$u.Id]
+                    if ($r -and $r.Result -in 'Succeeded', 'SucceededWithErrors') {
+                        $a.lastResult = $r.Result; $a.lastHResult = Format-WduHResult $r.HResult
+                        $State.installed += @{ id = $u.Id; title = $u.Title; kbs = @($u.Kbs); kind = (Get-WduKind $u); optional = [bool] $u.IsOptional; driver = [bool] $u.IsDriver; result = $r.Result; atUtc = (Get-WduNow).ToString('o') }
+                        Write-WduLog ("  installed {0} ({1})" -f (Get-WduLabel $u), $r.Result)
+                        continue
+                    }
+                    $hex = $(if ($r) { Format-WduHResult $r.HResult } else { '' })
+                    # Windows' own answer that a person is needed (never the CanRequestUserInput flag alone).
+                    if ($u.NeedsUserInput -and $r -and ($hex -eq '0x80240020' -or $r.Result -eq 'Aborted')) { $a.interaction = $true }
+                    Register-WduFailure $u $a $Config 'install' $(if ($r) { $r.Result } else { 'Missing' }) $(if ($r) { $r.HResult } else { $null })
+                }
+                Save-WduState $State $Paths
+            }
+            $script:Activity.current = ''
         } finally {
             Exit-WdbInstallLock $lock
         }
 
-        # An update about to be given up gets one more chance after a component reset.
+        # An update about to be given up gets one more chance after a component reset (not a permanent failure).
         $exhausted = @($plan.Install | Where-Object {
             $a = $State.attempts[$_.Id]
-            [int] $a.count -ge [int] $Config.maxAttemptsPerUpdate -and $a.lastResult -notin 'Succeeded', 'SucceededWithErrors'
+            $a['gaveUp'] -and -not $a['permanent'] -and -not $a['interaction'] -and $a.lastResult -notin 'Succeeded', 'SucceededWithErrors'
         })
         if ($exhausted.Count -gt 0 -and $Config.resetComponentsOnce -and -not $State.componentReset) {
             Write-WduLog "$($exhausted.Count) update(s) keep failing; resetting Windows Update components once." 'WARN'
             Set-WduStatus 'ResettingComponents' 'Repeated update failures' $State
             Reset-WduComponents
             $State.componentReset = $true
-            foreach ($u in $exhausted) { $State.attempts[$u.Id].count = [int] $Config.maxAttemptsPerUpdate - 1 }
+            foreach ($u in $exhausted) { $a = $State.attempts[$u.Id]; $a.count = [int] $Config.maxAttemptsPerUpdate - 1; $a.gaveUp = $false; $a.nextAttemptUtc = $null }
             Save-WduState $State $Paths
             return Request-WduReboot $Config $Paths $State 'Windows Update components were reset'
         }
@@ -1326,6 +1522,7 @@ function Invoke-WduMain {
     foreach ($d in $paths.Root, $paths.Logs) { if (-not (Test-Path -LiteralPath $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null } }
     $script:LogFile = $paths.Log
     $script:StatusFile = $paths.Status
+    $script:Activity = @{}
     Limit-WduLogSize $paths.Log
 
     $mutex = Enter-WduMutex $Config.mutexName
@@ -1521,22 +1718,23 @@ exit 1
 		<File path="C:\Windows\Setup\Scripts\WindowsUpdate\config.json">
 {
   "schemaVersion": 1,
-  "engineVersion": "1.1.0",
+  "engineVersion": "1.2.0",
   "dataRoot": "C:\\ProgramData\\WindowsDeploymentBuilder",
   "taskPath": "\\WindowsDeploymentBuilder\\",
   "taskName": "WindowsUpdate",
   "drivers": "include",
   "featureUpdates": "skip",
-  "optionalUpdates": "skip",
+  "optionalUpdates": "install",
   "microsoftUpdate": false,
   "maxReboots": 10,
-  "maxAttemptsPerUpdate": 2,
+  "maxAttemptsPerUpdate": 3,
   "maxRuntimeHours": 6,
   "networkWaitMinutes": 15,
   "confirmationScans": 1,
   "resetComponentsOnce": true,
   "rebootWarningSeconds": 60,
   "lockWaitMinutes": 60,
+  "retryDelaySeconds": 120,
   "excludedKbs": []
 }
 		</File>
@@ -2067,6 +2265,21 @@ function Test-WdbRestartPending {
     # Written before the last restart, unreadable or abandoned: the restart is no longer pending.
     Remove-Item -LiteralPath $p.Restart -Force -ErrorAction SilentlyContinue
     return $false
+}
+
+&lt;#
+    Appends one event to the deployment's activity feed &lt;dataRoot&gt;\Deployment\activity.jsonl
+    (retries, failures and restarts, for the progress window and the LAN monitor). Best effort:
+    the feed is information, never a reason for an installation to fail.
+#&gt;
+function Add-WdbActivity {
+    param([string] $DataRoot, [string] $Source, [string] $Message, [string] $Level = 'info')
+    try {
+        $dir = Join-Path $DataRoot 'Deployment'
+        if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        $line = ([ordered]@{ utc = [DateTime]::UtcNow.ToString('o'); level = $Level; source = $Source; message = $Message } | ConvertTo-Json -Compress)
+        [System.IO.File]::AppendAllText((Join-Path $dir 'activity.jsonl'), $line + "`r`n", (New-Object System.Text.UTF8Encoding($false)))
+    } catch { }
 }
 
 # endregion WDB coordination
@@ -4834,6 +5047,13 @@ exit 1
     FailedPermanent, WaitingForNetwork, WaitingForReboot, ManualActionRequired, SkippedByUser,
     BlockedByDependency) is derived from them (Get-WdaLifecycle).
 
+    Engine 1.4.0 (deployment reliability): a failed installer run keeps the installer's own exit
+    code ("Installer failed with exit code: N" in WinGet's output) next to WinGet's result
+    (SHELLEXEC_INSTALL_FAILED); a package whose installer may prompt and that times out is reported
+    as needing a person instead of being retried for another full timeout; status.json names the
+    application being installed, the installed/failed counts and the last failure. WinGet does not
+    report download progress to a redirected process, so no percentage or speed is shown.
+
     Modes:
       Run   (default) Full engine.
       Plan  Read-only dry run: WinGet check, installed/available state and the exact command for
@@ -4856,7 +5076,7 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-$script:EngineVersion = '1.3.0'
+$script:EngineVersion = '1.4.0'
 $script:StateVersion = 3
 $script:EventSource = 'WindowsDeploymentBuilder'
 $script:LogFile = $null
@@ -4909,6 +5129,8 @@ $script:ExitCodes = @{
     '0x8A150104' = @('Failed', $true, 'none', 'A dependency is missing (INSTALL_MISSING_DEPENDENCY).', 'Transient')
     '0x8A150110' = @('Failed', $true, 'none', 'Dependencies could not be installed (INSTALL_DEPENDENCIES).', 'Transient')
     '0x8A150106' = @('Failed', $true, 'none', 'Not enough memory (INSTALL_INSUFFICIENT_MEMORY).', 'Resource')
+    # The package's own installer exited with an error; its exit code is taken from WinGet's output.
+    '0x8A150006' = @('Failed', $true, 'none', 'The installer reported a failure (SHELLEXEC_INSTALL_FAILED).', 'Unknown')
 }
 
 $script:Terminal = @('Succeeded', 'AlreadyInstalled', 'Skipped', 'SkippedByUser', 'RequiresInteraction', 'Failed', 'Unavailable')
@@ -5081,7 +5303,15 @@ function Set-WdaStatus {
         $o.reboots = $State.reboots
         $o.done = @($State.packages.Values | Where-Object { $_.status -in $script:Terminal }).Count
         $o.total = @($State.packages.Values).Count
+        # Engine 1.4.0: counts and the last failure for the progress window and the LAN monitor.
+        $o.installed = @($State.packages.Values | Where-Object { $_.status -in 'Succeeded', 'AlreadyInstalled' }).Count
+        $o.failed = @($State.packages.Values | Where-Object { $_.status -in 'Failed', 'Unavailable' }).Count
+        $o.needsPerson = @($State.packages.Values | Where-Object { $_.status -eq 'RequiresInteraction' }).Count
+        $o.selected = @($State.packages.Values | Where-Object { $_.status -ne 'SkippedByUser' }).Count
+        if ($State.ContainsKey('lastFailure') -and $State.lastFailure) { $o.lastFailure = $State.lastFailure }
     }
+    if ($Phase -eq 'Installing' -and $Detail) { $o.current = $Detail }
+    $o.progress = 'unavailable'
     try { Write-WdaJson $script:StatusFile $o } catch { Write-WdaLog "Could not write status: $($_.Exception.Message)" 'WARN' }
 }
 
@@ -5308,6 +5538,13 @@ function ConvertFrom-WdaExitCode {
     if ($m) { return @{ Status = $m[0]; Retry = $m[1]; Restart = $m[2]; Message = $m[3]; Code = $hex; Class = $m[4] } }
     # Unknown codes: retried within the normal budget (never more), and recorded as Unknown.
     @{ Status = 'Failed'; Retry = $true; Restart = 'none'; Message = "WinGet exit code $hex (not a documented WinGet result)."; Code = $hex; Class = 'Unknown' }
+}
+
+&lt;# The package installer's own exit code from WinGet's output ("Installer failed with exit code: 1603"), or ''. #&gt;
+function Get-WdaInstallerExitCode {
+    param([string] $Output)
+    if ($Output -match '(?im)Installer failed with exit code:\s*(-?\d+|0x[0-9A-F]+)') { return $Matches[1] }
+    return ''
 }
 
 # ------------------------------------------------------------------------------------------------
@@ -5616,6 +5853,21 @@ function Test-WdbRestartPending {
     return $false
 }
 
+&lt;#
+    Appends one event to the deployment's activity feed &lt;dataRoot&gt;\Deployment\activity.jsonl
+    (retries, failures and restarts, for the progress window and the LAN monitor). Best effort:
+    the feed is information, never a reason for an installation to fail.
+#&gt;
+function Add-WdbActivity {
+    param([string] $DataRoot, [string] $Source, [string] $Message, [string] $Level = 'info')
+    try {
+        $dir = Join-Path $DataRoot 'Deployment'
+        if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        $line = ([ordered]@{ utc = [DateTime]::UtcNow.ToString('o'); level = $Level; source = $Source; message = $Message } | ConvertTo-Json -Compress)
+        [System.IO.File]::AppendAllText((Join-Path $dir 'activity.jsonl'), $line + "`r`n", (New-Object System.Text.UTF8Encoding($false)))
+    } catch { }
+}
+
 # endregion WDB coordination
 
 &lt;#
@@ -5762,7 +6014,7 @@ function Get-WdaLifecycle {
 function Add-WdaAttempt {
     param([hashtable] $Paths, [hashtable] $Entry, [hashtable] $Record)
     $rec = [ordered]@{ operationId = $Entry.operationId; name = $Entry.name }
-    foreach ($k in 'trigger', 'attempt', 'startUtc', 'endUtc', 'result', 'exitCode', 'class', 'countsTowardLimit', 'nextAction', 'nextAttemptUtc', 'rebootRequired', 'message', 'packageIdentifier', 'source') {
+    foreach ($k in 'trigger', 'attempt', 'startUtc', 'endUtc', 'result', 'exitCode', 'installerExitCode', 'class', 'countsTowardLimit', 'nextAction', 'nextAttemptUtc', 'rebootRequired', 'message', 'packageIdentifier', 'source') {
         if ($Record.ContainsKey($k)) { $rec[$k] = $Record[$k] }
     }
     $h = @{}
@@ -5916,6 +6168,8 @@ function Complete-Wda {
     $packages = @($State.packages.Values | Sort-Object @{ Expression = { if ($order.ContainsKey($_.key)) { $order[$_.key] } else { 100000 } } }, key | ForEach-Object {
         $o = [ordered]@{ key = $_.key; name = $_.name; packageIdentifier = $_.packageIdentifier; source = $_.source; status = $_.status
                          attempts = [int] $_.attempts; exitCode = $_.exitCode; message = $_.message; timestampUtc = $_.updatedUtc }
+        # Engine 1.4.0: the installer's own exit code (only when WinGet reported one).
+        if ($_.ContainsKey('installerExitCode') -and $_.installerExitCode) { $o.installerExitCode = [string] $_.installerExitCode }
         $x = &amp; $resilience $_
         foreach ($k in $x.Keys) { $o[$k] = $x[$k] }
         $o
@@ -6440,9 +6694,15 @@ function Invoke-WdaQueue {
                 $started = Get-WdaNow
                 Write-WdaLog ("  installing {0} ({1}:{2}) attempt {3}/{4}" -f $p.name, $p.source, $p.packageIdentifier, $e.attempts, $policy.maxAttempts)
                 $r = Install-WdaPackage $p ([int] $Config.packageTimeoutMinutes) $log
-                if ($r.TimedOut) {
+                if ($r.TimedOut -and $p.interaction -eq 'mayPrompt') {
+                    # An installer known to prompt that is still running after the timeout is most
+                    # likely waiting for a person: another full timeout would not help.
+                    $m = @{ Status = 'RequiresInteraction'; Retry = $false; Restart = 'none'; Message = "Did not finish within $($Config.packageTimeoutMinutes) min; this installer may wait for a person. Install it manually."; Code = 'timeout'; Class = 'User' }
+                } elseif ($r.TimedOut) {
                     $m = @{ Status = 'Failed'; Retry = $true; Restart = 'none'; Message = "Timed out after $($Config.packageTimeoutMinutes) min."; Code = 'timeout'; Class = 'Timeout' }
                 } else { $m = ConvertFrom-WdaExitCode $r.ExitCode }
+                $installerCode = $(if ($r.ContainsKey('Output')) { Get-WdaInstallerExitCode ([string] $r.Output) } else { '' })
+                if ($installerCode) { $e.installerExitCode = $installerCode; $m.Message = "$($m.Message) Installer exit code: $installerCode." }
                 $status = $m.Status
                 $counts = $true
                 $next = ''
@@ -6492,8 +6752,19 @@ function Invoke-WdaQueue {
                         default { $(if ($e.retryable) { 'manual retry (recovery tool)' } else { 'none (permanent)' }) }
                     }
                 }
+                if ($status -in 'Failed', 'Unavailable', 'RequiresInteraction') {
+                    # What the progress window and the LAN monitor show; the queue carries on.
+                    $State.lastFailure = [ordered]@{ name = $p.name; status = $status; code = [string] $m.Code; installerExitCode = $installerCode; atUtc = (Get-WdaNow).ToString('o')
+                        message = $(if ($status -eq 'RequiresInteraction') { "$($p.name) needs a person to install it. Recorded; deployment is continuing with the remaining applications." } else { "$($p.name) could not be installed ($($m.Message.TrimEnd('.'))). The failure was recorded; deployment is continuing with the remaining applications." }) }
+                } elseif ($status -eq 'Pending' -and $e.nextAttemptUtc) {
+                    $State.lastFailure = [ordered]@{ name = $p.name; status = 'Retrying'; code = [string] $m.Code; installerExitCode = $installerCode; atUtc = (Get-WdaNow).ToString('o')
+                        message = "$($p.name): attempt $($e.attempts) of $($policy.maxAttempts) failed ($($m.Message.TrimEnd('.'))); $next. The other applications continue." }
+                }
+                if ($status -in 'Failed', 'Unavailable', 'RequiresInteraction' -or ($status -eq 'Pending' -and $e.nextAttemptUtc)) {
+                    Add-WdbActivity $Config.dataRoot 'applications' ([string] $State.lastFailure['message']) $(if ($State.lastFailure['status'] -eq 'Retrying') { 'info' } else { 'warning' })
+                }
                 Add-WdaAttempt $Paths $e @{ trigger = 'automatic'; attempt = [int] $e.totalAttempts; startUtc = $started.ToString('o'); endUtc = (Get-WdaNow).ToString('o')
-                    result = [string] $m.Status; exitCode = [string] $m.Code; class = [string] $m.Class; countsTowardLimit = $counts; nextAction = $next
+                    result = [string] $m.Status; exitCode = [string] $m.Code; installerExitCode = $installerCode; class = [string] $m.Class; countsTowardLimit = $counts; nextAction = $next
                     nextAttemptUtc = $e.nextAttemptUtc; rebootRequired = [bool] ($status -eq 'RequiresRestart'); message = $m.Message; packageIdentifier = $p.packageIdentifier; source = $p.source }
                 $lvl = $(if ($status -in 'Succeeded', 'AlreadyInstalled') { 'INFO' } else { 'WARN' })
                 Write-WdaLog ("  -&gt; {0} {1} [{2}] {3} (class {4}; attempt {5}/{6}; next: {7})" -f $status, $p.name, $m.Code, $m.Message, $m.Class, $e.attempts, $policy.maxAttempts, $next) $lvl
@@ -7360,7 +7631,7 @@ exit 1
 		<File path="C:\Windows\Setup\Scripts\Applications\applications-config.json">
 {
   "schemaVersion": 1,
-  "engineVersion": "1.3.0",
+  "engineVersion": "1.4.0",
   "dataRoot": "C:\\ProgramData\\WindowsDeploymentBuilder",
   "taskPath": "\\WindowsDeploymentBuilder\\",
   "taskName": "Applications",
@@ -7548,11 +7819,20 @@ exit 1
     copy (Read-WddDeploymentState falls back to it and never mistakes a damaged state for "no
     deployment"), and every snapshot carries a machine-readable outcome with a stable exit code
     (Get-WddDeploymentOutcome) for DeploymentRecovery.ps1 and later health reporting.
+
+    Orchestrator 1.2.0 (deployment reliability):
+      - Every stage in a snapshot says what it is doing in words (activity), why it waits
+        (waitingReason), when its engine last reported progress (lastActivityUtc) and how it stands
+        (condition: active, waiting, idle, blocked, finished). A stage with no progress for longer
+        than its limit is flagged (stale); the limit is longer for Windows Update downloads and
+        installations, and never applies while Windows itself is still servicing updates.
+      - The activity feed &lt;dataRoot&gt;\Deployment\activity.jsonl: one timestamped JSON line per event
+        (restarts, recoveries, stage changes, retries and failures reported by the engines).
 #&gt;
 
 Set-StrictMode -Version 2.0
 
-$script:DeployVersion = '1.1.0'
+$script:DeployVersion = '1.2.0'
 $script:DeployStateVersion = 2
 $script:EventSource = 'WindowsDeploymentBuilder'
 $script:ManifestFormat = 'windows-deployment-builder/deployment-manifest'
@@ -7591,6 +7871,23 @@ function Start-WddTask {
 }
 
 function Get-WddBootTime { (Get-CimInstance -ClassName Win32_OperatingSystem).LastBootUpTime.ToUniversalTime() }
+
+&lt;# Task state for the watchdog: @{ Exists; State (Ready, Running, Disabled, Queued); LastRunUtc; LastResult }. #&gt;
+function Get-WddTaskInfo {
+    param([string] $TaskPath, [string] $TaskName)
+    $t = Get-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -ErrorAction SilentlyContinue
+    if (-not $t) { return @{ Exists = $false; State = ''; LastRunUtc = $null; LastResult = $null } }
+    $i = $t | Get-ScheduledTaskInfo -ErrorAction SilentlyContinue
+    @{ Exists = $true; State = [string] $t.State
+       LastRunUtc = $(if ($i -and $i.LastRunTime -and $i.LastRunTime.Year -gt 2000) { $i.LastRunTime.ToUniversalTime() } else { $null })
+       LastResult = $(if ($i) { [int64] $i.LastTaskResult } else { $null }) }
+}
+
+&lt;# True while Windows is installing updates itself (the Windows Update installer or TrustedInstaller is busy). #&gt;
+function Test-WddUpdateServicing {
+    try { if ((New-Object -ComObject 'Microsoft.Update.Installer').IsBusy) { return $true } } catch { }
+    return [bool] (Get-Process -Name 'TiWorker' -ErrorAction SilentlyContinue)
+}
 
 function Write-WddEvent {
     param([int] $EventId, [string] $Message, [ValidateSet('Information', 'Warning', 'Error')] [string] $EntryType = 'Information')
@@ -7705,7 +8002,84 @@ function Get-WddPaths {
         Reports       = $reports
         ReportJson    = Join-Path $reports 'deployment-report.json'
         ReportText    = Join-Path $reports 'deployment-report.txt'
+        # Orchestrator 1.2.0: the timestamped activity feed and the LAN monitor's address and token.
+        Activity      = Join-Path $deployment 'activity.jsonl'
+        MonitorInfo   = Join-Path $state 'monitor.json'
     }
+}
+
+# ------------------------------------------------------------------------------------------------
+# Activity feed (orchestrator 1.2.0)
+# ------------------------------------------------------------------------------------------------
+
+&lt;#
+    Appends one event to &lt;dataRoot&gt;\Deployment\activity.jsonl: {utc, level, source, message}.
+    The engines append their own retry and failure messages to the same file (Add-WdbActivity).
+    Never contains secrets: only the deployment's own messages.
+#&gt;
+function Add-WddActivity {
+    param([hashtable] $Paths, [string] $Message, [ValidateSet('info', 'warning', 'error')] [string] $Level = 'info', [string] $Source = 'deployment')
+    $line = ([ordered]@{ utc = (Get-WddNow).ToString('o'); level = $Level; source = $Source; message = $Message } | ConvertTo-Json -Compress)
+    Write-WddLog "Activity: $Message" $(switch ($Level) { 'error' { 'ERROR' } 'warning' { 'WARN' } default { 'INFO' } })
+    $dir = Split-Path -Parent $Paths.Activity
+    if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    for ($i = 0; $i -lt 3; $i++) {
+        try {
+            # A line left unfinished by a writer that was stopped must not swallow this one.
+            $fs = New-Object System.IO.FileStream($Paths.Activity, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::Read)
+            try {
+                $prefix = ''
+                if ($fs.Length -gt 0) { [void] $fs.Seek(-1, [System.IO.SeekOrigin]::End); if ($fs.ReadByte() -ne 10) { $prefix = "`r`n" } }
+                [void] $fs.Seek(0, [System.IO.SeekOrigin]::End)
+                $bytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes($prefix + $line + "`r`n")
+                $fs.Write($bytes, 0, $bytes.Length)
+            } finally { $fs.Dispose() }
+            return
+        } catch { Start-Sleep -Milliseconds 100 }
+    }
+}
+
+&lt;# The last $Last events, oldest first. A line that is being written (incomplete JSON) is skipped. #&gt;
+function Read-WddActivity {
+    param([hashtable] $Paths, [int] $Last = 30)
+    # Returns the events one by one (callers collect them with @()).
+    if (-not $Paths.ContainsKey('Activity') -or -not (Test-Path -LiteralPath $Paths.Activity)) { return }
+    $lines = $null
+    for ($i = 0; $i -lt 3 -and $null -eq $lines; $i++) {
+        try {
+            $fs = New-Object System.IO.FileStream($Paths.Activity, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+            try { $lines = (New-Object System.IO.StreamReader($fs, [System.Text.Encoding]::UTF8)).ReadToEnd() -split "`r?`n" } finally { $fs.Dispose() }
+        } catch { Start-Sleep -Milliseconds 100 }
+    }
+    $out = @()
+    foreach ($l in @($lines | Where-Object { $_ -and $_.Trim() } | Select-Object -Last $Last)) {
+        try { $e = ConvertTo-WddHashtable ($l | ConvertFrom-Json); if ($e -is [hashtable] -and $e['utc'] -and $e['message']) { $out += , $e } } catch { }
+    }
+    return $out
+}
+
+&lt;# Keeps the feed small: above $MaxBytes only the last $Keep events are kept. #&gt;
+function Limit-WddActivity {
+    param([hashtable] $Paths, [int64] $MaxBytes = 1MB, [int] $Keep = 500)
+    if (-not (Test-Path -LiteralPath $Paths.Activity) -or (Get-Item -LiteralPath $Paths.Activity).Length -le $MaxBytes) { return }
+    try {
+        $keep = @([System.IO.File]::ReadAllLines($Paths.Activity, [System.Text.Encoding]::UTF8) | Select-Object -Last $Keep)
+        $tmp = "$($Paths.Activity).tmp"
+        [System.IO.File]::WriteAllLines($tmp, [string[]] $keep, (New-Object System.Text.UTF8Encoding($false)))
+        Move-Item -LiteralPath $tmp -Destination $Paths.Activity -Force
+    } catch { Write-WddLog "Could not shorten the activity feed: $($_.Exception.Message)" 'WARN' }
+}
+
+&lt;# "just now", "1 minute ago", "12 minutes ago", "3 hours ago". #&gt;
+function Format-WddAge {
+    param($Since)
+    $d = ConvertTo-WddDate $Since
+    if (-not $d) { return 'unknown' }
+    $m = [int] [Math]::Floor(((Get-WddNow) - $d).TotalMinutes)
+    if ($m -lt 1) { return 'just now' }
+    if ($m -eq 1) { return '1 minute ago' }
+    if ($m -lt 120) { return "$m minutes ago" }
+    return "$([int] [Math]::Floor($m / 60)) hours ago"
 }
 
 function Initialize-WddLogging {
@@ -7881,15 +8255,18 @@ function Get-WddStageSnapshot {
     param([hashtable] $Stage, [hashtable] $Paths, [hashtable] $State)
     $root = $Paths.Root
     $launch = if ($State -and $State.stages -and $State.stages.ContainsKey($Stage.id)) { $State.stages[$Stage.id] } else { $null }
-    $o = [ordered]@{ id = $Stage.id; name = $Stage.name; enabled = [bool] $Stage.enabled; context = $Stage.context; state = 'NotStarted'; status = ''; outcome = ''; detail = ''; reboots = 0; updatedUtc = $null; current = ''; done = $null; total = $null; result = $null; idle = ''; outstanding = 0 }
+    $o = [ordered]@{ id = $Stage.id; name = $Stage.name; enabled = [bool] $Stage.enabled; context = $Stage.context; state = 'NotStarted'; status = ''; outcome = ''; detail = ''; reboots = 0; updatedUtc = $null; current = ''; done = $null; total = $null; result = $null; idle = ''; outstanding = 0
+                     condition = 'waiting'; activity = ''; waitingReason = ''; lastActivityUtc = $null; stale = $false; staleMinutes = 0; counts = [ordered]@{}; lastError = ''; lastErrorUtc = $null; progress = 'unavailable'; engine = $null }
     $result = Read-WddJson (Join-Path $root $Stage.result)
     if ($result -and $result.status -in $script:FinalStageStatuses) {
         $o.state = 'Final'; $o.status = $result.status; $o.outcome = Get-WddOutcome $result.status; $o.detail = [string] $result.reason
         $o.reboots = [int] $result.reboots; $o.updatedUtc = $result.finishedUtc; $o.result = $result
         if ($result.ContainsKey('outstanding')) { $o.outstanding = @($result.outstanding).Count }
+        Set-WddStageNarrative $o $Stage $null $null $State
         return $o
     }
     $status = Read-WddJson (Join-Path $root $Stage.status)
+    $o.engine = $status
     $taskExists = Get-WddTask $Stage.task.path $Stage.task.name
     if ($status) {
         $o.status = [string] $status.phase; $o.detail = [string] $status.detail; $o.updatedUtc = $status.updatedUtc
@@ -7897,8 +8274,8 @@ function Get-WddStageSnapshot {
         if ($status.ContainsKey('done')) { $o.done = [int] $status.done; $o.total = [int] $status.total }
         if ($status.phase -eq 'Installing' -and $status.detail) { $o.current = [string] $status.detail }
     }
-    if (-not $launch) { return $o }
-    if ($launch.launchResult -eq 'LaunchFailed') { $o.state = 'LaunchFailed'; $o.detail = [string] $launch.message; return $o }
+    if (-not $launch) { Set-WddStageNarrative $o $Stage $status $launch $State; return $o }
+    if ($launch.launchResult -eq 'LaunchFailed') { $o.state = 'LaunchFailed'; $o.detail = [string] $launch.message; Set-WddStageNarrative $o $Stage $status $launch $State; return $o }
     $since = ConvertTo-WddDate $launch.launchedUtc
     $age = if ($since) { ((Get-WddNow) - $since).TotalMinutes } else { 0 }
     if ($taskExists) {
@@ -7911,12 +8288,97 @@ function Get-WddStageSnapshot {
             $who = $(if ($launch.ContainsKey('user') -and $launch.user) { [string] $launch.user } else { 'the user who started the deployment' })
             $o.idle = "has not run for more than $limit minutes; it runs only while $who is signed in."
         }
+        Set-WddStageNarrative $o $Stage $status $launch $State
         return $o
     }
     # No task and no result: the engine removed its task without a result, or the task was deleted.
     if ($age -ge [int] $State.stalledAfterMinutes) { $o.state = 'Stalled'; if (-not $o.detail) { $o.detail = 'The scheduled task is missing and there is no result. Run Resume-Deployment.ps1.' } }
     else { $o.state = $(if ($status) { 'Running' } else { 'Pending' }) }
+    Set-WddStageNarrative $o $Stage $status $launch $State
     return $o
+}
+
+# Engine phases that mean "waiting for something", with the reason in words.
+$script:WaitingPhases = @{
+    WaitingForNetwork   = 'Waiting for a network connection.'
+    WaitingForInstaller = 'Waiting for Windows Update to finish.'
+    WaitingForLock      = 'Waiting for another installation to finish.'
+    WaitingForRetry     = 'Waiting before the next retry.'
+    WaitingForUpdates   = 'Waiting for Windows Update to finish first.'
+    WaitingForDrivers   = 'Waiting for the driver stage to finish first.'
+    WaitingForRestart   = 'Waiting for the scheduled restart.'
+    WaitingForReboot    = 'Waiting for a restart.'
+    RebootDeferred      = 'A restart is needed; it waits until the current installation has finished.'
+    Rebooting           = 'Restarting Windows; the deployment continues after the restart.'
+    Error               = 'The engine hit an unexpected error and tries again at its next run.'
+}
+# Phases during which Windows Update legitimately works for a long time without a new status.
+$script:LongPhases = @('Downloading', 'Installing', 'WaitingForInstaller', 'Rebooting', 'ResettingComponents')
+
+&lt;#
+    Orchestrator 1.2.0: what a stage is doing, in words, from evidence only (the engine's own
+    status.json and result.json, its task, the launch record):
+      condition  finished | active | waiting | idle | blocked
+      activity   one sentence for people (the progress window and the LAN monitor)
+      stale      no progress reported for longer than the limit (not while Windows is servicing)
+#&gt;
+function Set-WddStageNarrative {
+    param($O, [hashtable] $Stage, $Status, $Launch, $State)
+    $limit = [int] $(if ($State -and $State['stalledAfterMinutes']) { $State['stalledAfterMinutes'] } else { 120 })
+    $long = [int] $(if ($State -and $State['longOperationMinutes']) { $State['longOperationMinutes'] } else { [Math]::Max(240, $limit) })
+    if ($Status -is [hashtable]) {
+        $O.lastActivityUtc = $Status['updatedUtc']
+        foreach ($k in 'installed', 'failed', 'needsPerson', 'selected', 'done', 'total', 'attempt', 'maxAttempts', 'queued') { if ($Status.ContainsKey($k) -and $null -ne $Status[$k]) { $O.counts[$k] = $Status[$k] } }
+        if ($Status.ContainsKey('current') -and $Status['current']) { $O.current = [string] $Status['current'] }
+        if ($Status.ContainsKey('lastError') -and $Status['lastError']) { $O.lastError = [string] $Status['lastError']; $O.lastErrorUtc = $Status['lastErrorUtc'] }
+        if ($Status.ContainsKey('lastFailure') -and $Status['lastFailure'] -is [hashtable]) { $O.lastError = [string] $Status['lastFailure']['message']; $O.lastErrorUtc = $Status['lastFailure']['atUtc'] }
+    }
+    switch ($O.state) {
+        'Final' {
+            $O.condition = 'finished'; $O.lastActivityUtc = $O.updatedUtc
+            $O.activity = "Finished: $($O.status).$(if ($O.detail) { " $($O.detail)" })"
+            if ($O.result -is [hashtable]) {
+                foreach ($k in 'installed', 'failed', 'skipped', 'requiresInteraction') { if ($O.result.ContainsKey($k) -and $O.result[$k] -is [array]) { $O.counts[$k] = @($O.result[$k]).Count } }
+                if ($O.result.ContainsKey('counts') -and $O.result['counts'] -is [hashtable]) { foreach ($k in $O.result['counts'].Keys) { $O.counts[$k] = $O.result['counts'][$k] } }
+            }
+            return
+        }
+        'LaunchFailed' { $O.condition = 'blocked'; $O.activity = "Could not be started: $($O.detail)"; return }
+        'Stalled' { $O.condition = 'blocked'; $O.activity = "No progress: $($O.detail)"; return }
+        'NotStarted' { $O.condition = 'waiting'; $O.activity = 'Not started yet.'; $O.waitingReason = 'Waiting for the deployment to launch this stage.'; return }
+        'Pending' {
+            $O.condition = 'waiting'
+            $since = $(if ($Launch -is [hashtable]) { $Launch['launchedUtc'] } else { $null })
+            $O.waitingReason = $(if ($Stage.context -eq 'user') { 'Scheduled; it starts when the deployment user is signed in.' } else { 'Scheduled; waiting for the engine to start.' })
+            $O.activity = "$($O.waitingReason) Launched $(Format-WddAge $since)."
+            $O.lastActivityUtc = $since
+            return
+        }
+    }
+    # Running: the engine has checked in.
+    $phase = [string] $O.status
+    $age = $(if (ConvertTo-WddDate $O.lastActivityUtc) { ((Get-WddNow) - (ConvertTo-WddDate $O.lastActivityUtc)).TotalMinutes } else { 0 })
+    if ($O.idle) {
+        $O.condition = 'idle'; $O.activity = "Idle: $($O.idle)"; $O.waitingReason = $O.idle
+    } elseif ($script:WaitingPhases.ContainsKey($phase)) {
+        $O.condition = 'waiting'; $O.waitingReason = $script:WaitingPhases[$phase]
+        $O.activity = "$($script:WaitingPhases[$phase])$(if ($O.detail -and $O.detail -ne $script:WaitingPhases[$phase]) { " $($O.detail)" }) Last activity: $(Format-WddAge $O.lastActivityUtc)."
+    } else {
+        $O.condition = 'active'
+        $O.activity = "$(if ($O.detail) { $O.detail } else { $phase })$(if ($O.detail -notmatch '\.$') { '.' }) Last activity: $(Format-WddAge $O.lastActivityUtc)."
+    }
+    # No progress for longer than the limit. Never while Windows Update is still servicing.
+    $max = $(if ($phase -in $script:LongPhases -and $Stage.id -eq 'windowsUpdate') { $long } else { $limit })
+    if ($O.condition -ne 'idle' -and $age -ge $max -and $phase -notin 'Rebooting') {
+        $servicing = $false
+        if ($Stage.id -eq 'windowsUpdate' -or $phase -eq 'WaitingForInstaller') { try { $servicing = [bool] (Test-WddUpdateServicing) } catch { } }
+        if (-not $servicing) {
+            $O.stale = $true; $O.staleMinutes = [int] $age; $O.condition = 'blocked'
+            $O.activity = "No progress detected for $([int] $age) minutes (limit $max). Last step: $(if ($O.detail) { $O.detail } else { $phase })."
+        } else {
+            $O.activity = "$($O.activity) Windows is still installing updates, so this is not treated as stalled."
+        }
+    }
 }
 
 function Get-WddSnapshot {
@@ -7930,7 +8392,7 @@ function Get-WddSnapshot {
                   else { [ordered]@{ id = 'drivers'; state = 'NotImplemented'; detail = $(if ($drivers) { [string] $drivers['note'] } else { '' }) } })
     $engine = @($stages)
     $allFinal = ($engine.Count -eq 0) -or (@($engine | Where-Object { $_.state -ne 'Final' }).Count -eq 0)
-    $blocked = @($engine | Where-Object { $_.state -in 'Stalled', 'LaunchFailed' })
+    $blocked = @($engine | Where-Object { $_.state -in 'Stalled', 'LaunchFailed' -or $_.stale })
     $current = @($engine | Where-Object { $_.state -in 'Running', 'Pending' } | Select-Object -First 1)
     $snap = [ordered]@{
         packageId       = $Manifest.packageId
@@ -7942,11 +8404,41 @@ function Get-WddSnapshot {
         networkDriverMissing = (Get-WddNetworkDriverFlag $Paths)
         allFinal        = $allFinal
         restartPending  = (Test-WddRestartPending $Paths)
-        needsAttention  = @($blocked | ForEach-Object { "$($_.name): $($_.state). $($_.detail)" })
+        needsAttention  = @($blocked | ForEach-Object { if ($_.stale) { "$($_.name): $($_.activity)" } else { "$($_.name): $($_.state). $($_.detail)" } })
         overall         = $(if ($allFinal) { Get-WddOverall $engine } else { 'InProgress' })
+        lastActivityUtc = (Get-WddLastActivity $engine)
+        recovering      = [bool] ($State -and $State['recoveringUntilUtc'] -and (ConvertTo-WddDate $State['recoveringUntilUtc']) -gt (Get-WddNow))
+        restarts        = @(if ($State -and $State['restarts']) { @($State['restarts']) | Select-Object -Last 10 })
     }
     Set-WddSnapshotOutcome $snap $State
+    $snap.condition = Get-WddCondition $snap $State
     return $snap
+}
+
+&lt;# The most recent progress any stage reported (ISO 8601), or $null. #&gt;
+function Get-WddLastActivity {
+    param([object[]] $Stages)
+    $best = $null
+    foreach ($s in @($Stages)) { $d = ConvertTo-WddDate $s.lastActivityUtc; if ($d -and (-not $best -or $d -gt $best)) { $best = $d } }
+    if ($best) { return $best.ToString('o') }
+    return $null
+}
+
+&lt;#
+    One word for the whole deployment (progress window, LAN monitor):
+      complete   finished (see overall)            attention  something needs a person
+      recovering after a restart or an automatic recovery, while unfinished work is checked
+      active     an engine is working              waiting    every running stage waits for something
+#&gt;
+function Get-WddCondition {
+    param($Snapshot, $State)
+    if ($State -and [string] $State['status'] -eq 'Completed') { return 'complete' }
+    if (-not $State -or [string] $State['status'] -in 'StagingFailed', 'IntegrityFailed') { return 'attention' }
+    if (@($Snapshot.needsAttention).Count) { return 'attention' }
+    if ($Snapshot.recovering) { return 'recovering' }
+    if (@($Snapshot.stages | Where-Object { $_.condition -eq 'active' }).Count) { return 'active' }
+    if (@($Snapshot.stages | Where-Object { $_.condition -ne 'finished' }).Count -eq 0) { return 'active' }
+    return 'waiting'
 }
 
 &lt;# Adds outcome, outcomeCode and outcomeDetail (Phase 5) to a snapshot. #&gt;
@@ -8066,7 +8558,12 @@ function Get-WddDeploymentOutcome {
     if ($net.Count) { return &amp; $o 'PausedAwaitingNetwork' ("$(($net | ForEach-Object { $_.name }) -join ', '): waiting for the network. $(($net | ForEach-Object { $_.detail } | Where-Object { $_ }) -join '; ')".Trim()) }
     $user = @($live | Where-Object { $_.state -in 'Stalled', 'LaunchFailed' -or $_.idle })
     if ($user.Count) { return &amp; $o 'PausedAwaitingUser' (($user | ForEach-Object { "$($_.name): $(if ($_.idle) { $_.idle } else { "$($_.state). $($_.detail)" })" }) -join ' ') }
-    return &amp; $o 'InProgress' $(if ($Snapshot -and $Snapshot.currentStage) { "Current stage: $($Snapshot.currentStage)." } else { 'Stages are starting.' })
+    if ($Snapshot -and $Snapshot.currentStage) {
+        $cur = @($live | Where-Object { $_.id -eq $Snapshot.currentStage } | Select-Object -First 1)
+        return &amp; $o 'InProgress' $(if ($cur.Count -and $cur[0].activity) { "$($cur[0].name): $($cur[0].activity)" } else { "Current stage: $($Snapshot.currentStage)." })
+    }
+    $waiting = @($live | Where-Object { $_.activity })
+    return &amp; $o 'InProgress' $(if ($waiting.Count) { (($waiting | ForEach-Object { "$($_.name): $($_.activity)" }) -join ' ') } else { 'Launching the deployment stages; no engine has reported yet.' })
 }
 		</File>
 		<File path="C:\Windows\Setup\Scripts\Deployment\scripts\bootstrap\Stage-Deployment.ps1">
@@ -8242,9 +8739,16 @@ if ($script:StageMain) {
          applications   Install-ApplicationEngine.ps1 registers a task for this user (WinGet is not
                         supported as SYSTEM, so this script must run as the user, not SYSTEM)
        Each launch is recorded before it starts, so a crash cannot launch a stage twice.
-    5. Registers \WindowsDeploymentBuilder\Deployment (SYSTEM; at startup and every 15 minutes),
-       which follows the engines, writes status.json and, at the end, the deployment report.
-    6. Opens a progress window for the signed-in user (unless -NoConsole).
+    5. Registers \WindowsDeploymentBuilder\Deployment (SYSTEM; at startup and every
+       monitorIntervalMinutes), which follows the engines, writes status.json, recovers stalled
+       stages within a bound and, at the end, writes the deployment report.
+    6. Orchestrator 1.2.0: registers \WindowsDeploymentBuilder\Progress for the signed-in user (at
+       every sign-in while the deployment runs; opens the read-only progress window, which can be
+       closed at any time) and, when the package enables it, \WindowsDeploymentBuilder\StatusServer
+       (SYSTEM, at startup: the read-only LAN monitor). Every task is checked after registration.
+       A stage whose task could not be registered ends initialization with InitializedWithProblems
+       (exit code 1) and the reason, never with a plain success.
+    7. Opens the progress window for the signed-in user (unless -NoConsole).
 #&gt;
 [CmdletBinding()]
 param(
@@ -8262,6 +8766,9 @@ $script:InitArgs = @{ SourceMode = $SourceMode; SourceRoot = $SourceRoot; Embedd
 . (Join-Path $PSScriptRoot 'Stage-Deployment.ps1')
 
 $script:MonitorTask = @{ path = '\WindowsDeploymentBuilder\'; name = 'Deployment' }
+$script:ProgressTask = @{ path = '\WindowsDeploymentBuilder\'; name = 'Progress' }
+$script:StatusServerTask = @{ path = '\WindowsDeploymentBuilder\'; name = 'StatusServer' }
+$script:StatusServerScript = 'scripts\monitor\DeploymentStatusServer.ps1'
 
 # ------------------------------------------------------------------------------------------------
 # Adapters
@@ -8284,13 +8791,49 @@ function Register-WddMonitorTask {
     $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     $action = New-ScheduledTaskAction -Execute $ps -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$script`""
     $atStartup = New-ScheduledTaskTrigger -AtStartup
-    $atStartup.Delay = 'PT3M'
+    $atStartup.Delay = 'PT2M'
     $days = [Math]::Ceiling(([double] $Manifest.failureHandling.orchestrator.deadlineHours) / 24) + 1
-    $every = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(2) -RepetitionInterval (New-TimeSpan -Minutes 15) -RepetitionDuration (New-TimeSpan -Days $days)
+    $every = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(2) -RepetitionInterval (New-TimeSpan -Minutes (Get-WddMonitorInterval $Manifest)) -RepetitionDuration (New-TimeSpan -Days $days)
     $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 30)
     Register-ScheduledTask -TaskName $script:MonitorTask.name -TaskPath $script:MonitorTask.path -Action $action -Trigger @($atStartup, $every) -Principal $principal -Settings $settings -Force `
         -Description 'Windows Deployment Builder: follows the deployment stages, writes status.json and the final report, then removes itself.' | Out-Null
+}
+
+&lt;#
+    Orchestrator 1.2.0: opens the progress window at every sign-in of the deployment user while the
+    deployment runs. It runs as that user without elevation (a viewer, not an engine); a second
+    copy exits at once (single instance), and the task is removed when the deployment finishes.
+#&gt;
+function Register-WddProgressTask {
+    param([hashtable] $Paths, [string] $User, [int] $IntervalSeconds = 7)
+    $show = Join-Path $Paths.Package 'scripts\orchestrator\Show-DeploymentStatus.ps1'
+    $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $action = New-ScheduledTaskAction -Execute $ps -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$show`" -Watch -AutoStarted -IntervalSeconds $IntervalSeconds"
+    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $User
+    $trigger.Delay = 'PT20S'
+    $principal = New-ScheduledTaskPrincipal -UserId $User -LogonType Interactive -RunLevel Limited
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero)
+    Register-ScheduledTask -TaskName $script:ProgressTask.name -TaskPath $script:ProgressTask.path -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force `
+        -Description 'Windows Deployment Builder: opens the read-only deployment progress window at sign-in while the deployment runs. Closing the window does not stop the deployment. Removed when the deployment finishes.' | Out-Null
+}
+
+&lt;#
+    Orchestrator 1.2.0: the read-only LAN monitor (DeploymentStatusServer.ps1) as SYSTEM, started at
+    every startup and restarted if it stops. It serves status only; it ends itself after the
+    deployment (see the script).
+#&gt;
+function Register-WddStatusServerTask {
+    param([hashtable] $Paths)
+    $server = Join-Path $Paths.Package $script:StatusServerScript
+    $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $action = New-ScheduledTaskAction -Execute $ps -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$server`""
+    $trigger = New-ScheduledTaskTrigger -AtStartup
+    $trigger.Delay = 'PT1M'
+    $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 5 -RestartInterval (New-TimeSpan -Minutes 1)
+    Register-ScheduledTask -TaskName $script:StatusServerTask.name -TaskPath $script:StatusServerTask.path -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force `
+        -Description 'Windows Deployment Builder: read-only deployment monitor (HTTP). Serves status only; removes itself after the deployment.' | Out-Null
 }
 
 function Start-WddConsole {
@@ -8318,9 +8861,52 @@ function Get-WddProgressShortcut {
 # Initialization
 # ------------------------------------------------------------------------------------------------
 
+&lt;# Minutes between monitor runs (the manifest's value; 15 for manifests written before 1.2.0). #&gt;
+function Get-WddMonitorInterval {
+    param([hashtable] $Manifest)
+    $o = $Manifest.failureHandling.orchestrator
+    if ($o -is [hashtable] -and $o.ContainsKey('monitorIntervalMinutes') -and [int] $o.monitorIntervalMinutes -ge 1) { return [int] $o.monitorIntervalMinutes }
+    return 15
+}
+
+&lt;# The LAN monitor block of the manifest (absent or disabled: $null). #&gt;
+function Get-WddMonitorConfig {
+    param([hashtable] $Manifest)
+    if (-not $Manifest.ContainsKey('monitor') -or $Manifest.monitor -isnot [hashtable] -or -not $Manifest.monitor['enabled']) { return $null }
+    return $Manifest.monitor
+}
+
+&lt;#
+    Registers the viewer tasks that follow the deployment user and the LAN monitor, and checks that
+    each one exists afterwards. Returns the problems (empty when everything is registered).
+#&gt;
+function Register-WddHelperTasks {
+    param([hashtable] $Manifest, [hashtable] $Paths, [string] $User)
+    $problems = @()
+    if ($User -and $User -notmatch '(?i)^(NT AUTHORITY\\)?SYSTEM$') {
+        try { Register-WddProgressTask $Paths $User } catch { $problems += "progress window task: $($_.Exception.Message)" }
+        if (-not (Get-WddTask $script:ProgressTask.path $script:ProgressTask.name) -and -not ($problems -match 'progress window')) { $problems += 'progress window task: not found after registration' }
+    }
+    if (Get-WddMonitorConfig $Manifest) {
+        if (-not (Test-Path -LiteralPath (Join-Path $Paths.Package $script:StatusServerScript))) { $problems += "LAN monitor: $($script:StatusServerScript) is missing from the package" }
+        else {
+            try { Register-WddStatusServerTask $Paths } catch { $problems += "LAN monitor task: $($_.Exception.Message)" }
+            if (Get-WddTask $script:StatusServerTask.path $script:StatusServerTask.name) {
+                try { Start-WddTask $script:StatusServerTask.path $script:StatusServerTask.name } catch { Write-WddLog "Could not start the LAN monitor now; it starts at the next startup: $($_.Exception.Message)" 'WARN' }
+            } elseif (-not ($problems -match 'LAN monitor')) { $problems += 'LAN monitor task: not found after registration' }
+        }
+    }
+    foreach ($p in $problems) { Write-WddLog "Helper task: $p" 'WARN' }
+    # One problem per pipeline object; callers collect them with @().
+    return $problems
+}
+
 function New-WddState {
     param([hashtable] $Manifest, [string] $SourceMode, [hashtable] $Identity)
     $now = Get-WddNow
+    $o = $Manifest.failureHandling.orchestrator
+    $boot = $null
+    try { $boot = (Get-WddBootTime).ToString('o') } catch { }
     @{
         schemaVersion        = 2
         packageId            = $Manifest.packageId
@@ -8332,6 +8918,10 @@ function New-WddState {
         initializedBy        = $Identity.Name
         deadlineUtc          = $now.AddHours([double] $Manifest.failureHandling.orchestrator.deadlineHours).ToString('o')
         stalledAfterMinutes  = [int] $Manifest.failureHandling.orchestrator.stalledAfterMinutes
+        # Orchestrator 1.2.0: no-progress limit for long Windows Update phases, restart history.
+        longOperationMinutes = $(if ($o -is [hashtable] -and $o.ContainsKey('longOperationMinutes')) { [int] $o.longOperationMinutes } else { 240 })
+        lastBootUtc          = $boot
+        restarts             = @()
         stagedFiles          = @()
         stages               = @{}
         monitorRuns          = 0
@@ -8459,16 +9049,30 @@ function Invoke-WddInitialize {
 
         $state.status = 'InProgress'
         Save-WddState $Paths $state
-        try { Register-WddMonitorTask $Paths $Manifest }
-        catch {
+        $monitorError = $null
+        try { Register-WddMonitorTask $Paths $Manifest } catch { $monitorError = $_.Exception.Message }
+        if (-not $monitorError -and -not (Get-WddTask $script:MonitorTask.path $script:MonitorTask.name)) { $monitorError = 'the task was not found after registration.' }
+        if ($monitorError) {
             # Without the monitor nothing follows the stages: say so instead of failing silently.
-            $state.message = "The monitor task $($script:MonitorTask.path)$($script:MonitorTask.name) could not be registered: $($_.Exception.Message) Run Resume-Deployment.ps1 as administrator."
+            $state.message = "The monitor task $($script:MonitorTask.path)$($script:MonitorTask.name) could not be registered: $monitorError Run Resume-Deployment.ps1 as administrator."
             Save-WddState $Paths $state
             Write-WddLog $state.message 'ERROR'
             Write-WddEvent 3002 "Deployment $($Manifest.packageId): $($state.message)" 'Error'
             return 'MonitorRegistrationFailed'
         }
-        Write-WddLog "Registered $($script:MonitorTask.path)$($script:MonitorTask.name) (SYSTEM; at startup and every 15 minutes)."
+        Write-WddLog "Registered $($script:MonitorTask.path)$($script:MonitorTask.name) (SYSTEM; at startup and every $(Get-WddMonitorInterval $Manifest) minutes)."
+        $helperProblems = @(Register-WddHelperTasks $Manifest $Paths ([string] $identity.Name))
+        # Orchestrator 1.2.0: initialization is complete only when every stage task exists.
+        $notLaunched = @(Get-WddEngineStages $Manifest | Where-Object { [string] $state.stages[$_.id].launchResult -ne 'Launched' })
+        if ($notLaunched.Count) {
+            $state.message = "Initialized, but $($notLaunched.Count) stage(s) could not be started: $(($notLaunched | ForEach-Object { "$($_.name): $($state.stages[$_.id].message)" }) -join ' ') The monitor retries automatically where it can; see the progress window."
+            Write-WddLog $state.message 'ERROR'
+            Write-WddEvent 3002 "Deployment $($Manifest.packageId): $($state.message)" 'Warning'
+        } elseif ($helperProblems.Count) {
+            $state.message = "The deployment runs, but a helper task could not be registered: $($helperProblems -join '; ')"
+        }
+        Save-WddState $Paths $state
+        Add-WddActivity $Paths $(if ($notLaunched.Count) { $state.message } else { "Deployment started: $(@(Get-WddEngineStages $Manifest).Count) stage(s) scheduled ($((Get-WddEngineStages $Manifest | ForEach-Object { $_.name }) -join ', '))." }) $(if ($notLaunched.Count) { 'error' } else { 'info' })
         $snapshot = Get-WddSnapshot $Manifest $Paths $state
         Write-WddJson $Paths.Status $snapshot
         try {
@@ -8482,8 +9086,14 @@ function Invoke-WddInitialize {
             catch { Write-WddLog "Could not create the recovery shortcut: $($_.Exception.Message)" 'WARN' }
         }
         Write-WddEvent 3000 "Deployment $($Manifest.packageId) started. Status: $($Paths.Status)."
-        try { Start-WddTask $script:MonitorTask.path $script:MonitorTask.name } catch { Write-WddLog "Could not start the monitor now; it runs within 15 minutes: $($_.Exception.Message)" 'WARN' }
-        if (-not $NoConsole) { try { Start-WddConsole $Paths } catch { Write-WddLog "Could not open the progress window: $($_.Exception.Message)" 'WARN' } }
+        try { Start-WddTask $script:MonitorTask.path $script:MonitorTask.name } catch { Write-WddLog "Could not start the monitor now; it runs within $(Get-WddMonitorInterval $Manifest) minutes: $($_.Exception.Message)" 'WARN' }
+        if (-not $NoConsole) {
+            # The progress task opens the window without elevation (single instance); a direct start is the fallback.
+            $opened = $false
+            if (Get-WddTask $script:ProgressTask.path $script:ProgressTask.name) { try { Start-WddTask $script:ProgressTask.path $script:ProgressTask.name; $opened = $true } catch { Write-WddLog "Could not start the progress task: $($_.Exception.Message)" 'WARN' } }
+            if (-not $opened) { try { Start-WddConsole $Paths } catch { Write-WddLog "Could not open the progress window: $($_.Exception.Message)" 'WARN' } }
+        }
+        if ($notLaunched.Count) { return 'InitializedWithProblems' }
         return 'Initialized'
     } finally {
         Exit-WddMutex $mutex
@@ -8503,7 +9113,9 @@ if ($script:InitMain) {
     }
     $paths = Get-WddPaths $manifest.dataRoot
     $outcome = Invoke-WddInitialize $manifest $manifestPath $a.SourceMode $root $a.EmbeddedRoot $paths -NoConsole:$a.NoConsole
-    Write-Output "Deployment: $outcome. Log: $($paths.Log)"
+    $detail = ''
+    if ($outcome -eq 'InitializedWithProblems') { $s = (Read-WddDeploymentState $paths).State; if ($s) { $detail = " $($s.message)" } }
+    Write-Output "Deployment: $outcome.$detail Log: $($paths.Log)"
     if ($outcome -in 'Initialized', 'AlreadyCompleted', 'Busy') { exit 0 }
     exit 1
 }
@@ -8516,8 +9128,8 @@ if ($script:InitMain) {
 
 .DESCRIPTION
     Runs as SYSTEM from \WindowsDeploymentBuilder\Deployment (registered by
-    Initialize-Deployment.ps1) at startup and every 15 minutes, so it survives every restart. Each
-    run is short and idempotent:
+    Initialize-Deployment.ps1) at startup and every monitorIntervalMinutes (5 for packages from
+    orchestrator 1.2.0, 15 before), so it survives every restart. Each run is short and idempotent:
 
       1. Single instance (mutex shared with Initialize and Resume).
       2. Verifies the staged package against its manifest before doing anything else. A modified
@@ -8530,8 +9142,20 @@ if ($script:InitMain) {
       5. When every enabled stage is final, or the deadline has passed, runs
          Complete-Deployment.ps1 (report, marker, event, cleanup).
 
-    It never launches or re-launches an engine. A stage whose task disappeared without a result is
-    reported as Stalled and needs Resume-Deployment.ps1, so no stage can loop.
+    Orchestrator 1.2.0 (watchdog, startup reconciliation; the same monitor, not a second one):
+      - Restart detection: a new boot is recorded as planned (an engine scheduled it: restart
+        marker, a stage that was Rebooting or whose restart count grew) or unexpected, in the
+        state (restarts) and the activity feed, and the deployment shows "recovering" while the
+        unfinished stages are checked.
+      - Bounded automatic recovery, at most autoRecoveries times per stage (2 by default):
+          SYSTEM stage whose task is gone without a result  -&gt; its installer runs again
+                                                               (Invoke-WddLaunchStage, as Resume does)
+          stage with no progress whose task is not running -&gt; its task is started again
+        A stage of the signed-in user is never started from SYSTEM: it is reported with what to do.
+        When the budget is used up the stage stays Stalled and needs a technician; no loop.
+      - Stage changes, recoveries and restarts go to the activity feed.
+      - The progress window and LAN monitor tasks are registered again if they are missing.
+    Engines keep their own single-instance guards, so a recovery never runs an engine twice.
 
     Phase 5: a damaged deployment.json is replaced by its last good copy; if neither is usable the
     monitor stops (StateCorrupt) instead of acting on a guess, and the recovery tool rebuilds it.
@@ -8543,6 +9167,144 @@ param()
 $script:MonitorMain = $MyInvocation.InvocationName -ne '.'
 . (Join-Path $PSScriptRoot '..\common\DeploymentCommon.ps1')
 . (Join-Path $PSScriptRoot '..\finalization\Complete-Deployment.ps1')
+# Orchestrator 1.2.0: the launch and task functions used by the watchdog (functions only when dot-sourced).
+. (Join-Path $PSScriptRoot '..\bootstrap\Initialize-Deployment.ps1')
+
+&lt;#
+    Records a new boot: planned when an engine scheduled it (restart marker of the previous boot, a
+    stage that was Rebooting, or a stage whose restart count grew since the last run), otherwise
+    unexpected. Returns the record, or $null when Windows has not restarted since the last run.
+#&gt;
+function Step-WddRestartCheck {
+    param([hashtable] $Paths, [hashtable] $State, [hashtable] $Manifest)
+    try { $boot = Get-WddBootTime } catch { return $null }
+    $prev = ConvertTo-WddDate $State['lastBootUtc']
+    $State.lastBootUtc = $boot.ToString('o')
+    if (-not $prev -or [Math]::Abs(($boot - $prev).TotalSeconds) -le 2) { return $null }
+    $planned = $false; $by = ''; $reason = ''
+    $m = Read-WddJson $Paths.RestartMarker
+    if ($m -is [hashtable]) {
+        $mb = ConvertTo-WddDate $m['bootTimeUtc']
+        if ($mb -and [Math]::Abs(($mb - $prev).TotalSeconds) -le 2) { $planned = $true; $by = [string] $m['owner']; $reason = [string] $m['reason'] }
+    }
+    $seen = $(if ($State['seenReboots'] -is [hashtable]) { $State['seenReboots'] } else { @{} })
+    $phases = $(if ($State['seenPhases'] -is [hashtable]) { $State['seenPhases'] } else { @{} })
+    foreach ($s in Get-WddEngineStages $Manifest) {
+        if ($planned) { break }
+        $st = Read-WddJson (Join-Path $Paths.Root $s.status)
+        $now = $(if ($st -is [hashtable] -and $st.ContainsKey('reboots')) { [int] $st['reboots'] } else { 0 })
+        if ($now -gt [int] $seen[$s.id] -or [string] $phases[$s.id] -in 'Rebooting', 'RebootDeferred') { $planned = $true; $by = $s.name; $reason = $(if ($st -is [hashtable]) { [string] $st['detail'] } else { '' }) }
+    }
+    $rec = [ordered]@{ bootUtc = $boot.ToString('o'); previousBootUtc = $prev.ToString('o'); detectedUtc = (Get-WddNow).ToString('o'); planned = $planned; by = $by; reason = $reason }
+    $State.restarts = @(@(@($State['restarts']) | Where-Object { $_ }) + @($rec) | Select-Object -Last 50)
+    $State.recoveringUntilUtc = (Get-WddNow).AddMinutes(10).ToString('o')
+    $msg = $(if ($planned) { "Windows restarted (scheduled by $(if ($by) { $by } else { 'the deployment' })$(if ($reason) { ": $reason" })). Restoring deployment progress and checking unfinished tasks." }
+             else { 'Windows restarted unexpectedly (the deployment had not scheduled a restart). Restoring deployment progress and checking unfinished tasks; interrupted operations are resumed or reported.' })
+    Add-WddActivity $Paths $msg $(if ($planned) { 'info' } else { 'warning' })
+    Write-WddEvent 3007 $msg $(if ($planned) { 'Information' } else { 'Warning' })
+    return $rec
+}
+
+&lt;# What the next restart check compares against: each stage's restart count and phase. #&gt;
+function Save-WddSeenStages {
+    param([hashtable] $State, $Snapshot)
+    $r = @{}; $p = @{}
+    foreach ($s in @($Snapshot.stages)) { $r[$s.id] = [int] $s.reboots; $p[$s.id] = [string] $s.status }
+    $State.seenReboots = $r; $State.seenPhases = $p
+}
+
+&lt;#
+    Bounded automatic recovery of stalled stages (see the description). Returns the number of
+    recoveries attempted in this run.
+#&gt;
+function Invoke-WddWatchdog {
+    param([hashtable] $Manifest, [hashtable] $Paths, [hashtable] $State, $Snapshot)
+    $o = $Manifest.failureHandling.orchestrator
+    $max = $(if ($o -is [hashtable] -and $o.ContainsKey('autoRecoveries')) { [int] $o.autoRecoveries } else { 2 })
+    $acted = 0
+    foreach ($s in @($Snapshot.stages)) {
+        if ($s.state -eq 'Final' -or -not $State.stages.ContainsKey($s.id)) { continue }
+        $stage = Get-WddStage $Manifest $s.id
+        $rec = $State.stages[$s.id]
+        $action = $null; $why = ''
+        if ($s.state -eq 'Stalled') { $action = 'Relaunch'; $why = 'its scheduled task is missing and it has no result' }
+        elseif ($s.state -eq 'LaunchFailed' -and [string] $rec['message'] -notlike '*must be started by the signed-in user*') { $action = 'Relaunch'; $why = "it could not be started ($($rec['message']))" }
+        elseif ($s.stale) {
+            $info = Get-WddTaskInfo $stage.task.path $stage.task.name
+            if ($info.Exists -and $info.State -ne 'Running') { $action = 'StartTask'; $why = "no progress for $($s.staleMinutes) minutes and its task is not running (last result 0x$('{0:X8}' -f ([int64] $info.LastResult -band 4294967295)))" }
+            elseif ($info.Exists) {
+                if (-not $rec['staleReported']) {
+                    $rec.staleReported = $true
+                    Add-WddActivity $Paths "$($s.name): no progress detected for $($s.staleMinutes) minutes while its task is still running. Waiting; technician attention may be required if this continues." 'warning'
+                }
+                continue
+            }
+        }
+        if (-not $action) { if ($rec['staleReported'] -and -not $s.stale) { $rec.staleReported = $false }; continue }
+        if ($stage.context -eq 'user') {
+            # WinGet runs only as the signed-in user: never started from SYSTEM.
+            if (-not $rec['userActionReported']) {
+                $rec.userActionReported = $true
+                $who = $(if ($rec['user']) { [string] $rec['user'] } else { 'the deployment user' })
+                Add-WddActivity $Paths "$($s.name): $why. It must be restarted by $who`: sign in and run Resume-Deployment.ps1 -RestartStage $($s.id) as administrator. Technician attention required." 'error'
+            }
+            continue
+        }
+        $used = [int] $rec['autoRecoveries']
+        if ($used -ge $max) {
+            if (-not $rec['autoRecoveryExhausted']) {
+                $rec.autoRecoveryExhausted = $true
+                $msg = "$($s.name): $why. Automatic recovery was already attempted $max time(s). Technician attention required: see the log, then run Resume-Deployment.ps1 -RestartStage $($s.id)."
+                Add-WddActivity $Paths $msg 'error'
+                Write-WddEvent 3008 $msg 'Error'
+            }
+            continue
+        }
+        $rec.autoRecoveries = $used + 1
+        $ok = $false; $err = ''
+        if ($action -eq 'Relaunch') {
+            $rec.launchResult = ''; $rec.attempts = 0
+            $r = Invoke-WddLaunchStage $stage $Paths $State (Get-WddIdentity) ([int] $o.launchAttempts)
+            $ok = $r.launchResult -eq 'Launched'
+            if (-not $ok) { $err = [string] $r.message }
+        } else {
+            try { Start-WddTask $stage.task.path $stage.task.name; $ok = $true } catch { $err = $_.Exception.Message }
+        }
+        $State.recoveries = @(@($State['recoveries']) + @(@{ atUtc = (Get-WddNow).ToString('o'); by = 'monitor (automatic)'; action = "Automatic$action"; stage = $s.id; reason = $why
+                                                            accepted = @(if ($ok) { "stage:$($s.id)" }); refused = @(if (-not $ok) { "stage:$($s.id)" }); attempt = $rec.autoRecoveries; message = $err }))
+        $State.recoveringUntilUtc = (Get-WddNow).AddMinutes(10).ToString('o')
+        $msg = "$($s.name): no progress ($why). Automatic recovery attempted ($(if ($action -eq 'Relaunch') { 'stage started again' } else { 'task started again' }), $($rec.autoRecoveries) of $max): $(if ($ok) { 'done; technician attention may be required if it still does not progress.' } else { "it failed: $err Technician attention may be required." })"
+        Add-WddActivity $Paths $msg $(if ($ok) { 'warning' } else { 'error' })
+        Write-WddEvent 3008 $msg $(if ($ok) { 'Warning' } else { 'Error' })
+        $acted++
+    }
+    return $acted
+}
+
+&lt;# One activity entry for every stage whose state or phase changed since the last run. #&gt;
+function Step-WddStageActivity {
+    param([hashtable] $Paths, [hashtable] $State, $Snapshot)
+    $seen = $(if ($State['seenStages'] -is [hashtable]) { $State['seenStages'] } else { @{} })
+    foreach ($s in @($Snapshot.stages)) {
+        $sig = "$($s.state)|$($s.status)"
+        if ([string] $seen[$s.id] -eq $sig) { continue }
+        $seen[$s.id] = $sig
+        $level = $(if ($s.condition -eq 'blocked') { 'warning' } elseif ($s.state -eq 'Final') { $(if ($s.outcome -eq 'ok') { 'info' } elseif ($s.outcome -eq 'failed') { 'error' } else { 'warning' }) } else { 'info' })
+        Add-WddActivity $Paths "$($s.name): $($s.activity)" $level
+    }
+    $State.seenStages = $seen
+}
+
+&lt;# The progress window and LAN monitor tasks, registered again if they were removed while the deployment runs. #&gt;
+function Confirm-WddHelperTasks {
+    param([hashtable] $Manifest, [hashtable] $Paths, [hashtable] $State)
+    $user = [string] $State['initializedBy']
+    $missing = (-not (Get-WddTask $script:ProgressTask.path $script:ProgressTask.name) -and $user -and $user -notmatch '(?i)^(NT AUTHORITY\\)?SYSTEM$') -or
+               ((Get-WddMonitorConfig $Manifest) -and -not (Get-WddTask $script:StatusServerTask.path $script:StatusServerTask.name))
+    if (-not $missing) { return }
+    $problems = @(Register-WddHelperTasks $Manifest $Paths $user)
+    Add-WddActivity $Paths $(if ($problems.Count) { "A helper task could not be registered again: $($problems -join '; ')" } else { 'The progress window and monitor tasks were registered again.' }) $(if ($problems.Count) { 'warning' } else { 'info' })
+}
 
 function Invoke-WddMonitor {
     param([hashtable] $Paths)
@@ -8583,7 +9345,14 @@ function Invoke-WddMonitor {
 
         $state.monitorRuns = [int] $state.monitorRuns + 1
         $state.lastMonitorUtc = (Get-WddNow).ToString('o')
+        Limit-WddActivity $Paths
+        # Orchestrator 1.2.0: restart detection, bounded recovery, activity feed, helper tasks.
+        [void] (Step-WddRestartCheck $Paths $state $manifest)
         $snapshot = Get-WddSnapshot $manifest $Paths $state
+        if ((Invoke-WddWatchdog $manifest $Paths $state $snapshot) -gt 0) { $snapshot = Get-WddSnapshot $manifest $Paths $state }
+        Step-WddStageActivity $Paths $state $snapshot
+        Save-WddSeenStages $state $snapshot
+        if (-not $snapshot.allFinal) { try { Confirm-WddHelperTasks $manifest $Paths $state } catch { Write-WddLog "Helper tasks: $($_.Exception.Message)" 'WARN' } }
         # Phase 4.3: the ongoing update policy, once the initial Windows Update stage is final.
         if (Get-Command Step-WddUpdatePolicy -ErrorAction SilentlyContinue) {
             $policy = Step-WddUpdatePolicy $manifest $Paths $state $snapshot
@@ -8628,12 +9397,17 @@ if ($script:MonitorMain) {
 
 .DESCRIPTION
     Reads the deployment state and what each engine wrote, live (it does not wait for the monitor):
-    current stage, finished stages, the application being installed, applications remaining,
-    pending restart, warnings, failures and whether a person needs to act.
+    current stage, what each stage is doing and why it waits, when it last made progress, the
+    application being installed, applications remaining, pending restart, recent activity
+    (restarts, retries, failures, recoveries), whether a person needs to act, and the address of
+    the LAN monitor when the package enables it.
 
-    -Watch refreshes every 15 seconds until the deployment has finished. The window that opens
-    after the first sign-in runs this with -Watch; it can be closed at any time without affecting
-    the deployment.
+    -Watch refreshes every 7 seconds until the deployment has finished. Orchestrator 1.2.0: the
+    task \WindowsDeploymentBuilder\Progress opens it with -Watch -AutoStarted at every sign-in of
+    the deployment user while the deployment runs. Only one window runs per session (a second one
+    exits at once). It is a viewer: closing it never affects the deployment, and it stops opening
+    once the deployment has finished (the task is removed then; -AutoStarted also exits at once
+    when the deployment is already complete).
 
     Phase 9: when the deployment verifies itself and its configuration asks for it, the watching
     window opens the technician health report once, when verification has written it (never at a
@@ -8642,12 +9416,46 @@ if ($script:MonitorMain) {
 [CmdletBinding()]
 param(
     [switch] $Watch,
-    [int] $IntervalSeconds = 15
+    [int] $IntervalSeconds = 7,
+    [switch] $AutoStarted
 )
 
 $script:ShowMain = $MyInvocation.InvocationName -ne '.'
-$script:ShowArgs = @{ Watch = [bool] $Watch; Interval = $IntervalSeconds }
+$script:ShowArgs = @{ Watch = [bool] $Watch; Interval = [Math]::Max(2, $IntervalSeconds); AutoStarted = [bool] $AutoStarted }
 . (Join-Path $PSScriptRoot '..\common\DeploymentCommon.ps1')
+
+$script:ProgressMutexName = 'Local\WindowsDeploymentBuilder-Progress'
+$script:ConditionText = @{ active = 'Working'; waiting = 'Waiting'; idle = 'Idle'; blocked = 'NEEDS ATTENTION'; finished = 'Finished' }
+
+&lt;# The LAN monitor's address and token as the status server wrote them (state\monitor.json), or $null. #&gt;
+function Get-WddMonitorInfo {
+    param([hashtable] $Paths)
+    if (-not $Paths.ContainsKey('MonitorInfo')) { return $null }
+    $m = Read-WddJson $Paths.MonitorInfo
+    if ($m -is [hashtable] -and $m['token'] -and $m['port']) { return $m }
+    return $null
+}
+
+&lt;# Lines describing how to reach the LAN monitor (empty when the package has none). #&gt;
+function Format-WddMonitorLines {
+    param([hashtable] $Manifest, [hashtable] $Paths)
+    $l = @()
+    if (-not $Manifest.ContainsKey('monitor') -or $Manifest.monitor -isnot [hashtable] -or -not $Manifest.monitor['enabled']) { return }
+    $m = Get-WddMonitorInfo $Paths
+    if (-not $m) { return 'Monitor        : starting (the address appears here once it runs)' }
+    if ([string] $m['mode'] -in 'stopped', 'error') { return "Monitor        : $($m['mode']). $($m['message'])" }
+    $fragment = "/#t=$($m['token'])"
+    $lan = @(@($m['urls']) | Where-Object { $_ -and $_ -notmatch '127\.0\.0\.1|localhost' })
+    if ($m['lanAccess'] -and $lan.Count) {
+        $l += "Monitor        : $($lan[0])$fragment"
+        foreach ($u in @($lan | Select-Object -Skip 1)) { $l += "                 $u$fragment" }
+        $l += '                 Open it in a browser on another computer, phone or tablet on this network (read-only).'
+    } else {
+        $l += "Monitor        : http://127.0.0.1:$($m['port'])$fragment  (this computer only)"
+    }
+    if ($m['message']) { $l += "                 $($m['message'])" }
+    return $l
+}
 
 function Format-WddStatus {
     param([hashtable] $Manifest, [hashtable] $Paths, [hashtable] $State)
@@ -8656,28 +9464,43 @@ function Format-WddStatus {
     $l.Add('Windows Deployment Builder - deployment progress')
     $l.Add('================================================')
     $overall = if ($State -and $State.status -eq 'Completed') { "Finished: $($State.overall)" } elseif ($State) { $State.status } else { 'Not started' }
-    $l.Add("Deployment     : $overall")
+    $cond = $(if ($s.Contains('condition')) { [string] $s.condition } else { '' })
+    $l.Add("Deployment     : $overall$(if ($cond -and $cond -ne 'complete') { " ($cond)" })")
     $l.Add("Outcome        : $($s.outcome) (code $($s.outcomeCode)) $($s.outcomeDetail)")
     if ($State -and $State.message) { $l.Add("                 $($State.message)") }
     if ($State) { $l.Add("Started (UTC)  : $($State.initializedUtc)   deadline: $($State.deadlineUtc)") }
     $l.Add("Current stage  : $(if ($s.currentStage) { $s.currentStage } else { '-' })")
+    $l.Add("Last activity  : $(if ($s.Contains('lastActivityUtc') -and $s.lastActivityUtc) { "$(Format-WddAge $s.lastActivityUtc) ($($s.lastActivityUtc))" } else { 'none reported yet' })")
     $l.Add("Restart pending: $(if ($s.restartPending) { 'yes (a restart has been scheduled)' } else { 'no' })")
+    if ($s.Contains('recovering') -and $s.recovering) { $l.Add('Recovering     : Windows restarted or a stage was recovered; unfinished tasks are being checked.') }
+    foreach ($m in Format-WddMonitorLines $Manifest $Paths) { $l.Add($m) }
     $l.Add('')
-    $l.Add(('{0,-22} {1,-12} {2,-22} {3}' -f 'Stage', 'State', 'Status', 'Detail'))
+    $l.Add(('{0,-22} {1,-16} {2}' -f 'Stage', 'State', 'What is happening'))
     foreach ($st in @($s.stages)) {
-        $l.Add(('{0,-22} {1,-12} {2,-22} {3}' -f $st.name, $st.state, $st.status, $st.detail))
+        $c = $(if ($st.Contains('condition') -and $script:ConditionText.ContainsKey([string] $st.condition)) { $script:ConditionText[[string] $st.condition] } else { $st.state })
+        $what = $(if ($st.Contains('activity') -and $st.activity) { $st.activity } else { "$($st.status) $($st.detail)".Trim() })
+        $l.Add(('{0,-22} {1,-16} {2}' -f $st.name, $c, $what))
         if ($st.id -eq 'applications') {
-            if ($st.current) { $l.Add("  installing now: $($st.current)") }
-            if ($null -ne $st.total -and [int] $st.total -gt 0) { $l.Add("  applications: $($st.done) of $($st.total) done, $([int] $st.total - [int] $st.done) remaining") }
+            if ($st.current) { $l.Add("  installing now: $($st.current) (progress unavailable: WinGet does not report it)") }
+            if ($null -ne $st.total -and [int] $st.total -gt 0) { $l.Add("  applications: $($st.done) of $($st.total) done, $([int] $st.total - [int] $st.done) remaining$(if ($st.Contains('counts') -and $st.counts.Contains('failed') -and [int] $st.counts.failed) { ", $($st.counts.failed) failed" })") }
         }
+        if ($st.Contains('lastError') -and $st.lastError -and $st.state -ne 'Final') { $l.Add("  last problem ($(Format-WddAge $st.lastErrorUtc)): $($st.lastError)") }
         if ($st.reboots) { $l.Add("  restarts so far: $($st.reboots)") }
-        if ($st.idle) { $l.Add("  note: $($st.idle)") }
         if ($st.outstanding) { $l.Add("  outstanding operations: $($st.outstanding) (retry them with the deployment recovery tool)") }
     }
-    if ($s.drivers.state -eq 'NotPartOfDeployment') { $l.Add(('{0,-22} {1,-12} {2,-22} {3}' -f 'Hardware &amp; drivers', 'Off', '', 'Not part of this deployment')) }
-    elseif ($s.drivers.state -eq 'NotImplemented') { $l.Add(('{0,-22} {1,-12} {2,-22} {3}' -f 'Manufacturer drivers', 'NotImplemented', '', 'Not part of this version')) }
+    if ($s.drivers.state -eq 'NotPartOfDeployment') { $l.Add(('{0,-22} {1,-16} {2}' -f 'Hardware &amp; drivers', 'Off', 'Not part of this deployment')) }
+    elseif ($s.drivers.state -eq 'NotImplemented') { $l.Add(('{0,-22} {1,-16} {2}' -f 'Manufacturer drivers', 'NotImplemented', 'Not part of this version')) }
     if ($s.Contains('networkDriverMissing') -and $s.networkDriverMissing) { $l.Add("NETWORK: $($s.networkDriverMissing)") }
     $l.Add('')
+    $recent = @(Read-WddActivity $Paths 6)
+    if ($recent.Count) {
+        $l.Add('Recent activity')
+        foreach ($e in $recent) {
+            $t = ConvertTo-WddDate $e['utc']
+            $l.Add(('  {0}  {1}' -f $(if ($t) { $t.ToLocalTime().ToString('HH:mm:ss') } else { '--:--:--' }), $e['message']))
+        }
+        $l.Add('')
+    }
     if (@($s.needsAttention).Count) {
         $l.Add('NEEDS ATTENTION')
         foreach ($n in $s.needsAttention) { $l.Add("  - $n") }
@@ -8701,31 +9524,62 @@ function Get-WddHealthReportToOpen {
     return ''
 }
 
+&lt;#
+    Orchestrator 1.2.0: one progress window per session. Returns the held mutex, or $null when
+    another window already shows the progress.
+#&gt;
+function Enter-WddProgressWindow {
+    $created = $false
+    $m = New-Object System.Threading.Mutex($false, $script:ProgressMutexName, [ref] $created)
+    try { if ($m.WaitOne(0)) { return $m } } catch [System.Threading.AbandonedMutexException] { return $m }
+    $m.Dispose()
+    return $null
+}
+
+&lt;# What an automatically opened window does: $true = show the progress, $false = exit (finished or not started). #&gt;
+function Test-WddShowAutomatically {
+    param($State)
+    return [bool] ($State -and [string] $State.status -notin 'Completed', 'StagingFailed')
+}
+
 if ($script:ShowMain) {
     $package = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
     $manifest = Read-WddManifest (Join-Path $package 'deployment-manifest.json')
     $paths = Get-WddPaths $manifest.dataRoot
-    do {
-        $state = (Read-WddDeploymentState $paths).State
-        $out = Format-WddStatus $manifest $paths $state
-        if ($script:ShowArgs.Watch) { Clear-Host }
-        Write-Output $out.Text
-        if (-not $script:ShowArgs.Watch -or $out.Done) { break }
-        Write-Output ''
-        Write-Output "Refreshing every $($script:ShowArgs.Interval) s. You can close this window; the deployment continues."
-        Start-Sleep -Seconds $script:ShowArgs.Interval
-    } while ($true)
-    if ($script:ShowArgs.Watch -and $state -and $state.status -eq 'Completed') {
-        # Verification runs right after completion: wait for its report (at most 5 minutes), open it once.
-        $html = ''
-        for ($i = 0; $i -lt 20 -and -not $html; $i++) { $html = Get-WddHealthReportToOpen $paths $state; if (-not $html) { Start-Sleep -Seconds 15; $state = (Read-WddDeploymentState $paths).State } }
-        if ($html) {
-            Write-Output ''
-            Write-Output "Health report: $html"
-            try { Start-Process -FilePath (Join-Path $env:SystemRoot 'explorer.exe') -ArgumentList "`"$html`"" } catch { Write-Output "Open it by hand: $($_.Exception.Message)" }
-        }
+    $state = (Read-WddDeploymentState $paths).State
+    # Opened at sign-in: nothing to show once the deployment has finished.
+    if ($script:ShowArgs.AutoStarted -and -not (Test-WddShowAutomatically $state)) { exit 0 }
+    $window = $null
+    if ($script:ShowArgs.Watch) {
+        $window = Enter-WddProgressWindow
+        if (-not $window) { Write-Output 'The deployment progress window is already open.'; exit 0 }
+        try { $Host.UI.RawUI.WindowTitle = 'Deployment Progress - Windows Deployment Builder' } catch { }
     }
-    if ($script:ShowArgs.Watch) { Write-Output ''; Read-Host 'Press Enter to close' | Out-Null }
+    try {
+        do {
+            $state = (Read-WddDeploymentState $paths).State
+            $out = Format-WddStatus $manifest $paths $state
+            if ($script:ShowArgs.Watch) { Clear-Host }
+            Write-Output $out.Text
+            if (-not $script:ShowArgs.Watch -or $out.Done) { break }
+            Write-Output ''
+            Write-Output "Refreshing every $($script:ShowArgs.Interval) s ($((Get-Date).ToString('HH:mm:ss'))). You can close this window; the deployment continues."
+            Start-Sleep -Seconds $script:ShowArgs.Interval
+        } while ($true)
+        if ($script:ShowArgs.Watch -and $state -and $state.status -eq 'Completed') {
+            # Verification runs right after completion: wait for its report (at most 5 minutes), open it once.
+            $html = ''
+            for ($i = 0; $i -lt 20 -and -not $html; $i++) { $html = Get-WddHealthReportToOpen $paths $state; if (-not $html) { Start-Sleep -Seconds 15; $state = (Read-WddDeploymentState $paths).State } }
+            if ($html) {
+                Write-Output ''
+                Write-Output "Health report: $html"
+                try { Start-Process -FilePath (Join-Path $env:SystemRoot 'explorer.exe') -ArgumentList "`"$html`"" } catch { Write-Output "Open it by hand: $($_.Exception.Message)" }
+            }
+        }
+        if ($script:ShowArgs.Watch) { Write-Output ''; Read-Host 'Press Enter to close' | Out-Null }
+    } finally {
+        if ($window) { try { $window.ReleaseMutex() } catch { }; $window.Dispose() }
+    }
     exit 0
 }
 		</File>
@@ -8816,7 +9670,7 @@ function Invoke-WddResume {
             Write-WddLog "Resume: $($script:ResumeDetail)" 'ERROR'
             return 'MonitorRegistrationFailed'
         }
-        try { Start-WddTask $script:MonitorTask.path $script:MonitorTask.name } catch { Write-WddLog "Resume: could not start the monitor now; it runs within 15 minutes: $($_.Exception.Message)" 'WARN' }
+        try { Start-WddTask $script:MonitorTask.path $script:MonitorTask.name } catch { Write-WddLog "Resume: could not start the monitor now; it runs within $(Get-WddMonitorInterval $manifest) minutes: $($_.Exception.Message)" 'WARN' }
         Write-WddEvent 3001 "Deployment $($manifest.packageId) resumed manually$(if ($RestartStage) { " (stage $RestartStage restarted)" })."
         return 'Resumed'
     } finally {
@@ -8856,6 +9710,19 @@ if ($script:ResumeMain) {
     Windows itself (read-only), the result is added to the report, and the "Windows Deployment -
     Health Report" shortcut opens the technician dashboard. A pending restart registers a startup
     re-check that removes itself.
+
+    Orchestrator 1.2.0: the report also contains
+      - a Device Manager check (read-only): devices with a problem code, without a driver, or
+        unknown to Windows, with friendly names, hardware IDs and the problem in words. A USB
+        descriptor or reset failure is reported as a likely hardware or connection problem, not
+        as a missing driver. Unresolved devices make a successful deployment CompletedWithFollowUp.
+      - how each application was confirmed: Verified (WinGet finds the exact package ID
+        installed), EngineReported (the installer reported success, not independently confirmed),
+        NotVerified (reported success, but WinGet does not find it), Failed, Deferred (manual,
+        deselected, needs a person or a restart) or Incomplete;
+      - Windows Update counts for optional updates and drivers, and the updates needing a person;
+      - the restart history (planned or unexpected) and every recovery.
+    The progress window task is removed; the LAN monitor ends itself (see its script).
 #&gt;
 [CmdletBinding()]
 param(
@@ -8890,6 +9757,73 @@ function Get-WddSystemInfo {
     }
 }
 
+# Windows' documented Device Manager problem codes (CM_PROB_*), in words (same wording as the health check).
+$script:WddProblemCodes = @{
+    1 = 'not configured correctly'; 3 = 'driver may be corrupted or memory is low'; 10 = 'cannot start'; 12 = 'not enough free resources'; 14 = 'needs a restart to work'
+    18 = 'drivers must be reinstalled'; 19 = 'configuration in the registry is damaged'; 21 = 'being removed'; 22 = 'disabled'; 24 = 'not present, not working or missing drivers'
+    28 = 'no driver installed'; 29 = 'disabled by the firmware'; 31 = 'not working properly (driver could not be loaded)'; 32 = 'driver service disabled'; 37 = 'driver failed to initialize'
+    39 = 'driver is corrupted or missing'; 40 = 'driver registry entry is damaged'; 41 = 'driver loaded but the hardware was not found'; 43 = 'the device reported a problem'
+    45 = 'not connected'; 47 = 'prepared for safe removal'; 48 = 'driver blocked'; 52 = 'driver signature could not be verified'
+}
+
+&lt;# Present Plug and Play devices (read-only): name, class, problem code and up to five hardware IDs. #&gt;
+function Get-WddPnpDevices {
+    @(Get-CimInstance -ClassName Win32_PnPEntity -ErrorAction Stop | Where-Object { $_.Present -ne $false } | ForEach-Object {
+        @{ name = [string] $_.Name; class = [string] $_.PNPClass; problemCode = $(if ($null -ne $_.ConfigManagerErrorCode) { [int] $_.ConfigManagerErrorCode } else { 0 })
+           hardwareIds = @(@($_.HardwareID) | Where-Object { $_ } | Select-Object -First 5) }
+    })
+}
+
+&lt;#
+    Devices that still need attention at the end of the deployment. Disabled (22) and disconnected
+    (45) devices are not counted. Kinds: NoDriver, UnknownDevice, RestartRequired,
+    HardwareOrConnection (USB descriptor/reset failures: usually a cable, hub, port or device fault,
+    not a missing driver), Problem (any other problem code). Instance IDs are not reported (they can
+    contain serial numbers).
+#&gt;
+function Get-WddDeviceReport {
+    $devices = $null
+    # Each device is one pipeline object (a hashtable); an empty list is an empty array.
+    try { $devices = @(Get-WddPnpDevices | Where-Object { $_ -is [System.Collections.IDictionary] }) } catch { return [ordered]@{ checked = $false; checkedUtc = (Get-WddNow).ToString('o'); error = "The device list could not be read: $($_.Exception.Message)"; devices = 0; unresolved = @() } }
+    $out = @()
+    foreach ($d in $devices) {
+        $code = [int] $d['problemCode']
+        $name = [string] $d['name']
+        $class = [string] $d['class']
+        $ids = @(@($d['hardwareIds']) | Where-Object { $_ })
+        $unknown = (-not $class -or $class -eq 'Unknown' -or $name -match '(?i)^unknown device$' -or -not $name)
+        if ($code -in 22, 45) { continue }
+        if ($code -eq 0 -and -not $unknown) { continue }
+        $descriptor = (@($ids | Where-Object { $_ -match '(?i)(DEVICE_DESCRIPTOR_FAILURE|CONFIG_DESCRIPTOR_FAILURE|RESET_FAILURE|SET_ADDRESS_FAILURE)' }).Count -gt 0) -or $name -match '(?i)(Descriptor Request Failed|Port Reset Failed|Set Address Failed)'
+        $problem = $(if ($code -and $script:WddProblemCodes.ContainsKey($code)) { $script:WddProblemCodes[$code] } elseif ($code) { "problem code $code" } else { 'no matching driver' })
+        if ($descriptor) { $kind = 'HardwareOrConnection'; $note = 'The USB device did not answer Windows correctly (descriptor or reset failure). This usually means a hardware, cable, hub or port problem, not a missing driver: reconnect it, try another port, or check the device.' }
+        elseif ($code -eq 28) { $kind = 'NoDriver'; $note = 'No driver is installed. Find the driver by the hardware ID (Windows Update optional updates, or the manufacturer''s support page).' }
+        elseif ($unknown) { $kind = 'UnknownDevice'; $note = 'Windows does not recognise this device. Identify it by its hardware ID.' }
+        elseif ($code -eq 14) { $kind = 'RestartRequired'; $note = 'Restart the computer to finish installing its driver.' }
+        else { $kind = 'Problem'; $note = "Device Manager reports code ${code}: $problem. This is not necessarily a missing driver; check the device in Device Manager." }
+        $out += , ([ordered]@{ name = $(if ($name) { $name } else { 'Unknown device' }); class = $class; problemCode = $code; problem = $problem; kind = $kind; hardwareIds = $ids; note = $note })
+    }
+    return [ordered]@{ checked = $true; checkedUtc = (Get-WddNow).ToString('o'); devices = @($devices).Count; unresolved = $out }
+}
+
+&lt;#
+    How an application result was confirmed (see the description). Verification is by the exact
+    package ID (winget list --id &lt;id&gt; --exact), so a similarly named package or another version of
+    a different product never counts.
+#&gt;
+function Get-WddAppVerification {
+    param($Package)
+    $st = [string] $Package['status']
+    $det = $(if ($Package.Contains('detection')) { [string] $Package['detection'] } else { '' })
+    switch ($st) {
+        'Succeeded' { if ($det -eq 'Installed') { return 'Verified' } elseif ($det -eq 'Unconfirmed') { return 'NotVerified' } else { return 'EngineReported' } }
+        'AlreadyInstalled' { return 'Verified' }
+        { $_ -in 'Failed', 'Unavailable' } { return 'Failed' }
+        { $_ -in 'RequiresInteraction', 'RequiresRestart', 'SkippedByUser', 'Skipped' } { return 'Deferred' }
+    }
+    return 'Incomplete'
+}
+
 function New-WddReport {
     param([hashtable] $Manifest, [hashtable] $Paths, [hashtable] $State, $Snapshot, [string] $Overall, [string] $Reason)
     $system = try { Get-WddSystemInfo } catch { [ordered]@{ computerName = $env:COMPUTERNAME; error = $_.Exception.Message } }
@@ -8901,9 +9835,14 @@ function New-WddReport {
     if ($wu) {
         $r = $wu.result
         $failed = @(if ($r) { @($r.failed) | Where-Object { $_ } | ForEach-Object { [ordered]@{ kbs = @($_.kbs); title = $_.title; attempts = $_.attempts; lastResult = $_.lastResult; lastHResult = $_.lastHResult } } })
+        $person = @(if ($r -and $r.ContainsKey('requiresInteraction')) { @($r.requiresInteraction) | Where-Object { $_ } | ForEach-Object { [ordered]@{ kbs = @($_.kbs); title = $_.title; reason = $_.reason } } })
+        $counts = $(if ($r -and $r.ContainsKey('counts')) { $r.counts } else { $null })
         $wuReport = [ordered]@{ state = $wu.state; status = $wu.status; reason = $wu.detail; reboots = $wu.reboots
-                                installed = $(if ($r) { @($r.installed).Count } else { $null }); skipped = $(if ($r) { @($r.skipped).Count } else { $null }); failedUpdates = $failed }
-        foreach ($f in $failed) { $remaining += "Windows Update: $((@($f.kbs) -join ', ')) $($f.title) failed after $($f.attempts) attempt(s)." }
+                                installed = $(if ($r) { @($r.installed).Count } else { $null }); skipped = $(if ($r) { @($r.skipped).Count } else { $null }); failedUpdates = $failed
+                                installedOptional = $(if ($counts) { $counts['installedOptional'] } else { $null }); installedDrivers = $(if ($counts) { $counts['installedDrivers'] } else { $null })
+                                requiresInteraction = $person; policy = $(if ($r -and $r.ContainsKey('policy')) { $r.policy } else { $null }) }
+        foreach ($f in $failed) { $remaining += "Windows Update: $((@($f.kbs) -join ', ')) $($f.title) failed after $($f.attempts) attempt(s) ($($f.lastHResult))." }
+        foreach ($f in $person) { $remaining += "Windows Update: $((@($f.kbs) -join ', ')) $($f.title) needs a person to install it (Settings &gt; Windows Update)." }
         if ($wu.state -ne 'Final') { $incomplete += "Windows Update ($($wu.state))" }
         elseif ($wu.status -eq 'Offline') { $incomplete += 'Windows Update (Offline: no network before its runtime limit)' }
         elseif ($wu.status -eq 'Failed') { $errors += "Windows Update failed: $($wu.detail)" }
@@ -8914,14 +9853,19 @@ function New-WddReport {
         # Phase 5: lifecycle, failure class and attempt totals come from result schema 2 (absent in schema 1).
         $pk = @(if ($r) { @($r.packages) | Where-Object { $_ } | ForEach-Object {
             $x = [ordered]@{ name = $_.name; packageIdentifier = $_.packageIdentifier; source = $_.source; status = $_.status; attempts = $_.attempts; exitCode = $_.exitCode; message = $_.message }
-            foreach ($k in 'operationId', 'lifecycle', 'failureClass', 'retryable', 'detection', 'totalAttempts', 'manualRetries') { if ($_.ContainsKey($k)) { $x[$k] = $_[$k] } }
+            foreach ($k in 'operationId', 'lifecycle', 'failureClass', 'retryable', 'detection', 'totalAttempts', 'manualRetries', 'installerExitCode') { if ($_.ContainsKey($k)) { $x[$k] = $_[$k] } }
+            $x.verification = Get-WddAppVerification $x
             $x
         } })
+        $verification = [ordered]@{}
+        foreach ($v in 'Verified', 'EngineReported', 'NotVerified', 'Failed', 'Deferred', 'Incomplete') { $verification[$v] = @($pk | Where-Object { $_.verification -eq $v }).Count }
         $add = @(if ($r) { @($r.additionalSoftware) | Where-Object { $_ } })
         $appsReport = [ordered]@{ state = $apps.state; status = $apps.status; reason = $apps.detail; reboots = $apps.reboots
                                   counts = $(if ($r) { $r.counts } else { $null }); packages = $pk; additionalSoftware = $add
                                   requiresInteraction = @($pk | Where-Object { $_.status -eq 'RequiresInteraction' } | ForEach-Object { $_.name })
+                                  verification = $verification
                                   bootstrap = $(if ($r) { $r.bootstrap } else { $null }) }
+        foreach ($p in @($pk | Where-Object { $_.verification -eq 'NotVerified' })) { $remaining += "Application $($p.name): reported installed, but WinGet does not find $($p.packageIdentifier); check it by hand." }
         foreach ($p in $pk) { if ($p.status -in 'RequiresInteraction', 'RequiresRestart', 'Failed', 'Unavailable', 'Pending') { $remaining += "Application $($p.name) ($($p.source):$($p.packageIdentifier)): $($p.status). $($p.message)" } }
         foreach ($a in $add) { if ($a.status -ne 'Succeeded') { $remaining += "Additional Software $($a.name): $($a.status). $($a.message)" } }
         if ($apps.state -ne 'Final') { $incomplete += "Applications ($($apps.state))" }
@@ -9009,6 +9953,10 @@ function New-WddReport {
                                          settings = @(@($restoration['settings']) | Where-Object { $_ } | ForEach-Object { [ordered]@{ adapterId = $_['adapterId']; name = $_['name']; outcome = $_['outcome']; detail = $_['detail'] } }) }
         if (@($restoration['settings']).Count) { $recoveryCommands.restoreSettings = "powershell.exe -ExecutionPolicy Bypass -File `"$tool`" -Action RestoreSettings -BackupPath &lt;backup folder&gt;" }
     }
+    # Orchestrator 1.2.0: Device Manager at the end (read-only), restarts and recoveries.
+    $devices = $(if ($State.ContainsKey('deviceReport') -and $State.deviceReport) { $State.deviceReport } else { Get-WddDeviceReport })
+    foreach ($d in @($devices.unresolved)) { $remaining += "Device: $($d.name)$(if (@($d.hardwareIds).Count) { " [$(@($d.hardwareIds)[0])]" }): $($d.note)" }
+    if (-not $devices.checked) { $remaining += "Device Manager: $($devices.error)" }
     $outcome = Get-WddDeploymentOutcome @{ status = 'Completed'; overall = $Overall; message = $Reason } $null
     [ordered]@{
         format             = 'windows-deployment-builder/deployment-report'
@@ -9030,6 +9978,8 @@ function New-WddReport {
         wifi               = $wifi
         drivers            = $(if ($driversReport) { $driversReport } elseif ($drvStage -and $drvStage['implemented']) { [ordered]@{ state = 'NotPartOfDeployment'; note = 'Hardware-aware driver provisioning was off; no driver was installed or changed by this deployment.' } } else { [ordered]@{ state = 'NotImplemented'; note = 'No driver was installed or changed by this deployment.' } })
         restarts           = [ordered]@{ windowsUpdate = $(if ($wu) { $wu.reboots } else { 0 }); applications = $(if ($apps) { $apps.reboots } else { 0 }); drivers = $(if ($drv) { $drv.reboots } else { 0 }) }
+        restartHistory     = @(if ($State.ContainsKey('restarts')) { @($State.restarts) | Where-Object { $_ } })
+        devices            = $devices
         incompleteStages   = $incomplete
         errors             = $errors
         remainingTasks     = $remaining
@@ -9061,7 +10011,9 @@ function Format-WddReport {
         $w = $Report.windowsUpdate
         $l.Add("  Result: $($w.status) ($($w.state)). $($w.reason)")
         $l.Add("  Installed: $($w.installed)  Skipped by policy: $($w.skipped)  Restarts: $($w.reboots)")
+        if ($w.Contains('installedOptional') -and $null -ne $w.installedOptional) { $l.Add("  Of these: optional updates $($w.installedOptional), drivers $($w.installedDrivers)") }
         foreach ($f in @($w.failedUpdates)) { $l.Add("  FAILED  $((@($f.kbs) -join ', ')) $($f.title) ($($f.attempts) attempts, $($f.lastHResult))") }
+        if ($w.Contains('requiresInteraction')) { foreach ($f in @($w.requiresInteraction)) { $l.Add("  PERSON  $((@($f.kbs) -join ', ')) $($f.title): needs a person to install it") } }
     } else { $l.Add('  Not part of this deployment.') }
     $l.Add('')
     $l.Add('Applications (WinGet)')
@@ -9069,9 +10021,11 @@ function Format-WddReport {
         $a = $Report.applications
         $l.Add("  Result: $($a.status) ($($a.state)). $($a.reason)")
         $l.Add("  Restarts: $($a.reboots)")
+        if ($a.Contains('verification') -and $a.verification) { $l.Add('  Confirmation: ' + (($a.verification.Keys | Where-Object { [int] $a.verification[$_] } | ForEach-Object { "$_ $($a.verification[$_])" }) -join ', ')) }
         foreach ($p in @($a.packages)) {
             $tries = $(if ($p.Contains('totalAttempts') -and [int] $p.totalAttempts -gt 1) { " [$($p.totalAttempts) attempts$(if ([int] $p.manualRetries) { ", $($p.manualRetries) manual retr$(if ([int] $p.manualRetries -eq 1) { 'y' } else { 'ies' })" })]" } else { '' })
-            $l.Add(('  {0,-20} {1} ({2}:{3}){4} {5}' -f $p.status, $p.name, $p.source, $p.packageIdentifier, $tries, $p.message))
+            $how = $(if ($p.Contains('verification')) { " &lt;$($p.verification)&gt;" } else { '' })
+            $l.Add(('  {0,-20} {1} ({2}:{3}){4}{5} {6}' -f $p.status, $p.name, $p.source, $p.packageIdentifier, $tries, $how, $p.message))
         }
         foreach ($s in @($a.additionalSoftware)) { $l.Add(('  {0,-20} {1} (Additional Software) {2}' -f $s.status, $s.name, $s.message)) }
     } else { $l.Add('  Not part of this deployment.') }
@@ -9102,6 +10056,31 @@ function Format-WddReport {
         $l.Add('  Not implemented in this version; nothing was installed or changed.')
     }
     $l.Add('')
+    if ($Report.Contains('devices') -and $Report.devices) {
+        $dv = $Report.devices
+        $l.Add('Device Manager (at the end of the deployment)')
+        if (-not $dv.checked) { $l.Add("  Not checked: $($dv.error)") }
+        elseif (-not @($dv.unresolved).Count) { $l.Add("  $($dv.devices) device(s); none reports a problem.") }
+        else {
+            $l.Add("  $($dv.devices) device(s); $(@($dv.unresolved).Count) need attention:")
+            foreach ($d in @($dv.unresolved)) {
+                $l.Add(('  {0,-20} {1} ({2}{3})' -f $d.kind, $d.name, $(if ($d.class) { "$($d.class), " }), $(if ($d.problemCode) { "code $($d.problemCode): $($d.problem)" } else { $d.problem })))
+                if (@($d.hardwareIds).Count) { $l.Add("                       hardware ID: $(@($d.hardwareIds) -join '; ')") }
+                $l.Add("                       $($d.note)")
+            }
+        }
+        $l.Add('')
+    }
+    if ($Report.Contains('restartHistory') -and @($Report.restartHistory).Count) {
+        $l.Add('Restarts during the deployment')
+        foreach ($x in @($Report.restartHistory)) { $l.Add("  $($x.bootUtc)  $(if ($x.planned) { "planned ($($x.by)$(if ($x.reason) { ": $($x.reason)" }))" } else { 'UNEXPECTED (not scheduled by the deployment)' })") }
+        $l.Add('')
+    }
+    if ($Report.Contains('recoveries') -and @($Report.recoveries).Count) {
+        $l.Add('Recoveries')
+        foreach ($x in @($Report.recoveries)) { $l.Add("  $($x.atUtc)  $($x.action) by $($x.by)$(if ($x.Contains('stage')) { ": $($x.stage)" })$(if ($x.Contains('reason') -and $x.reason) { " ($($x.reason))" })$(if ([string] $x.action -like 'Automatic*' -and @($x.refused).Count) { ' - FAILED' })") }
+        $l.Add('')
+    }
     $l.Add('Incomplete stages')
     if (@($Report.incompleteStages).Count) { foreach ($x in $Report.incompleteStages) { $l.Add("  - $x") } } else { $l.Add('  None.') }
     $l.Add('')
@@ -9158,6 +10137,9 @@ function Complete-WddDeployment {
     $overall = Get-WddOverall $Snapshot.stages -DeadlineReached:$DeadlineReached
     # A policy that could not be applied is a follow-up, never a silent success.
     if ($overall -eq 'Succeeded' -and $Manifest.ContainsKey('updatePolicy') -and $Manifest.updatePolicy -and -not ($State.ContainsKey('updatePolicy') -and $State.updatePolicy -and $State.updatePolicy.status -in 'Applied', 'AlreadyApplied')) { $overall = 'CompletedWithFollowUp' }
+    # Orchestrator 1.2.0: devices that still need attention are a follow-up too.
+    $State.deviceReport = Get-WddDeviceReport
+    if ($overall -eq 'Succeeded' -and (@($State.deviceReport.unresolved).Count -or -not $State.deviceReport.checked)) { $overall = 'CompletedWithFollowUp' }
     $reason = if ($DeadlineReached -and -not $Snapshot.allFinal) { "The deployment deadline ($($State.deadlineUtc)) passed before every stage finished." } elseif (@($Snapshot.stages).Count -eq 0) { 'No post-installation stage was enabled.' } else { 'Every enabled stage has a final result.' }
     $report = New-WddReport $Manifest $Paths $State $Snapshot $overall $reason
     Write-WddReport $report $Paths
@@ -9172,6 +10154,7 @@ function Complete-WddDeployment {
     Write-WddLog "FINISHED: $overall. $reason Report: $($Paths.ReportText)" $(if ($overall -eq 'Succeeded') { 'INFO' } else { 'WARN' })
     $eventId = switch ($overall) { 'Succeeded' { 3100 } 'CompletedWithFollowUp' { 3101 } 'CompletedWithFailures' { 3102 } 'Failed' { 3103 } default { 3104 } }
     Write-WddEvent $eventId "Deployment $($Manifest.packageId) finished: $overall. $reason Report: $($Paths.ReportText)" $(if ($overall -eq 'Succeeded') { 'Information' } elseif ($overall -eq 'Failed') { 'Error' } else { 'Warning' })
+    Add-WddActivity $Paths "Deployment finished: $overall. $reason$(if (@($report.devices.unresolved).Count) { " $(@($report.devices.unresolved).Count) device(s) need attention." }) Report: $($Paths.ReportText)" $(if ($overall -eq 'Succeeded') { 'info' } elseif ($overall -eq 'Failed') { 'error' } else { 'warning' })
     # Phase 9: verify what the stages reported against Windows itself, now that the state says Completed.
     $health = $null
     if (Get-Command Invoke-WdhAfterDeployment -ErrorAction SilentlyContinue) {
@@ -9191,6 +10174,8 @@ function Complete-WddDeployment {
         }
     } catch { Write-WddLog "Could not update the desktop shortcuts: $($_.Exception.Message)" 'WARN' }
     try { Unregister-WddTask '\WindowsDeploymentBuilder\' 'Deployment' } catch { Write-WddLog "Could not remove the monitor task: $($_.Exception.Message)" 'WARN' }
+    # Orchestrator 1.2.0: the progress window no longer opens at sign-in.
+    try { Unregister-WddTask '\WindowsDeploymentBuilder\' 'Progress' } catch { Write-WddLog "Could not remove the progress window task: $($_.Exception.Message)" 'WARN' }
     return $overall
 }
 
@@ -9338,6 +10323,634 @@ function Step-WddUpdatePolicy {
     if (-not $final) { $r.note = 'Applied when the deployment ended; the initial Windows Update stage had not reported a final result.' }
     $State.updatePolicy = $r
     return $r
+}
+		</File>
+		<File path="C:\Windows\Setup\Scripts\Deployment\scripts\monitor\DeploymentStatusServer.ps1">
+#Requires -Version 5.1
+&lt;#
+.SYNOPSIS
+    Windows Deployment Builder - read-only HTTP deployment monitor for the local network.
+
+.DESCRIPTION
+    A small status page that a technician opens from another computer, phone or tablet while the
+    deployment runs: http://&lt;this computer's address&gt;:&lt;port&gt;/#t=&lt;access token&gt;. It shows the overall
+    status, Windows Update, applications, drivers, devices, recent activity and, at the end, the
+    final results. The page refreshes every 7 seconds.
+
+    It reuses what the deployment already writes (state, engine status and result files, the
+    activity feed, the final report) through the same functions as the progress window; it never
+    starts, stops or changes anything. Windows-native only: System.Net.HttpListener (HTTP.sys) in
+    Windows PowerShell 5.1; no Node.js, IIS, Docker, WinGet or Internet connection.
+
+    Runs as SYSTEM from \WindowsDeploymentBuilder\StatusServer (registered by
+    Initialize-Deployment.ps1 when the package enables the monitor; started at every startup,
+    restarted if it stops). Independent of the progress window and of the engines.
+
+    Security (read-only by construction):
+      - GET and HEAD only. Three static resources without data (/, /app.js, /app.css) and one data
+        endpoint, /api/status, that requires "Authorization: Bearer &lt;token&gt;". Anything else is 404/405.
+      - The token is 256 random bits, kept in &lt;dataRoot&gt;\state\monitor.json for this deployment
+        and compared in constant time. It is passed in the URL fragment (#t=...), which browsers
+        never send to a server, so it does not appear in request lines, logs or referrers.
+      - /api/status is built field by field from a whitelist (names, counts, states, the
+        deployment's own messages); passwords, Wi-Fi keys, product keys, tokens and configuration
+        are never read into it, and text that looks like a credential is masked.
+      - No cross-origin access (no CORS headers), a strict Content-Security-Policy, no framing.
+      - Bound to 127.0.0.1 unless the package enables LAN access. With LAN access, one inbound
+        Windows Firewall rule is added: TCP &lt;port&gt;, Private profile, local subnet only. It is
+        removed when the monitor stops. Router port forwarding is never configured.
+      - Without a network the deployment and the progress window are unaffected; the monitor then
+        answers on this computer only.
+
+    After the deployment has finished the page shows the final results (read-only) for
+    finalReportHours, then the monitor removes its firewall rule and its task and stops.
+
+      -Mode Serve    (default) run the server (the scheduled task)
+      -Mode Library  define the functions only (tests)
+#&gt;
+[CmdletBinding()]
+param(
+    [ValidateSet('Serve', 'Library')]
+    [string] $Mode = 'Serve'
+)
+
+$script:MonMain = $MyInvocation.InvocationName -ne '.' -and $Mode -eq 'Serve'
+. (Join-Path $PSScriptRoot '..\common\DeploymentCommon.ps1')
+Set-StrictMode -Version 2.0
+
+$script:MonitorVersion = '1.0.0'
+$script:MonitorFormat = 'windows-deployment-builder/monitor-status'
+$script:FirewallRuleName = 'WindowsDeploymentBuilder-Monitor'
+$script:TokenPattern = '^[A-Za-z0-9_-]{43}$'
+
+# ------------------------------------------------------------------------------------------------
+# Adapters (replaced by the tests)
+# ------------------------------------------------------------------------------------------------
+
+function New-WddMonitorToken {
+    $b = New-Object byte[] 32
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $rng.GetBytes($b) } finally { $rng.Dispose() }
+    ([Convert]::ToBase64String($b)).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+}
+
+&lt;# IPv4 addresses other devices can use (no loopback, no link-local 169.254.x.x). #&gt;
+function Get-WddLanAddresses {
+    @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop | Where-Object { $_.IPAddress -notmatch '^(127\.|169\.254\.)' -and [string] $_.AddressState -eq 'Preferred' } | ForEach-Object { [string] $_.IPAddress } | Sort-Object -Unique)
+}
+
+&lt;# Categories of the connected networks: Public, Private, DomainAuthenticated. #&gt;
+function Get-WddNetworkCategories { @(Get-NetConnectionProfile -ErrorAction Stop | ForEach-Object { [string] $_.NetworkCategory }) }
+
+function Set-WddMonitorFirewall {
+    param([int] $Port)
+    Get-NetFirewallRule -Name $script:FirewallRuleName -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue
+    New-NetFirewallRule -Name $script:FirewallRuleName -DisplayName 'Windows Deployment Builder - deployment monitor (read-only)' -Group 'Windows Deployment Builder' `
+        -Description 'Read-only deployment status page. Private networks, local subnet only. Removed when the deployment monitor stops.' `
+        -Direction Inbound -Action Allow -Protocol TCP -LocalPort $Port -Profile Private -RemoteAddress LocalSubnet -ErrorAction Stop | Out-Null
+}
+
+function Remove-WddMonitorFirewall { Get-NetFirewallRule -Name $script:FirewallRuleName -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue }
+
+function Remove-WddStatusServerTask { Unregister-WddTask '\WindowsDeploymentBuilder\' 'StatusServer' }
+
+# ------------------------------------------------------------------------------------------------
+# Settings, token, address
+# ------------------------------------------------------------------------------------------------
+
+&lt;# The manifest's monitor block with defaults; port, refresh and lifetime are clamped. #&gt;
+function Get-WddMonitorSettings {
+    param([hashtable] $Manifest)
+    $s = @{ enabled = $false; port = 8765; lanAccess = $false; refreshSeconds = 7; finalReportHours = 24 }
+    if ($Manifest.ContainsKey('monitor') -and $Manifest.monitor -is [hashtable]) { foreach ($k in @($s.Keys)) { if ($Manifest.monitor.ContainsKey($k) -and $null -ne $Manifest.monitor[$k]) { $s[$k] = $Manifest.monitor[$k] } } }
+    $s.enabled = [bool] $s.enabled
+    $s.lanAccess = [bool] $s.lanAccess
+    $s.port = [int] [Math]::Min(65535, [Math]::Max(1024, [int] $s.port))
+    $s.refreshSeconds = [int] [Math]::Min(60, [Math]::Max(2, [int] $s.refreshSeconds))
+    $s.finalReportHours = [int] [Math]::Min(168, [Math]::Max(0, [int] $s.finalReportHours))
+    return $s
+}
+
+&lt;#
+    Writes state\monitor.json (port, mode, token, addresses, a message for the progress window) and
+    returns it. The token of this deployment is kept across restarts, so a bookmarked address keeps
+    working. With LAN access the firewall rule is (re)created here.
+#&gt;
+function Initialize-WddMonitorInfo {
+    param([hashtable] $Paths, [hashtable] $Settings, [switch] $Refresh)
+    $old = Read-WddJson $Paths.MonitorInfo
+    $token = $(if ($old -is [hashtable] -and [string] $old['token'] -match $script:TokenPattern) { [string] $old['token'] } else { New-WddMonitorToken })
+    $info = [ordered]@{ format = 'windows-deployment-builder/monitor-info'; port = $Settings.port; lanAccess = $Settings.lanAccess; token = $token; mode = 'serving'
+                        urls = @("http://127.0.0.1:$($Settings.port)"); firewall = 'NotNeeded'; message = ''; startedUtc = (Get-WddNow).ToString('o') }
+    if ($Settings.lanAccess) {
+        $addresses = @()
+        try { $addresses = @(Get-WddLanAddresses) } catch { Write-WddLog "Monitor: network addresses could not be read: $($_.Exception.Message)" 'WARN' }
+        $info.urls = @(@($addresses | ForEach-Object { "http://$($_):$($Settings.port)" }) + @("http://127.0.0.1:$($Settings.port)"))
+        # A refresh (every minute) keeps an existing rule; it is only (re)created at start or after a failure.
+        if ($Refresh -and $old -is [hashtable] -and [string] $old['firewall'] -eq 'Added') { $info.firewall = 'Added' }
+        else { try { Set-WddMonitorFirewall $Settings.port; $info.firewall = 'Added' } catch { $info.firewall = "Failed: $($_.Exception.Message)" } }
+        if ($old -is [hashtable] -and $old['startedUtc']) { $info.startedUtc = $old['startedUtc'] }
+        $cats = @()
+        try { $cats = @(Get-WddNetworkCategories) } catch { }
+        if (-not $addresses.Count) { $info.message = 'No network connection yet: the monitor answers on this computer only. The deployment continues normally.' }
+        elseif ($info.firewall -ne 'Added') { $info.message = "The firewall rule could not be added ($($info.firewall)); other devices may not reach the monitor." }
+        elseif ($cats.Count -and -not @($cats | Where-Object { $_ -ne 'Public' }).Count) { $info.message = 'This network is set to Public, so Windows Firewall blocks the monitor from other devices. To use it, set the network to Private (Settings &gt; Network &amp; internet &gt; the connection &gt; Private network).' }
+    }
+    $same = $Refresh -and $old -is [hashtable] -and ((@($old['urls']) -join ' ') -eq (@($info.urls) -join ' ')) -and [string] $old['message'] -eq $info.message -and [string] $old['firewall'] -eq $info.firewall
+    if (-not $same) { Write-WddJson $Paths.MonitorInfo $info }
+    return $info
+}
+
+&lt;# Constant-time comparison of the presented token with the expected one. #&gt;
+function Test-WddMonitorToken {
+    param([string] $Given, [string] $Expected)
+    if (-not $Given -or -not $Expected) { return $false }
+    $a = [Text.Encoding]::ASCII.GetBytes($Given)
+    $b = [Text.Encoding]::ASCII.GetBytes($Expected)
+    $diff = $a.Length -bxor $b.Length
+    for ($i = 0; $i -lt $b.Length; $i++) { $x = $(if ($i -lt $a.Length) { $a[$i] } else { 0 }); $diff = $diff -bor ($x -bxor $b[$i]) }
+    return $diff -eq 0
+}
+
+# ------------------------------------------------------------------------------------------------
+# The status model (whitelisted fields only)
+# ------------------------------------------------------------------------------------------------
+
+&lt;# The deployment's own text, shortened, with anything that looks like a credential masked. #&gt;
+function Protect-WddText {
+    param($Text, [int] $Max = 400)
+    if ($null -eq $Text) { return '' }
+    $t = ([string] $Text) -replace '[\x00-\x08\x0B\x0C\x0E-\x1F]', ' '
+    $t = $t -replace '(?i)\b(password|passwd|pwd|passphrase|psk|wpa2?|key|token|secret|productkey)\b(\s*[:=]\s*)\S+', '$1$2[hidden]'
+    $t = $t -replace '\b[A-Z0-9]{5}(-[A-Z0-9]{5}){4}\b', '[product key hidden]'
+    if ($t.Length -gt $Max) { $t = $t.Substring(0, $Max - 3) + '...' }
+    return $t
+}
+
+function Get-WddNumber { param($Map, [string] $Key) if ($Map -and $Map.Contains($Key) -and $null -ne $Map[$Key]) { return [int] $Map[$Key] }; return $null }
+
+function ConvertTo-WddStageModel {
+    param($S)
+    if (-not $S) { return $null }
+    [ordered]@{
+        state = [string] $S.state; condition = [string] $S.condition; phase = [string] $S.status
+        activity = Protect-WddText $S.activity; waitingReason = Protect-WddText $S.waitingReason
+        lastActivityUtc = $S.lastActivityUtc; lastError = Protect-WddText $S.lastError; lastErrorUtc = $S.lastErrorUtc
+        reboots = [int] $S.reboots; stale = [bool] $S.stale
+    }
+}
+
+&lt;#
+    The model behind /api/status. Built only from the fields named here; the snapshot, the engines'
+    result files and the final report are read, never returned as they are.
+#&gt;
+function Get-WddMonitorStatus {
+    param([hashtable] $Manifest, [hashtable] $Paths, [hashtable] $Settings)
+    $now = (Get-WddNow).ToString('o')
+    $m = [ordered]@{ format = $script:MonitorFormat; version = 1; serverTimeUtc = $now; refreshSeconds = $Settings.refreshSeconds
+                     computerName = Protect-WddText $env:COMPUTERNAME 64; deploymentId = [string] $Manifest.packageId; status = 'waiting'; statusText = ''
+                     overall = ''; startedUtc = $null; completedUtc = $null; lastActivityUtc = $null; restartPending = $false
+                     windowsUpdate = $null; applications = $null; drivers = $null; attention = @(); activity = @(); final = $null }
+    $read = Read-WddDeploymentState $Paths
+    $state = $read.State
+    if ($read.Source -eq 'corrupt') { $m.status = 'attention'; $m.statusText = 'The deployment state file is damaged; see the deployment log on the computer.'; return $m }
+    if (-not $state) { $m.statusText = 'The deployment has not started yet.'; return $m }
+    $snap = Get-WddSnapshot $Manifest $Paths $state
+    $m.status = [string] $snap.condition
+    $m.statusText = Protect-WddText $(if ([string] $state.status -eq 'Completed') { "Finished: $($state.overall). $($state.message)" } else { $snap.outcomeDetail })
+    $m.overall = [string] $state['overall']
+    $m.startedUtc = $state['initializedUtc']; $m.completedUtc = $state['completedUtc']
+    $m.lastActivityUtc = $snap.lastActivityUtc
+    $m.restartPending = [bool] $snap.restartPending
+    $m.attention = @(@($snap.needsAttention) | Select-Object -First 10 | ForEach-Object { Protect-WddText $_ })
+    $stage = @{}
+    foreach ($s in @($snap.stages)) { $stage[$s.id] = $s }
+
+    if ($stage.ContainsKey('windowsUpdate')) {
+        $s = $stage['windowsUpdate']
+        $w = ConvertTo-WddStageModel $s
+        $w.current = Protect-WddText $s.current
+        $w.installed = Get-WddNumber $s.counts 'installed'
+        $w.failed = Get-WddNumber $s.counts 'failed'
+        $w.needsPerson = Get-WddNumber $s.counts 'requiresInteraction'
+        $w.installedOptional = Get-WddNumber $s.counts 'installedOptional'
+        $w.installedDrivers = Get-WddNumber $s.counts 'installedDrivers'
+        $w.attempt = Get-WddNumber $s.counts 'attempt'
+        $w.maxAttempts = Get-WddNumber $s.counts 'maxAttempts'
+        $w.rebootRequired = [bool] ($snap.restartPending -or [string] $s.status -in 'Rebooting', 'RebootDeferred')
+        # The Windows Update Agent calls used do not report bytes: no percentage or speed is invented.
+        $w.progress = 'unavailable'
+        $m.windowsUpdate = $w
+    }
+    if ($stage.ContainsKey('applications')) {
+        $s = $stage['applications']
+        $a = ConvertTo-WddStageModel $s
+        $selected = Get-WddNumber $s.counts 'selected'
+        $installed = Get-WddNumber $s.counts 'installed'
+        $failed = Get-WddNumber $s.counts 'failed'
+        if ($s.state -eq 'Final' -and $s.result -is [hashtable] -and $s.result['counts'] -is [hashtable]) {
+            $c = $s.result['counts']
+            $selected = [int] $c['total'] - [int] $c['skippedByUser']; $installed = [int] $c['succeeded'] + [int] $c['alreadyInstalled']; $failed = [int] $c['failed'] + [int] $c['unavailable']
+            $a.needsPerson = [int] $c['requiresInteraction']
+        } else { $a.needsPerson = Get-WddNumber $s.counts 'needsPerson' }
+        $a.selected = $selected; $a.installed = $installed; $a.failed = $failed
+        $a.remaining = $(if ($null -ne $s.total -and $null -ne $s.done -and $s.state -ne 'Final') { [Math]::Max(0, [int] $s.total - [int] $s.done) } elseif ($s.state -eq 'Final') { 0 } else { $null })
+        $a.current = Protect-WddText $(if ([string] $s.status -eq 'Installing') { $s.current } else { '' })
+        # WinGet does not report download progress to a redirected process: shown as unavailable.
+        $a.progress = 'unavailable'; $a.percent = $null; $a.bytesPerSecond = $null
+        $m.applications = $a
+    }
+    $drvReport = Read-WddJson (Join-Path $Paths.Root 'reports\drivers.json')
+    if ($stage.ContainsKey('drivers')) {
+        $s = $stage['drivers']
+        $d = ConvertTo-WddStageModel $s
+        $ops = @(if ($drvReport -is [hashtable]) { @($drvReport['operations']) | Where-Object { $_ -is [hashtable] } })
+        $d.installed = @($ops | Where-Object { $_['status'] -eq 'Succeeded' }).Count
+        $d.failedOrSkipped = @($ops | Where-Object { [string] $_['status'] -like 'Failed*' -or [string] $_['status'] -in 'ManualActionRequired', 'Unsupported' }).Count
+        $d.restartPending = [bool] (@($ops | Where-Object { $_['status'] -eq 'WaitingForReboot' }).Count -or $snap.restartPending)
+        $m.drivers = $d
+    } else {
+        $m.drivers = [ordered]@{ state = [string] $snap.drivers.state; condition = 'finished'; activity = 'The driver stage is not part of this deployment; Windows Update installs drivers it offers.' }
+    }
+    # Devices: the final Device Manager check, or the driver stage's own assessment while it runs.
+    $devices = @()
+    if ($state.ContainsKey('deviceReport') -and $state.deviceReport -is [hashtable]) { $devices = @(@($state.deviceReport['unresolved']) | Where-Object { $_ -is [hashtable] }) }
+    $m.drivers.unresolvedDevices = @($devices | Select-Object -First 25 | ForEach-Object { [ordered]@{ name = Protect-WddText $_['name'] 120; kind = [string] $_['kind']; problemCode = [int] $_['problemCode']; problem = Protect-WddText $_['problem'] 120; hardwareId = Protect-WddText (@($_['hardwareIds']) | Select-Object -First 1) 200; note = Protect-WddText $_['note'] } })
+
+    $events = @(Read-WddActivity $Paths 40)
+    [array]::Reverse($events)
+    $m.activity = @($events | ForEach-Object { [ordered]@{ utc = [string] $_['utc']; level = $(if ([string] $_['level'] -in 'info', 'warning', 'error') { [string] $_['level'] } else { 'info' }); source = Protect-WddText $_['source'] 32; message = Protect-WddText $_['message'] } })
+
+    if ([string] $state.status -eq 'Completed') { $m.final = Get-WddMonitorFinal $Paths $m }
+    return $m
+}
+
+&lt;# Final results from the deployment report (whitelisted). #&gt;
+function Get-WddMonitorFinal {
+    param([hashtable] $Paths, $Model)
+    $r = Read-WddJson $Paths.ReportJson
+    $f = [ordered]@{ overall = [string] $Model.overall; completed = @(); failed = @(); unresolvedDevices = @($Model.drivers.unresolvedDevices); followUp = @() }
+    if ($r -isnot [hashtable]) { return $f }
+    $f.overall = [string] $r['overall']
+    $w = $r['windowsUpdate']
+    if ($w -is [hashtable]) {
+        $f.completed += "Windows Update: $([int] $w['installed']) update(s) installed$(if ($null -ne $w['installedOptional']) { " ($([int] $w['installedOptional']) optional, $([int] $w['installedDrivers']) drivers)" }); result $($w['status'])."
+        foreach ($x in @($w['failedUpdates']) | Where-Object { $_ -is [hashtable] }) { $f.failed += Protect-WddText "Windows Update $((@($x['kbs']) -join ', ')) $($x['title']): failed after $($x['attempts']) attempt(s) ($($x['lastHResult']))" }
+    }
+    $a = $r['applications']
+    if ($a -is [hashtable]) {
+        $pk = @(@($a['packages']) | Where-Object { $_ -is [hashtable] })
+        $ok = @($pk | Where-Object { $_['status'] -in 'Succeeded', 'AlreadyInstalled' })
+        $f.completed += "Applications: $($ok.Count) of $(@($pk | Where-Object { $_['status'] -ne 'SkippedByUser' }).Count) installed$(if ($a['verification'] -is [hashtable]) { " ($([int] $a['verification']['Verified']) confirmed by WinGet)" })."
+        foreach ($x in @($pk | Where-Object { $_['status'] -in 'Failed', 'Unavailable' })) { $f.failed += Protect-WddText "Application $($x['name']): $($x['status']). $($x['message'])" }
+    }
+    $d = $r['drivers']
+    if ($d -is [hashtable] -and $d.ContainsKey('status')) { $f.completed += "Hardware and drivers: $($d['status'])." }
+    $f.followUp = @(@($r['remainingTasks']) | Where-Object { $_ } | Select-Object -First 30 | ForEach-Object { Protect-WddText $_ })
+    return $f
+}
+
+# ------------------------------------------------------------------------------------------------
+# HTTP
+# ------------------------------------------------------------------------------------------------
+
+$script:SecurityHeaders = [ordered]@{
+    'Cache-Control'           = 'no-store'
+    'X-Content-Type-Options'  = 'nosniff'
+    'Referrer-Policy'         = 'no-referrer'
+    'X-Frame-Options'         = 'DENY'
+    'Cross-Origin-Resource-Policy' = 'same-origin'
+    'Content-Security-Policy' = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+}
+
+function New-WddResponse {
+    param([int] $Status, [string] $ContentType, [string] $Body, [hashtable] $Extra = @{})
+    $h = [ordered]@{}
+    foreach ($k in $script:SecurityHeaders.Keys) { $h[$k] = $script:SecurityHeaders[$k] }
+    foreach ($k in $Extra.Keys) { $h[$k] = $Extra[$k] }
+    @{ Status = $Status; ContentType = $ContentType; Body = $Body; Headers = $h }
+}
+
+&lt;#
+    Answers one request (pure: no network; the server loop and the tests call it).
+    $Context: Token, Manifest, Paths, Settings.
+#&gt;
+function Invoke-WddMonitorRequest {
+    param([string] $Method, [string] $Path, [hashtable] $Headers, [hashtable] $Context)
+    if ($Method -notin 'GET', 'HEAD') { return New-WddResponse 405 'text/plain; charset=utf-8' 'Method not allowed. This monitor is read-only.' @{ Allow = 'GET, HEAD' } }
+    $p = ([string] $Path).Split('?')[0]
+    switch ($p) {
+        { $_ -in '/', '/index.html' } { return New-WddResponse 200 'text/html; charset=utf-8' $script:DashboardHtml }
+        '/app.js' { return New-WddResponse 200 'application/javascript; charset=utf-8' $script:DashboardJs }
+        '/app.css' { return New-WddResponse 200 'text/css; charset=utf-8' $script:DashboardCss }
+        '/favicon.ico' { return New-WddResponse 204 'text/plain' '' }
+        '/api/status' {
+            $auth = $(if ($Headers -and $Headers.ContainsKey('Authorization')) { [string] $Headers['Authorization'] } else { '' })
+            $given = $(if ($auth -match '^Bearer\s+(\S+)$') { $Matches[1] } else { '' })
+            if (-not (Test-WddMonitorToken $given ([string] $Context.Token))) {
+                return New-WddResponse 401 'application/json; charset=utf-8' '{"error":"unauthorized","message":"Open the full address shown in the Deployment Progress window; it ends with #t= followed by the access token."}' @{ 'WWW-Authenticate' = 'Bearer realm="deployment-monitor"' }
+            }
+            $model = $null
+            try { $model = Get-WddMonitorStatus $Context.Manifest $Context.Paths $Context.Settings }
+            catch {
+                # A state file being replaced at this moment, for example: the page tries again in a few seconds.
+                Write-WddLog "Monitor: status could not be built: $($_.Exception.Message)" 'WARN'
+                return New-WddResponse 503 'application/json; charset=utf-8' '{"error":"unavailable","message":"The status is being updated; trying again shortly."}' @{ 'Retry-After' = '5' }
+            }
+            return New-WddResponse 200 'application/json; charset=utf-8' ($model | ConvertTo-Json -Depth 8 -Compress)
+        }
+    }
+    return New-WddResponse 404 'text/plain; charset=utf-8' 'Not found.'
+}
+
+function Send-WddResponse {
+    param($HttpContext, [hashtable] $Response, [bool] $Head)
+    $res = $HttpContext.Response
+    $res.StatusCode = $Response.Status
+    $res.ContentType = $Response.ContentType
+    foreach ($k in $Response.Headers.Keys) {
+        # Some headers can only be set through properties (HTTP.sys); a header that cannot be set is skipped.
+        try { $res.AddHeader($k, [string] $Response.Headers[$k]) } catch { Write-WddLog "Monitor: header $k not sent: $($_.Exception.Message)" 'WARN' }
+    }
+    $bytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes([string] $Response.Body)
+    $res.ContentLength64 = $bytes.Length
+    if (-not $Head -and $bytes.Length) { $res.OutputStream.Write($bytes, 0, $bytes.Length) }
+    $res.Close()
+}
+
+&lt;# $true once the final report has been shown for finalReportHours after completion. #&gt;
+function Test-WddMonitorExpired {
+    param([hashtable] $Paths, [hashtable] $Settings)
+    $s = (Read-WddDeploymentState $Paths).State
+    if (-not $s -or [string] $s['status'] -ne 'Completed') { return $false }
+    $done = ConvertTo-WddDate $s['completedUtc']
+    return [bool] ($done -and (Get-WddNow) -ge $done.AddHours($Settings.finalReportHours))
+}
+
+&lt;# Removes the firewall rule and the task, and tells the progress window why the monitor stopped. #&gt;
+function Stop-WddMonitor {
+    param([hashtable] $Paths, [string] $Message)
+    try { Remove-WddMonitorFirewall } catch { Write-WddLog "Monitor: firewall rule not removed: $($_.Exception.Message)" 'WARN' }
+    $info = Read-WddJson $Paths.MonitorInfo
+    if ($info -is [hashtable]) { $info.mode = 'stopped'; $info.message = $Message; $info.stoppedUtc = (Get-WddNow).ToString('o'); try { Write-WddJson $Paths.MonitorInfo $info } catch { } }
+    try { Remove-WddStatusServerTask } catch { Write-WddLog "Monitor: task not removed: $($_.Exception.Message)" 'WARN' }
+    Write-WddLog "Monitor stopped: $Message"
+}
+
+&lt;#
+    The server loop: one request at a time (small, read-only answers). Every 60 seconds it refreshes
+    the addresses (a network that appears later) and checks whether its time is over.
+    -MaxSeconds limits the run (tests).
+#&gt;
+function Start-WddStatusServer {
+    param([hashtable] $Manifest, [hashtable] $Paths, [hashtable] $Settings, [hashtable] $Info, [string[]] $Prefixes = @(), [int] $MaxSeconds = 0)
+    $listener = New-Object System.Net.HttpListener
+    if (-not $Prefixes.Count) { $Prefixes = $(if ($Settings.lanAccess) { @("http://+:$($Settings.port)/") } else { @("http://127.0.0.1:$($Settings.port)/", "http://localhost:$($Settings.port)/") }) }
+    foreach ($p in $Prefixes) { $listener.Prefixes.Add($p) }
+    $listener.IgnoreWriteExceptions = $true
+    $listener.Start()
+    Write-WddLog "Monitor $($script:MonitorVersion) listening on $($Prefixes -join ', ') (LAN access: $($Settings.lanAccess))."
+    $context = @{ Token = [string] $Info.token; Manifest = $Manifest; Paths = $Paths; Settings = $Settings }
+    $started = Get-Date
+    $nextCheck = (Get-Date).AddSeconds(60)
+    try {
+        while ($true) {
+            $ar = $listener.BeginGetContext($null, $null)
+            $stop = $false
+            while (-not $ar.AsyncWaitHandle.WaitOne(1000)) {
+                if ($MaxSeconds -gt 0 -and ((Get-Date) - $started).TotalSeconds -ge $MaxSeconds) { $stop = $true; break }
+                if ((Get-Date) -ge $nextCheck) {
+                    $nextCheck = (Get-Date).AddSeconds(60)
+                    if (Test-WddMonitorExpired $Paths $Settings) { $stop = $true; Stop-WddMonitor $Paths "The deployment finished; the final results were shown for $($Settings.finalReportHours) hour(s). The report stays on this computer."; break }
+                    if ($Settings.lanAccess) { try { $fresh = Initialize-WddMonitorInfo $Paths $Settings -Refresh; $context.Token = [string] $fresh.token } catch { } }
+                }
+            }
+            if ($stop) { break }
+            $http = $listener.EndGetContext($ar)
+            try {
+                $req = $http.Request
+                $h = @{}
+                if ($req.Headers['Authorization']) { $h['Authorization'] = [string] $req.Headers['Authorization'] }
+                $r = Invoke-WddMonitorRequest $req.HttpMethod $req.Url.AbsolutePath $h $context
+                Send-WddResponse $http $r ($req.HttpMethod -eq 'HEAD')
+            } catch {
+                Write-WddLog "Monitor: request failed: $($_.Exception.Message)" 'WARN'
+                try { $http.Response.StatusCode = 500; $http.Response.Close() } catch { }
+            }
+        }
+    } finally {
+        try { $listener.Stop() } catch { }
+        $listener.Close()
+    }
+}
+
+# ------------------------------------------------------------------------------------------------
+# The page (no data in it; everything comes from /api/status with the token)
+# ------------------------------------------------------------------------------------------------
+
+$script:DashboardHtml = @'
+&lt;!doctype html&gt;
+&lt;html lang="en"&gt;
+&lt;head&gt;
+&lt;meta charset="utf-8"&gt;
+&lt;meta name="viewport" content="width=device-width, initial-scale=1"&gt;
+&lt;meta name="referrer" content="no-referrer"&gt;
+&lt;title&gt;Deployment Monitor&lt;/title&gt;
+&lt;link rel="stylesheet" href="/app.css"&gt;
+&lt;script src="/app.js" defer&gt;&lt;/script&gt;
+&lt;/head&gt;
+&lt;body&gt;
+&lt;header&gt;
+  &lt;h1 id="title"&gt;Deployment Monitor&lt;/h1&gt;
+  &lt;p id="subtitle"&gt;Windows Deployment Builder - read-only status&lt;/p&gt;
+&lt;/header&gt;
+&lt;main&gt;
+  &lt;section id="overall" class="card wide" aria-live="polite"&gt;
+    &lt;div class="row"&gt;&lt;span id="badge" class="badge"&gt;Connecting&lt;/span&gt;&lt;span id="statusText"&gt;Connecting to the deployment monitor...&lt;/span&gt;&lt;/div&gt;
+    &lt;dl class="facts"&gt;
+      &lt;dt&gt;Computer&lt;/dt&gt;&lt;dd id="computer"&gt;-&lt;/dd&gt;
+      &lt;dt&gt;Deployment&lt;/dt&gt;&lt;dd id="deployment"&gt;-&lt;/dd&gt;
+      &lt;dt&gt;Last activity&lt;/dt&gt;&lt;dd id="lastActivity"&gt;-&lt;/dd&gt;
+      &lt;dt&gt;Last contact with the monitor&lt;/dt&gt;&lt;dd id="lastContact"&gt;-&lt;/dd&gt;
+    &lt;/dl&gt;
+    &lt;ul id="attention" class="attention"&gt;&lt;/ul&gt;
+  &lt;/section&gt;
+  &lt;section class="card" aria-labelledby="wu-h"&gt;&lt;h2 id="wu-h"&gt;Windows Update&lt;/h2&gt;&lt;div id="wu"&gt;&lt;/div&gt;&lt;/section&gt;
+  &lt;section class="card" aria-labelledby="apps-h"&gt;&lt;h2 id="apps-h"&gt;Applications&lt;/h2&gt;&lt;div id="apps"&gt;&lt;/div&gt;&lt;/section&gt;
+  &lt;section class="card" aria-labelledby="drv-h"&gt;&lt;h2 id="drv-h"&gt;Drivers and devices&lt;/h2&gt;&lt;div id="drv"&gt;&lt;/div&gt;&lt;/section&gt;
+  &lt;section id="finalCard" class="card wide" hidden aria-labelledby="final-h"&gt;&lt;h2 id="final-h"&gt;Final results&lt;/h2&gt;&lt;div id="final"&gt;&lt;/div&gt;&lt;/section&gt;
+  &lt;section class="card wide" aria-labelledby="act-h"&gt;&lt;h2 id="act-h"&gt;Recent activity&lt;/h2&gt;&lt;ol id="activity" class="activity"&gt;&lt;/ol&gt;&lt;/section&gt;
+&lt;/main&gt;
+&lt;footer&gt;&lt;p&gt;Read-only. This page cannot start, stop or change anything on the computer. It refreshes every &lt;span id="refresh"&gt;7&lt;/span&gt; seconds.&lt;/p&gt;&lt;/footer&gt;
+&lt;/body&gt;
+&lt;/html&gt;
+'@
+
+$script:DashboardCss = @'
+:root { --bg: #f4f6f8; --card: #ffffff; --text: #1b2430; --muted: #5b6776; --line: #dde3ea; --ok: #1e7b3a; --wait: #8a6100; --bad: #b3261e; --act: #1f5fbf; --rec: #6b3fa0; }
+@media (prefers-color-scheme: dark) { :root { --bg: #11161c; --card: #1a2129; --text: #e7edf3; --muted: #a3b0bf; --line: #2c3743; --ok: #5cc27a; --wait: #e0b44a; --bad: #ff8a80; --act: #7fb0ff; --rec: #c4a3f0; } }
+* { box-sizing: border-box; }
+body { margin: 0; font: 15px/1.45 system-ui, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); }
+header, footer { padding: 16px; max-width: 1100px; margin: 0 auto; }
+h1 { margin: 0; font-size: 1.5rem; }
+h2 { margin: 0 0 8px; font-size: 1.1rem; }
+#subtitle, footer { color: var(--muted); font-size: .9rem; }
+main { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); padding: 0 16px 16px; max-width: 1100px; margin: 0 auto; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px; min-width: 0; overflow-wrap: anywhere; }
+.wide { grid-column: 1 / -1; }
+.row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.badge { display: inline-block; padding: 3px 10px; border-radius: 999px; font-weight: 600; color: #fff; background: var(--muted); }
+.badge.active { background: var(--act); } .badge.waiting { background: var(--wait); } .badge.recovering { background: var(--rec); }
+.badge.complete { background: var(--ok); } .badge.attention { background: var(--bad); } .badge.offline { background: var(--bad); }
+.facts { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 10px 0 0; }
+.facts dt { color: var(--muted); } .facts dd { margin: 0; }
+.attention { margin: 10px 0 0; padding-left: 18px; color: var(--bad); }
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 8px 0 0; }
+.kv span:nth-child(odd) { color: var(--muted); }
+.activityText { margin: 0; }
+.error { color: var(--bad); }
+.activity { list-style: none; margin: 0; padding: 0; }
+.activity li { padding: 6px 0; border-top: 1px solid var(--line); display: grid; grid-template-columns: max-content 1fr; gap: 10px; }
+.activity li:first-child { border-top: 0; }
+.activity time { color: var(--muted); font-variant-numeric: tabular-nums; }
+.activity .warning { color: var(--wait); } .activity .error { color: var(--bad); }
+ul.plain { margin: 6px 0 0; padding-left: 18px; }
+'@
+
+$script:DashboardJs = @'
+(function () {
+  'use strict';
+  var KEY = 'wdbMonitorToken';
+  var token = '';
+  var timer = null;
+  var refresh = 7;
+  var lastOk = null;
+  try {
+    var m = /(?:^#|&amp;)t=([A-Za-z0-9_-]{43})(?:&amp;|$)/.exec(window.location.hash);
+    if (m) { token = m[1]; sessionStorage.setItem(KEY, token); history.replaceState(null, '', window.location.pathname); }
+    else { token = sessionStorage.getItem(KEY) || ''; }
+  } catch (e) { token = token || ''; }
+
+  function $(id) { return document.getElementById(id); }
+  function clear(node) { while (node.firstChild) { node.removeChild(node.firstChild); } }
+  function el(tag, cls, text) { var n = document.createElement(tag); if (cls) { n.className = cls; } if (text !== undefined &amp;&amp; text !== null) { n.textContent = String(text); } return n; }
+  function when(iso) { if (!iso) { return 'unknown'; } var d = new Date(iso); if (isNaN(d.getTime())) { return 'unknown'; } var s = Math.round((Date.now() - d.getTime()) / 1000); var ago = s &lt; 60 ? 'just now' : s &lt; 7200 ? Math.round(s / 60) + ' min ago' : Math.round(s / 3600) + ' h ago'; return d.toLocaleTimeString() + ' (' + ago + ')'; }
+  function kv(parent, pairs) { var g = el('div', 'kv'); pairs.forEach(function (p) { if (p[1] === null || p[1] === undefined || p[1] === '') { return; } g.appendChild(el('span', null, p[0])); g.appendChild(el('span', null, p[1])); }); parent.appendChild(g); }
+  function text(parent, t, cls) { if (t) { parent.appendChild(el('p', cls || 'activityText', t)); } }
+  var LABEL = { active: 'Active', waiting: 'Waiting', recovering: 'Recovering', complete: 'Complete', attention: 'Attention required', offline: 'Monitor unreachable' };
+
+  function badge(status, extra) { var b = $('badge'); b.className = 'badge ' + status; b.textContent = LABEL[status] || status; if (extra) { $('statusText').textContent = extra; } }
+
+  function render(s) {
+    refresh = s.refreshSeconds || 7; $('refresh').textContent = refresh;
+    $('title').textContent = 'Deployment Monitor - ' + (s.computerName || '');
+    document.title = (LABEL[s.status] || s.status) + ' - ' + (s.computerName || 'Deployment');
+    badge(s.status, s.statusText || '');
+    $('computer').textContent = s.computerName || '-';
+    $('deployment').textContent = s.deploymentId || '-';
+    $('lastActivity').textContent = when(s.lastActivityUtc);
+    var at = $('attention'); clear(at); (s.attention || []).forEach(function (a) { at.appendChild(el('li', null, a)); });
+
+    var wu = $('wu'); clear(wu);
+    if (s.windowsUpdate) {
+      var w = s.windowsUpdate;
+      text(wu, w.activity);
+      kv(wu, [['Current update', w.current || ''], ['Attempt', w.attempt ? (w.attempt + ' of ' + (w.maxAttempts || '?')) : ''],
+              ['Installed', w.installed], ['Optional / drivers', w.installedOptional !== null &amp;&amp; w.installedOptional !== undefined ? (w.installedOptional + ' / ' + w.installedDrivers) : ''],
+              ['Failed', w.failed], ['Need a person', w.needsPerson], ['Restart required', w.rebootRequired ? 'Yes' : 'No'],
+              ['Download progress', w.phase === 'Downloading' ? 'progress unavailable' : '']]);
+      if (w.lastError) { text(wu, 'Most recent error: ' + w.lastError, 'error'); }
+    } else { text(wu, 'Not part of this deployment.'); }
+
+    var ap = $('apps'); clear(ap);
+    if (s.applications) {
+      var a = s.applications;
+      if (a.current) { text(ap, 'Installing ' + a.current + ' - progress unavailable'); }
+      text(ap, a.activity);
+      kv(ap, [['Selected', a.selected], ['Installed', a.installed], ['Remaining', a.remaining], ['Failed', a.failed], ['Need a person', a.needsPerson]]);
+      if (a.lastError) { text(ap, a.lastError, 'error'); }
+    } else { text(ap, 'Not part of this deployment.'); }
+
+    var dv = $('drv'); clear(dv);
+    if (s.drivers) {
+      var d = s.drivers;
+      text(dv, d.activity);
+      kv(dv, [['Installed', d.installed], ['Failed or skipped', d.failedOrSkipped], ['Restart pending', d.restartPending === undefined ? '' : (d.restartPending ? 'Yes' : 'No')],
+              ['Unresolved devices', (d.unresolvedDevices || []).length]]);
+      if ((d.unresolvedDevices || []).length) {
+        var ul = el('ul', 'plain');
+        d.unresolvedDevices.forEach(function (x) { ul.appendChild(el('li', null, x.name + ' (' + (x.problemCode ? 'code ' + x.problemCode + ': ' : '') + x.problem + ')' + (x.hardwareId ? ' [' + x.hardwareId + ']' : '') + '. ' + x.note)); });
+        dv.appendChild(ul);
+      }
+    }
+
+    var fc = $('finalCard'), f = $('final'); clear(f);
+    if (s.final) {
+      fc.hidden = false;
+      text(f, 'Overall result: ' + s.final.overall);
+      [['Completed', s.final.completed], ['Failed', s.final.failed], ['Technician follow-up', s.final.followUp]].forEach(function (g) {
+        if (!g[1] || !g[1].length) { return; }
+        f.appendChild(el('h3', null, g[0]));
+        var list = el('ul', 'plain'); g[1].forEach(function (t) { list.appendChild(el('li', null, t)); }); f.appendChild(list);
+      });
+    } else { fc.hidden = true; }
+
+    var act = $('activity'); clear(act);
+    (s.activity || []).forEach(function (e) { var li = el('li'); li.appendChild(el('time', null, when(e.utc))); li.appendChild(el('span', e.level, e.message)); act.appendChild(li); });
+    if (!(s.activity || []).length) { act.appendChild(el('li', null, 'No activity recorded yet.')); }
+  }
+
+  function schedule() { if (timer) { clearTimeout(timer); } timer = setTimeout(poll, refresh * 1000); }
+
+  function poll() {
+    if (!token) { badge('attention', 'No access token. Open the full address shown in the Deployment Progress window on the computer (it ends with #t=...).'); return; }
+    var xhr = new XMLHttpRequest();
+    xhr.open('GET', '/api/status', true);
+    xhr.setRequestHeader('Authorization', 'Bearer ' + token);
+    xhr.timeout = 10000;
+    xhr.onload = function () {
+      if (xhr.status === 200) {
+        try { lastOk = new Date(); $('lastContact').textContent = lastOk.toLocaleTimeString(); render(JSON.parse(xhr.responseText)); } catch (e) { badge('offline', 'The answer could not be read; trying again.'); }
+      } else if (xhr.status === 401) {
+        try { sessionStorage.removeItem(KEY); } catch (e) { }
+        token = ''; badge('attention', 'The access token was not accepted. Open the full address shown in the Deployment Progress window again.'); return;
+      } else { badge('offline', 'The monitor answered ' + xhr.status + '; trying again.'); }
+      schedule();
+    };
+    xhr.onerror = xhr.ontimeout = function () {
+      badge('offline', 'The computer did not answer' + (lastOk ? ' since ' + lastOk.toLocaleTimeString() : '') + '. It may be restarting; trying again.');
+      schedule();
+    };
+    xhr.send();
+  }
+  document.addEventListener('DOMContentLoaded', poll);
+}());
+'@
+
+# ------------------------------------------------------------------------------------------------
+# Main
+# ------------------------------------------------------------------------------------------------
+
+if ($script:MonMain) {
+    $package = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+    $manifest = Read-WddManifest (Join-Path $package 'deployment-manifest.json')
+    $paths = Get-WddPaths $manifest.dataRoot
+    foreach ($d in $paths.Deployment, $paths.Logs, $paths.StateDir) { if (-not (Test-Path -LiteralPath $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null } }
+    $script:WddLogFile = Join-Path $paths.Logs 'monitor.log'
+    $settings = Get-WddMonitorSettings $manifest
+    if (-not $settings.enabled) { Write-Output 'The deployment monitor is not enabled in this package.'; exit 0 }
+    if (Test-WddMonitorExpired $paths $settings) { Stop-WddMonitor $paths 'The deployment finished; the final results were already shown. The report stays on this computer.'; exit 0 }
+    try {
+        $info = Initialize-WddMonitorInfo $paths $settings
+        Start-WddStatusServer $manifest $paths $settings $info
+    } catch {
+        $msg = "The monitor could not start: $($_.Exception.Message) The deployment continues; the progress window still shows the status."
+        Write-WddLog $msg 'ERROR'
+        $info = Read-WddJson $paths.MonitorInfo
+        if ($info -is [hashtable]) { $info.mode = 'error'; $info.message = $msg; try { Write-WddJson $paths.MonitorInfo $info } catch { } }
+        exit 1
+    }
+    exit 0
 }
 		</File>
 		<File path="C:\Windows\Setup\Scripts\Deployment\scripts\recovery\DeploymentRecovery.ps1">
@@ -11737,7 +13350,7 @@ if ($script:WdhMain) {
     "enabled": true,
     "drivers": "include",
     "featureUpdates": "skip",
-    "optionalUpdates": "skip",
+    "optionalUpdates": "install",
     "ongoingPolicy": "notifyInstall"
   },
   "applications": {
@@ -12360,19 +13973,35 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
 {
   "format": "windows-deployment-builder/deployment-manifest",
   "manifestVersion": 1,
-  "packageVersion": "1.1.0",
-  "packageId": "E3A108073C67780B",
+  "packageVersion": "1.2.0",
+  "packageId": "F0066CDB8731C005",
   "scope": "answerFile",
   "generator": {
     "name": "Windows Deployment Builder",
-    "orchestrator": "1.1.0",
-    "windowsUpdateEngine": "1.1.0",
-    "applicationEngine": "1.3.0",
+    "orchestrator": "1.2.0",
+    "windowsUpdateEngine": "1.2.0",
+    "applicationEngine": "1.4.0",
     "driverEngine": "1.0.0",
     "healthEngine": "1.0.0"
   },
   "dataRoot": "C:\\ProgramData\\WindowsDeploymentBuilder",
   "packageFolder": "WindowsDeployment",
+  "progress": {
+    "task": "\\WindowsDeploymentBuilder\\Progress",
+    "refreshSeconds": 7,
+    "opensAtSignIn": true
+  },
+  "monitor": {
+    "enabled": true,
+    "port": 8765,
+    "lanAccess": false,
+    "refreshSeconds": 7,
+    "finalReportHours": 24,
+    "script": "scripts/monitor/DeploymentStatusServer.ps1",
+    "task": "\\WindowsDeploymentBuilder\\StatusServer",
+    "readOnly": true,
+    "firewall": null
+  },
   "answerFile": {
     "fileName": "autounattend.xml",
     "location": "Root of the Windows installation USB drive",
@@ -12683,7 +14312,7 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
   },
   "failureHandling": {
     "windowsUpdate": {
-      "maxAttemptsPerUpdate": 2,
+      "maxAttemptsPerUpdate": 3,
       "maxRuntimeHours": 6,
       "networkWaitMinutes": 15,
       "drivers": "include"
@@ -12704,7 +14333,9 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
     "orchestrator": {
       "launchAttempts": 2,
       "stalledAfterMinutes": 120,
-      "monitorIntervalMinutes": 15,
+      "longOperationMinutes": 240,
+      "autoRecoveries": 2,
+      "monitorIntervalMinutes": 5,
       "graceHours": 24,
       "deadlineHours": 48
     }
@@ -12775,9 +14406,9 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
     {
       "path": "scripts/common/DeploymentCommon.ps1",
       "role": "orchestrator",
-      "size": 31602,
-      "sha256": "8A6BA4DF8B3799EE0325FC83CA16F53C2C9A56A1F460669F3FE37131DB717DD6",
-      "textSha256": "279DDB849A7D02F7BAAE9EDF863554BB4222A61A1EFC250A3BD9C537B43AF600",
+      "size": 46764,
+      "sha256": "5372F6849626A5FFE877264274F59508428E39CB7635FD7E9BF150CDEC071688",
+      "textSha256": "E3890D33B73779E9A2416142289182DBEC104BE0F283781C04931432020657D9",
       "embedded": "Deployment\\scripts\\common\\DeploymentCommon.ps1"
     },
     {
@@ -12791,41 +14422,41 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
     {
       "path": "scripts/bootstrap/Initialize-Deployment.ps1",
       "role": "orchestrator",
-      "size": 17630,
-      "sha256": "10D7BFAB7D0DEC0911A02087568FC31283DFEDB65B5A6C6C150636D88C0382E4",
-      "textSha256": "D1E0897118EB94C44F6EBC5863D21B487583B7A649F86687BEC1301E5C580AAC",
+      "size": 26710,
+      "sha256": "D4B2D9B181BE3803F714DDAF2C0A5A88BA8CDD9163093489A2DBE34A67A99135",
+      "textSha256": "93A1C0C792134A8E5116CBA8C7657F73E638EE585DC71D4299E620EC96C5AC3A",
       "embedded": "Deployment\\scripts\\bootstrap\\Initialize-Deployment.ps1"
     },
     {
       "path": "scripts/orchestrator/DeploymentOrchestrator.ps1",
       "role": "orchestrator",
-      "size": 6361,
-      "sha256": "AC74A8B8D3DECC58EFA2724738DB87848CB562A92717C03760663083C26ADB58",
-      "textSha256": "A0DE2E00DA0592A99539FB647EAAE6DDAE65E31600264D05BE64722930D799B0",
+      "size": 17561,
+      "sha256": "A1694CF8D81B21CB8ABFE11DE31FBFAF708C2325F43A2A3CD9DD1BBA033C3004",
+      "textSha256": "E85D0F6BDAE3BAF9AB8CB7E8CE08EC1A98272372214C1690649815E83E7A271A",
       "embedded": "Deployment\\scripts\\orchestrator\\DeploymentOrchestrator.ps1"
     },
     {
       "path": "scripts/orchestrator/Show-DeploymentStatus.ps1",
       "role": "orchestrator",
-      "size": 6485,
-      "sha256": "76216CCC8BD449B9C1D662FF0764AEEB68F90F18136A434079612C69DD2520C8",
-      "textSha256": "38E6AA04C1709B0E91CB132F82EF32A95C96443E5D94E99E9B0D95D22EEB5D27",
+      "size": 11837,
+      "sha256": "739C22E599366A05B3C6D0988C4A5A6AA76C19EA1E98642C9E27815FBEFABBFC",
+      "textSha256": "C2B8EF2B6E5FF7712F416173BE2BA046182221C86731D3BC33C9F7B0B54ACF60",
       "embedded": "Deployment\\scripts\\orchestrator\\Show-DeploymentStatus.ps1"
     },
     {
       "path": "scripts/orchestrator/Resume-Deployment.ps1",
       "role": "orchestrator",
-      "size": 6416,
-      "sha256": "8B5749EC5EC545155F80CE9ABCC7F1F7EDA65A97F621ECCE3F88AB7869A005BA",
-      "textSha256": "FA1FCB57FE1301061C8EC18F855BBA2B3307F034603EAB65F4CD7962DA8DF9B5",
+      "size": 6449,
+      "sha256": "1B37B82536E1E924E90DA4674597D697FECB86B27F88AE8086D9D4E29650F5EB",
+      "textSha256": "29C0D0D5DCA8F9E7DB5EC23EDD65AD3E9B3C314AEE30F1699723736C129EE768",
       "embedded": "Deployment\\scripts\\orchestrator\\Resume-Deployment.ps1"
     },
     {
       "path": "scripts/finalization/Complete-Deployment.ps1",
       "role": "orchestrator",
-      "size": 29047,
-      "sha256": "E5383E15EB9BDCCB3B235416FC4B185D0FB59288F748818403442D1E3449AC7A",
-      "textSha256": "8439F042B8C6EF33AA5C5534D3737EFDC3B4D0FFD68E0061A600B532ADA99474",
+      "size": 40867,
+      "sha256": "3FB503655D2D8F61FC828A90B18D3346E94834B0FA4511D4D68E108D63D89CED",
+      "textSha256": "AD1B9427DF3D8FBE62D481A9F77FC4E41C0353710A461FBFA2780DAB69338CFA",
       "embedded": "Deployment\\scripts\\finalization\\Complete-Deployment.ps1"
     },
     {
@@ -12835,6 +14466,14 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
       "sha256": "504CFC50AFE4290F23C9C9E6A446EE8D210C9F387C0B781515CEBFC59ED58B0C",
       "textSha256": "3B28A2C605D7C21F97BDA67D5F1B90772D0EF12E47AE1417657BAFC9A68178C7",
       "embedded": "Deployment\\scripts\\finalization\\Set-UpdatePolicy.ps1"
+    },
+    {
+      "path": "scripts/monitor/DeploymentStatusServer.ps1",
+      "role": "orchestrator",
+      "size": 40563,
+      "sha256": "8ED33DC8B56058104CE3C118A73BD5201B3919A0447791FCA0FE18C5CD40DF84",
+      "textSha256": "832F89CB6D801CE0D0E2BCBC3AB4F609C4C657AA26A45E2522475B27754F7D06",
+      "embedded": "Deployment\\scripts\\monitor\\DeploymentStatusServer.ps1"
     },
     {
       "path": "scripts/recovery/DeploymentRecovery.ps1",
@@ -12847,9 +14486,9 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
     {
       "path": "scripts/windows-update/WindowsUpdateEngine.ps1",
       "role": "engine",
-      "size": 41954,
-      "sha256": "42A83478250AA880D9AFD562B58F72DADE34B3956F6A1DDF2AA587F1CB8B9886",
-      "textSha256": "86CBE17D1C6D671CB4983F7D0F6309E46738B4978E2F07FE2DBA11D61A31FDA1",
+      "size": 57130,
+      "sha256": "51F751CB144DC48F8AC26C662F9A3B5752A3499E453F1657B6525F44ADD19EE1",
+      "textSha256": "FFE422B1637ECB1387A4010135598A52CDB07F17D019E3A4AFC55587DBFD3039",
       "embedded": "WindowsUpdate\\WindowsUpdateEngine.ps1"
     },
     {
@@ -12863,17 +14502,17 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
     {
       "path": "scripts/windows-update/config.json",
       "role": "configuration",
-      "size": 552,
-      "sha256": "59217BC1C58C901D0E747AC6BC7A97D580FD69E8481BB3853A847267116A5C1E",
-      "textSha256": "6700A558ABA93AA14A59CD3A3C63A858B2074E09A0753A67CEAF9273A02164AE",
+      "size": 584,
+      "sha256": "0ABA9D4FD44E8B76A6EE1BDE887856285BA49FB162A126A76BC6CA077204FD54",
+      "textSha256": "EA6C04E28B6B202BEFAC1B616157611E0C8B2A3716F9C30BD398B1F0256CB535",
       "embedded": "WindowsUpdate\\config.json"
     },
     {
       "path": "scripts/drivers/DriverEngine.ps1",
       "role": "engine",
-      "size": 174883,
-      "sha256": "73AB9A0518CEA2FB11E3826B55ECC14A8CF538FEAB479FED65B98FEB6C8B2D88",
-      "textSha256": "B180A9F5D114251A53283DBA42AC3BFEEE5D00B483278703713B3D81EBF71AB8",
+      "size": 175763,
+      "sha256": "CE4DE1FC6E3AF6DFADE924DD4B39FBB591F1FF1ED3CFE10825D8B968DF499B7B",
+      "textSha256": "BD953AFC6EE7DBF2B192883F08B2902826E630FCB861E22B258DD1DDB71D01B5",
       "embedded": "Drivers\\DriverEngine.ps1"
     },
     {
@@ -12903,9 +14542,9 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
     {
       "path": "scripts/health/health-config.json",
       "role": "configuration",
-      "size": 8281,
-      "sha256": "DBD26F3A682FFCBF2885574D0A4969D4BAAC453942DB734FB96CE47D6F5A7643",
-      "textSha256": "86B718AE8B8ED87136C2E1E62CE899674161B857750F6EB5449AF6582E0656D5",
+      "size": 8284,
+      "sha256": "7D7927F6A4985E81522740FCEAC40BD428E38A964D7EA80BFCE977332A6D1666",
+      "textSha256": "43E701A9A539DB7094C64ECF2258BEC28F3CE1868ABC5198FECA5B37B619D00B",
       "embedded": "Deployment\\scripts\\health\\health-config.json"
     },
     {
@@ -12919,9 +14558,9 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
     {
       "path": "scripts/applications/ApplicationEngine.ps1",
       "role": "engine",
-      "size": 134833,
-      "sha256": "9D832599C5AC8DB24BF3CD245E4921E1391CB0D8240BDE6EE89016A3A97A85D0",
-      "textSha256": "17E7EEA5A47CEF5455904661E5C9D8AAA9559E5EE9361DD0BEF7029280C8F4FE",
+      "size": 140195,
+      "sha256": "AD53B156249EC5222FADCD29BE8B9C050810F7151D8541AF273B521C8464ABB7",
+      "textSha256": "E20939518E0ED6AD731640B8C6D79F64C88793FBC55898AEA67905BE331D5704",
       "embedded": "Applications\\ApplicationEngine.ps1"
     },
     {
@@ -12944,8 +14583,8 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
       "path": "scripts/applications/applications-config.json",
       "role": "configuration",
       "size": 3684,
-      "sha256": "D74D4D31173B935884B1333C8C4C8714BB11699469CC810F3D50E26A4FB3C866",
-      "textSha256": "3755CCACB7250368E95311FF22164D1E686A129703677385D9CA377DAC770CFB",
+      "sha256": "E23807BC5984498BDE0B7BAAC62AE555019CC9F51E9D32B01B2C79B582655327",
+      "textSha256": "5B73DE71830FBC47499718D7B86BF181AC7B20582D3F82A1A768937E49A28FB6",
       "embedded": "Applications\\applications-config.json"
     },
     {

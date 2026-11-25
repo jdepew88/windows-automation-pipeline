@@ -19,7 +19,7 @@ import { DRIVER_STAGE } from '../drivers/contract';
  * native WinGet package list, which the engine reads at run time.
  */
 
-export const APP_ENGINE_VERSION = '1.3.0';
+export const APP_ENGINE_VERSION = '1.4.0';
 export const APP_STAGING_DIR = 'C:\\Windows\\Setup\\Scripts\\Applications';
 export const APP_ROOT = `${DATA_ROOT}\\Applications`;
 export const APP_TASK_NAME = 'Applications';

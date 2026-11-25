@@ -11,7 +11,7 @@ import { HealthSchema } from './health';
  *
  * Bump {@link SCHEMA_VERSION} and add a migration in `migrations.ts` for any breaking change.
  */
-export const SCHEMA_VERSION = 7;
+export const SCHEMA_VERSION = 8;
 
 export const ScriptTypeSchema = z.enum(['ps1', 'cmd', 'reg', 'vbs']);
 export type ScriptType = z.infer<typeof ScriptTypeSchema>;
@@ -180,6 +180,19 @@ export const ProfileSchema = z
 
     /** Phase 9: independent end-of-deployment verification, health reports and customer handoff. */
     health: HealthSchema,
+
+    /**
+     * Deployment reliability (schema 8): the read-only deployment monitor, an HTTP status page served
+     * by the installed computer while the deployment runs. Bound to the computer itself unless LAN
+     * access is on; protected by a random access token either way.
+     */
+    monitoring: z
+      .object({
+        enabled: bool,
+        lanAccess: bool,
+        port: z.number().int(),
+      })
+      .strict(),
 
     system: z
       .object({

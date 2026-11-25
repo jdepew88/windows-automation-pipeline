@@ -42,6 +42,13 @@
     FailedPermanent, WaitingForNetwork, WaitingForReboot, ManualActionRequired, SkippedByUser,
     BlockedByDependency) is derived from them (Get-WdaLifecycle).
 
+    Engine 1.4.0 (deployment reliability): a failed installer run keeps the installer's own exit
+    code ("Installer failed with exit code: N" in WinGet's output) next to WinGet's result
+    (SHELLEXEC_INSTALL_FAILED); a package whose installer may prompt and that times out is reported
+    as needing a person instead of being retried for another full timeout; status.json names the
+    application being installed, the installed/failed counts and the last failure. WinGet does not
+    report download progress to a redirected process, so no percentage or speed is shown.
+
     Modes:
       Run   (default) Full engine.
       Plan  Read-only dry run: WinGet check, installed/available state and the exact command for
@@ -64,7 +71,7 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-$script:EngineVersion = '1.3.0'
+$script:EngineVersion = '1.4.0'
 $script:StateVersion = 3
 $script:EventSource = 'WindowsDeploymentBuilder'
 $script:LogFile = $null
@@ -117,6 +124,8 @@ $script:ExitCodes = @{
     '0x8A150104' = @('Failed', $true, 'none', 'A dependency is missing (INSTALL_MISSING_DEPENDENCY).', 'Transient')
     '0x8A150110' = @('Failed', $true, 'none', 'Dependencies could not be installed (INSTALL_DEPENDENCIES).', 'Transient')
     '0x8A150106' = @('Failed', $true, 'none', 'Not enough memory (INSTALL_INSUFFICIENT_MEMORY).', 'Resource')
+    # The package's own installer exited with an error; its exit code is taken from WinGet's output.
+    '0x8A150006' = @('Failed', $true, 'none', 'The installer reported a failure (SHELLEXEC_INSTALL_FAILED).', 'Unknown')
 }
 
 $script:Terminal = @('Succeeded', 'AlreadyInstalled', 'Skipped', 'SkippedByUser', 'RequiresInteraction', 'Failed', 'Unavailable')
@@ -289,7 +298,15 @@ function Set-WdaStatus {
         $o.reboots = $State.reboots
         $o.done = @($State.packages.Values | Where-Object { $_.status -in $script:Terminal }).Count
         $o.total = @($State.packages.Values).Count
+        # Engine 1.4.0: counts and the last failure for the progress window and the LAN monitor.
+        $o.installed = @($State.packages.Values | Where-Object { $_.status -in 'Succeeded', 'AlreadyInstalled' }).Count
+        $o.failed = @($State.packages.Values | Where-Object { $_.status -in 'Failed', 'Unavailable' }).Count
+        $o.needsPerson = @($State.packages.Values | Where-Object { $_.status -eq 'RequiresInteraction' }).Count
+        $o.selected = @($State.packages.Values | Where-Object { $_.status -ne 'SkippedByUser' }).Count
+        if ($State.ContainsKey('lastFailure') -and $State.lastFailure) { $o.lastFailure = $State.lastFailure }
     }
+    if ($Phase -eq 'Installing' -and $Detail) { $o.current = $Detail }
+    $o.progress = 'unavailable'
     try { Write-WdaJson $script:StatusFile $o } catch { Write-WdaLog "Could not write status: $($_.Exception.Message)" 'WARN' }
 }
 
@@ -516,6 +533,13 @@ function ConvertFrom-WdaExitCode {
     if ($m) { return @{ Status = $m[0]; Retry = $m[1]; Restart = $m[2]; Message = $m[3]; Code = $hex; Class = $m[4] } }
     # Unknown codes: retried within the normal budget (never more), and recorded as Unknown.
     @{ Status = 'Failed'; Retry = $true; Restart = 'none'; Message = "WinGet exit code $hex (not a documented WinGet result)."; Code = $hex; Class = 'Unknown' }
+}
+
+<# The package installer's own exit code from WinGet's output ("Installer failed with exit code: 1603"), or ''. #>
+function Get-WdaInstallerExitCode {
+    param([string] $Output)
+    if ($Output -match '(?im)Installer failed with exit code:\s*(-?\d+|0x[0-9A-F]+)') { return $Matches[1] }
+    return ''
 }
 
 # ------------------------------------------------------------------------------------------------
@@ -824,6 +848,21 @@ function Test-WdbRestartPending {
     return $false
 }
 
+<#
+    Appends one event to the deployment's activity feed <dataRoot>\Deployment\activity.jsonl
+    (retries, failures and restarts, for the progress window and the LAN monitor). Best effort:
+    the feed is information, never a reason for an installation to fail.
+#>
+function Add-WdbActivity {
+    param([string] $DataRoot, [string] $Source, [string] $Message, [string] $Level = 'info')
+    try {
+        $dir = Join-Path $DataRoot 'Deployment'
+        if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        $line = ([ordered]@{ utc = [DateTime]::UtcNow.ToString('o'); level = $Level; source = $Source; message = $Message } | ConvertTo-Json -Compress)
+        [System.IO.File]::AppendAllText((Join-Path $dir 'activity.jsonl'), $line + "`r`n", (New-Object System.Text.UTF8Encoding($false)))
+    } catch { }
+}
+
 # endregion WDB coordination
 
 <#
@@ -970,7 +1009,7 @@ function Get-WdaLifecycle {
 function Add-WdaAttempt {
     param([hashtable] $Paths, [hashtable] $Entry, [hashtable] $Record)
     $rec = [ordered]@{ operationId = $Entry.operationId; name = $Entry.name }
-    foreach ($k in 'trigger', 'attempt', 'startUtc', 'endUtc', 'result', 'exitCode', 'class', 'countsTowardLimit', 'nextAction', 'nextAttemptUtc', 'rebootRequired', 'message', 'packageIdentifier', 'source') {
+    foreach ($k in 'trigger', 'attempt', 'startUtc', 'endUtc', 'result', 'exitCode', 'installerExitCode', 'class', 'countsTowardLimit', 'nextAction', 'nextAttemptUtc', 'rebootRequired', 'message', 'packageIdentifier', 'source') {
         if ($Record.ContainsKey($k)) { $rec[$k] = $Record[$k] }
     }
     $h = @{}
@@ -1124,6 +1163,8 @@ function Complete-Wda {
     $packages = @($State.packages.Values | Sort-Object @{ Expression = { if ($order.ContainsKey($_.key)) { $order[$_.key] } else { 100000 } } }, key | ForEach-Object {
         $o = [ordered]@{ key = $_.key; name = $_.name; packageIdentifier = $_.packageIdentifier; source = $_.source; status = $_.status
                          attempts = [int] $_.attempts; exitCode = $_.exitCode; message = $_.message; timestampUtc = $_.updatedUtc }
+        # Engine 1.4.0: the installer's own exit code (only when WinGet reported one).
+        if ($_.ContainsKey('installerExitCode') -and $_.installerExitCode) { $o.installerExitCode = [string] $_.installerExitCode }
         $x = & $resilience $_
         foreach ($k in $x.Keys) { $o[$k] = $x[$k] }
         $o
@@ -1648,9 +1689,15 @@ function Invoke-WdaQueue {
                 $started = Get-WdaNow
                 Write-WdaLog ("  installing {0} ({1}:{2}) attempt {3}/{4}" -f $p.name, $p.source, $p.packageIdentifier, $e.attempts, $policy.maxAttempts)
                 $r = Install-WdaPackage $p ([int] $Config.packageTimeoutMinutes) $log
-                if ($r.TimedOut) {
+                if ($r.TimedOut -and $p.interaction -eq 'mayPrompt') {
+                    # An installer known to prompt that is still running after the timeout is most
+                    # likely waiting for a person: another full timeout would not help.
+                    $m = @{ Status = 'RequiresInteraction'; Retry = $false; Restart = 'none'; Message = "Did not finish within $($Config.packageTimeoutMinutes) min; this installer may wait for a person. Install it manually."; Code = 'timeout'; Class = 'User' }
+                } elseif ($r.TimedOut) {
                     $m = @{ Status = 'Failed'; Retry = $true; Restart = 'none'; Message = "Timed out after $($Config.packageTimeoutMinutes) min."; Code = 'timeout'; Class = 'Timeout' }
                 } else { $m = ConvertFrom-WdaExitCode $r.ExitCode }
+                $installerCode = $(if ($r.ContainsKey('Output')) { Get-WdaInstallerExitCode ([string] $r.Output) } else { '' })
+                if ($installerCode) { $e.installerExitCode = $installerCode; $m.Message = "$($m.Message) Installer exit code: $installerCode." }
                 $status = $m.Status
                 $counts = $true
                 $next = ''
@@ -1700,8 +1747,19 @@ function Invoke-WdaQueue {
                         default { $(if ($e.retryable) { 'manual retry (recovery tool)' } else { 'none (permanent)' }) }
                     }
                 }
+                if ($status -in 'Failed', 'Unavailable', 'RequiresInteraction') {
+                    # What the progress window and the LAN monitor show; the queue carries on.
+                    $State.lastFailure = [ordered]@{ name = $p.name; status = $status; code = [string] $m.Code; installerExitCode = $installerCode; atUtc = (Get-WdaNow).ToString('o')
+                        message = $(if ($status -eq 'RequiresInteraction') { "$($p.name) needs a person to install it. Recorded; deployment is continuing with the remaining applications." } else { "$($p.name) could not be installed ($($m.Message.TrimEnd('.'))). The failure was recorded; deployment is continuing with the remaining applications." }) }
+                } elseif ($status -eq 'Pending' -and $e.nextAttemptUtc) {
+                    $State.lastFailure = [ordered]@{ name = $p.name; status = 'Retrying'; code = [string] $m.Code; installerExitCode = $installerCode; atUtc = (Get-WdaNow).ToString('o')
+                        message = "$($p.name): attempt $($e.attempts) of $($policy.maxAttempts) failed ($($m.Message.TrimEnd('.'))); $next. The other applications continue." }
+                }
+                if ($status -in 'Failed', 'Unavailable', 'RequiresInteraction' -or ($status -eq 'Pending' -and $e.nextAttemptUtc)) {
+                    Add-WdbActivity $Config.dataRoot 'applications' ([string] $State.lastFailure['message']) $(if ($State.lastFailure['status'] -eq 'Retrying') { 'info' } else { 'warning' })
+                }
                 Add-WdaAttempt $Paths $e @{ trigger = 'automatic'; attempt = [int] $e.totalAttempts; startUtc = $started.ToString('o'); endUtc = (Get-WdaNow).ToString('o')
-                    result = [string] $m.Status; exitCode = [string] $m.Code; class = [string] $m.Class; countsTowardLimit = $counts; nextAction = $next
+                    result = [string] $m.Status; exitCode = [string] $m.Code; installerExitCode = $installerCode; class = [string] $m.Class; countsTowardLimit = $counts; nextAction = $next
                     nextAttemptUtc = $e.nextAttemptUtc; rebootRequired = [bool] ($status -eq 'RequiresRestart'); message = $m.Message; packageIdentifier = $p.packageIdentifier; source = $p.source }
                 $lvl = $(if ($status -in 'Succeeded', 'AlreadyInstalled') { 'INFO' } else { 'WARN' })
                 Write-WdaLog ("  -> {0} {1} [{2}] {3} (class {4}; attempt {5}/{6}; next: {7})" -f $status, $p.name, $m.Code, $m.Message, $m.Class, $e.attempts, $policy.maxAttempts, $next) $lvl

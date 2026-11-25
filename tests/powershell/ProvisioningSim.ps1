@@ -32,6 +32,14 @@ function Reset-Sim {
     $script:Shortcuts = @{}
     $script:Consoles = 0
     $script:AclCalls = 0
+    # Orchestrator 1.2.0: task states and results for the watchdog, tasks started, Windows servicing, devices.
+    $script:SimTaskStates = @{}
+    $script:SimTaskResults = @{}
+    $script:StartedTasks = New-Object System.Collections.Generic.List[string]
+    $script:SimServicing = $false
+    $script:SimDevices = @()
+    $script:SimDevicesThrow = $false
+    $script:HelperRegistrationFails = $false
     $script:Paths = Get-WddPaths (Join-Path $script:Tmp 'ProgramData\WindowsDeploymentBuilder')
     $script:Manifest = Read-WddManifest $manifestPath
     # Phase 4.3 ongoing update policy: edition, management and the AU policy values.
@@ -50,7 +58,25 @@ function Get-WddIdentity { $script:SimIdentity }
 function Test-WddWinPE { $script:SimWinPE }
 function Get-WddTask { param([string] $TaskPath, [string] $TaskName) $script:SimTasks.ContainsKey("$TaskPath$TaskName") }
 function Unregister-WddTask { param([string] $TaskPath, [string] $TaskName) $script:SimTasks.Remove("$TaskPath$TaskName") }
-function Start-WddTask { param([string] $TaskPath, [string] $TaskName) }
+function Start-WddTask { param([string] $TaskPath, [string] $TaskName) $script:StartedTasks.Add("$TaskPath$TaskName") }
+function Get-WddTaskInfo {
+    param([string] $TaskPath, [string] $TaskName)
+    $k = "$TaskPath$TaskName"
+    if (-not $script:SimTasks.ContainsKey($k)) { return @{ Exists = $false; State = ''; LastRunUtc = $null; LastResult = $null } }
+    @{ Exists = $true; State = $(if ($script:SimTaskStates.ContainsKey($k)) { $script:SimTaskStates[$k] } else { 'Ready' }); LastRunUtc = $null; LastResult = $(if ($script:SimTaskResults.ContainsKey($k)) { $script:SimTaskResults[$k] } else { 0 }) }
+}
+function Test-WddUpdateServicing { $script:SimServicing }
+function Register-WddProgressTask {
+    param([hashtable] $Paths, [string] $User, [int] $IntervalSeconds = 7)
+    if ($script:HelperRegistrationFails) { throw 'Access is denied (simulated)' }
+    $script:SimTasks['\WindowsDeploymentBuilder\Progress'] = $User
+}
+function Register-WddStatusServerTask {
+    param([hashtable] $Paths)
+    if ($script:HelperRegistrationFails) { throw 'Access is denied (simulated)' }
+    $script:SimTasks['\WindowsDeploymentBuilder\StatusServer'] = 'SYSTEM'
+}
+function Get-WddPnpDevices { if ($script:SimDevicesThrow) { throw 'Invalid class (simulated)' }; @($script:SimDevices) }
 function Register-WddMonitorTask { param([hashtable] $Paths, [hashtable] $Manifest) $script:SimTasks['\WindowsDeploymentBuilder\Deployment'] = 'SYSTEM' }
 function Set-WddAcl { param([string] $Root) $script:AclCalls++ }
 function New-WddShortcut { param([string] $Name, [string] $Target, [string] $Arguments, [string] $Description) $script:Shortcuts[$Name] = $Arguments }

@@ -95,10 +95,11 @@ export const settings: SettingDef[] = [
     label: 'Optional and preview updates',
     control: 'radio',
     choices: [
-      { value: 'skip', label: 'Skip (owner default)' },
-      { value: 'install', label: 'Install' },
+      { value: 'skip', label: 'Skip' },
+      { value: 'install', label: 'Install (owner default)' },
     ],
-    description: 'Updates Windows Update lists as optional (BrowseOnly), such as non-security previews.',
+    description:
+      'Updates Windows Update lists as optional (BrowseOnly): optional cumulative previews and optional driver updates (for example chipset drivers). Windows still decides what is applicable and signed; feature updates and Insider builds are never included here. Optional drivers also need "Drivers from Windows Update" to include drivers.',
     applicability: APPLIES,
     stages: ['firstLogon'],
     mapping: 'config.json › optionalUpdates (IUpdate.BrowseOnly)',

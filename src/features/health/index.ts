@@ -27,7 +27,53 @@ const flag = (path: string, label: string, description: string, mapping: string,
   verification: 'unverified',
 });
 
+const monitorOn = (p: Profile) => p.monitoring.enabled;
+const MONITOR_APPLIES = 'Windows 11 (Windows PowerShell 5.1, HTTP.sys); runs as SYSTEM while the deployment runs';
+export const MONITOR_PORT_RANGE = [1024, 65535] as const;
+
 export const settings: SettingDef[] = [
+  {
+    path: 'monitoring.enabled',
+    section: 'health',
+    label: 'Deployment monitor: a read-only status page served by the computer while it deploys',
+    control: 'checkbox',
+    description:
+      'Shows the overall status, Windows Update, applications, drivers, devices, recent activity and the final results, refreshed every 7 seconds. Read-only: it cannot start, stop or change anything. Protected by a random access token; the address with the token is shown in the Deployment Progress window. Without LAN access it answers on the computer itself only.',
+    applicability: MONITOR_APPLIES,
+    risk: 'Tested with simulated computers and a local HTTP test only; validate on a spare computer before relying on it.',
+    stages: ['firstLogon'],
+    mapping: 'Embeds scripts\\monitor\\DeploymentStatusServer.ps1; task \\WindowsDeploymentBuilder\\StatusServer (SYSTEM, at startup); token in state\\monitor.json; removed after the deployment.',
+    advanced: false,
+    verification: 'unverified',
+  },
+  {
+    path: 'monitoring.lanAccess',
+    section: 'health',
+    label: 'Allow access from other devices on the local network',
+    control: 'checkbox',
+    description:
+      'Lets you open the monitor from another computer, phone or tablet on the same network (http://<computer address>:<port>/#t=<token>). Adds one inbound Windows Firewall rule for this port, Private networks and the local subnet only, removed when the monitor stops. Never configures the router. On a network set to Public, Windows keeps blocking it (the progress window says so).',
+    applicability: MONITOR_APPLIES,
+    risk: 'Anyone on the same network who has the address with its token can read the deployment status (no passwords or keys are ever included). Leave off on networks you do not trust.',
+    stages: ['firstLogon'],
+    mapping: 'deployment-manifest.json › monitor.lanAccess; firewall rule WindowsDeploymentBuilder-Monitor (TCP, Private, LocalSubnet)',
+    advanced: false,
+    visibleWhen: monitorOn,
+    verification: 'unverified',
+  },
+  {
+    path: 'monitoring.port',
+    section: 'health',
+    label: `Monitor port (${MONITOR_PORT_RANGE[0]}-${MONITOR_PORT_RANGE[1]})`,
+    control: 'number',
+    description: 'TCP port of the status page. 8765 unless something else on the computer uses it.',
+    applicability: MONITOR_APPLIES,
+    stages: ['firstLogon'],
+    mapping: 'deployment-manifest.json › monitor.port',
+    advanced: true,
+    visibleWhen: monitorOn,
+    verification: 'unverified',
+  },
   {
     path: 'health.enabled',
     section: 'health',
@@ -97,6 +143,10 @@ export const settings: SettingDef[] = [
 export const SECRET_LIKE = /(\b(password|passwd|pwd|passphrase|pin|wifi key|wi-fi key|network key|recovery key|product key)\b\s*[:=])|(\b[A-Z0-9]{5}(-[A-Z0-9]{5}){4}\b)|(\b\d{6}(-\d{6}){7}\b)/i;
 
 export function validate(p: Profile, issues: Issue[]): void {
+  const m = p.monitoring;
+  if (m.enabled && (!Number.isInteger(m.port) || m.port < MONITOR_PORT_RANGE[0] || m.port > MONITOR_PORT_RANGE[1])) {
+    issues.push({ severity: 'error', path: 'monitoring.port', message: `The monitor port must be a whole number from ${MONITOR_PORT_RANGE[0]} to ${MONITOR_PORT_RANGE[1]}.` });
+  }
   const h = p.health;
   if (SECRET_LIKE.test(h.customerNotes)) {
     issues.push({ severity: 'error', path: 'health.customerNotes', message: 'The notes look like they contain a password, a product key or a recovery key. The customer report is printed and shared: remove it.' });

@@ -17,6 +17,19 @@
     Windows itself (read-only), the result is added to the report, and the "Windows Deployment -
     Health Report" shortcut opens the technician dashboard. A pending restart registers a startup
     re-check that removes itself.
+
+    Orchestrator 1.2.0: the report also contains
+      - a Device Manager check (read-only): devices with a problem code, without a driver, or
+        unknown to Windows, with friendly names, hardware IDs and the problem in words. A USB
+        descriptor or reset failure is reported as a likely hardware or connection problem, not
+        as a missing driver. Unresolved devices make a successful deployment CompletedWithFollowUp.
+      - how each application was confirmed: Verified (WinGet finds the exact package ID
+        installed), EngineReported (the installer reported success, not independently confirmed),
+        NotVerified (reported success, but WinGet does not find it), Failed, Deferred (manual,
+        deselected, needs a person or a restart) or Incomplete;
+      - Windows Update counts for optional updates and drivers, and the updates needing a person;
+      - the restart history (planned or unexpected) and every recovery.
+    The progress window task is removed; the LAN monitor ends itself (see its script).
 #>
 [CmdletBinding()]
 param(
@@ -51,6 +64,73 @@ function Get-WddSystemInfo {
     }
 }
 
+# Windows' documented Device Manager problem codes (CM_PROB_*), in words (same wording as the health check).
+$script:WddProblemCodes = @{
+    1 = 'not configured correctly'; 3 = 'driver may be corrupted or memory is low'; 10 = 'cannot start'; 12 = 'not enough free resources'; 14 = 'needs a restart to work'
+    18 = 'drivers must be reinstalled'; 19 = 'configuration in the registry is damaged'; 21 = 'being removed'; 22 = 'disabled'; 24 = 'not present, not working or missing drivers'
+    28 = 'no driver installed'; 29 = 'disabled by the firmware'; 31 = 'not working properly (driver could not be loaded)'; 32 = 'driver service disabled'; 37 = 'driver failed to initialize'
+    39 = 'driver is corrupted or missing'; 40 = 'driver registry entry is damaged'; 41 = 'driver loaded but the hardware was not found'; 43 = 'the device reported a problem'
+    45 = 'not connected'; 47 = 'prepared for safe removal'; 48 = 'driver blocked'; 52 = 'driver signature could not be verified'
+}
+
+<# Present Plug and Play devices (read-only): name, class, problem code and up to five hardware IDs. #>
+function Get-WddPnpDevices {
+    @(Get-CimInstance -ClassName Win32_PnPEntity -ErrorAction Stop | Where-Object { $_.Present -ne $false } | ForEach-Object {
+        @{ name = [string] $_.Name; class = [string] $_.PNPClass; problemCode = $(if ($null -ne $_.ConfigManagerErrorCode) { [int] $_.ConfigManagerErrorCode } else { 0 })
+           hardwareIds = @(@($_.HardwareID) | Where-Object { $_ } | Select-Object -First 5) }
+    })
+}
+
+<#
+    Devices that still need attention at the end of the deployment. Disabled (22) and disconnected
+    (45) devices are not counted. Kinds: NoDriver, UnknownDevice, RestartRequired,
+    HardwareOrConnection (USB descriptor/reset failures: usually a cable, hub, port or device fault,
+    not a missing driver), Problem (any other problem code). Instance IDs are not reported (they can
+    contain serial numbers).
+#>
+function Get-WddDeviceReport {
+    $devices = $null
+    # Each device is one pipeline object (a hashtable); an empty list is an empty array.
+    try { $devices = @(Get-WddPnpDevices | Where-Object { $_ -is [System.Collections.IDictionary] }) } catch { return [ordered]@{ checked = $false; checkedUtc = (Get-WddNow).ToString('o'); error = "The device list could not be read: $($_.Exception.Message)"; devices = 0; unresolved = @() } }
+    $out = @()
+    foreach ($d in $devices) {
+        $code = [int] $d['problemCode']
+        $name = [string] $d['name']
+        $class = [string] $d['class']
+        $ids = @(@($d['hardwareIds']) | Where-Object { $_ })
+        $unknown = (-not $class -or $class -eq 'Unknown' -or $name -match '(?i)^unknown device$' -or -not $name)
+        if ($code -in 22, 45) { continue }
+        if ($code -eq 0 -and -not $unknown) { continue }
+        $descriptor = (@($ids | Where-Object { $_ -match '(?i)(DEVICE_DESCRIPTOR_FAILURE|CONFIG_DESCRIPTOR_FAILURE|RESET_FAILURE|SET_ADDRESS_FAILURE)' }).Count -gt 0) -or $name -match '(?i)(Descriptor Request Failed|Port Reset Failed|Set Address Failed)'
+        $problem = $(if ($code -and $script:WddProblemCodes.ContainsKey($code)) { $script:WddProblemCodes[$code] } elseif ($code) { "problem code $code" } else { 'no matching driver' })
+        if ($descriptor) { $kind = 'HardwareOrConnection'; $note = 'The USB device did not answer Windows correctly (descriptor or reset failure). This usually means a hardware, cable, hub or port problem, not a missing driver: reconnect it, try another port, or check the device.' }
+        elseif ($code -eq 28) { $kind = 'NoDriver'; $note = 'No driver is installed. Find the driver by the hardware ID (Windows Update optional updates, or the manufacturer''s support page).' }
+        elseif ($unknown) { $kind = 'UnknownDevice'; $note = 'Windows does not recognise this device. Identify it by its hardware ID.' }
+        elseif ($code -eq 14) { $kind = 'RestartRequired'; $note = 'Restart the computer to finish installing its driver.' }
+        else { $kind = 'Problem'; $note = "Device Manager reports code ${code}: $problem. This is not necessarily a missing driver; check the device in Device Manager." }
+        $out += , ([ordered]@{ name = $(if ($name) { $name } else { 'Unknown device' }); class = $class; problemCode = $code; problem = $problem; kind = $kind; hardwareIds = $ids; note = $note })
+    }
+    return [ordered]@{ checked = $true; checkedUtc = (Get-WddNow).ToString('o'); devices = @($devices).Count; unresolved = $out }
+}
+
+<#
+    How an application result was confirmed (see the description). Verification is by the exact
+    package ID (winget list --id <id> --exact), so a similarly named package or another version of
+    a different product never counts.
+#>
+function Get-WddAppVerification {
+    param($Package)
+    $st = [string] $Package['status']
+    $det = $(if ($Package.Contains('detection')) { [string] $Package['detection'] } else { '' })
+    switch ($st) {
+        'Succeeded' { if ($det -eq 'Installed') { return 'Verified' } elseif ($det -eq 'Unconfirmed') { return 'NotVerified' } else { return 'EngineReported' } }
+        'AlreadyInstalled' { return 'Verified' }
+        { $_ -in 'Failed', 'Unavailable' } { return 'Failed' }
+        { $_ -in 'RequiresInteraction', 'RequiresRestart', 'SkippedByUser', 'Skipped' } { return 'Deferred' }
+    }
+    return 'Incomplete'
+}
+
 function New-WddReport {
     param([hashtable] $Manifest, [hashtable] $Paths, [hashtable] $State, $Snapshot, [string] $Overall, [string] $Reason)
     $system = try { Get-WddSystemInfo } catch { [ordered]@{ computerName = $env:COMPUTERNAME; error = $_.Exception.Message } }
@@ -62,9 +142,14 @@ function New-WddReport {
     if ($wu) {
         $r = $wu.result
         $failed = @(if ($r) { @($r.failed) | Where-Object { $_ } | ForEach-Object { [ordered]@{ kbs = @($_.kbs); title = $_.title; attempts = $_.attempts; lastResult = $_.lastResult; lastHResult = $_.lastHResult } } })
+        $person = @(if ($r -and $r.ContainsKey('requiresInteraction')) { @($r.requiresInteraction) | Where-Object { $_ } | ForEach-Object { [ordered]@{ kbs = @($_.kbs); title = $_.title; reason = $_.reason } } })
+        $counts = $(if ($r -and $r.ContainsKey('counts')) { $r.counts } else { $null })
         $wuReport = [ordered]@{ state = $wu.state; status = $wu.status; reason = $wu.detail; reboots = $wu.reboots
-                                installed = $(if ($r) { @($r.installed).Count } else { $null }); skipped = $(if ($r) { @($r.skipped).Count } else { $null }); failedUpdates = $failed }
-        foreach ($f in $failed) { $remaining += "Windows Update: $((@($f.kbs) -join ', ')) $($f.title) failed after $($f.attempts) attempt(s)." }
+                                installed = $(if ($r) { @($r.installed).Count } else { $null }); skipped = $(if ($r) { @($r.skipped).Count } else { $null }); failedUpdates = $failed
+                                installedOptional = $(if ($counts) { $counts['installedOptional'] } else { $null }); installedDrivers = $(if ($counts) { $counts['installedDrivers'] } else { $null })
+                                requiresInteraction = $person; policy = $(if ($r -and $r.ContainsKey('policy')) { $r.policy } else { $null }) }
+        foreach ($f in $failed) { $remaining += "Windows Update: $((@($f.kbs) -join ', ')) $($f.title) failed after $($f.attempts) attempt(s) ($($f.lastHResult))." }
+        foreach ($f in $person) { $remaining += "Windows Update: $((@($f.kbs) -join ', ')) $($f.title) needs a person to install it (Settings > Windows Update)." }
         if ($wu.state -ne 'Final') { $incomplete += "Windows Update ($($wu.state))" }
         elseif ($wu.status -eq 'Offline') { $incomplete += 'Windows Update (Offline: no network before its runtime limit)' }
         elseif ($wu.status -eq 'Failed') { $errors += "Windows Update failed: $($wu.detail)" }
@@ -75,14 +160,19 @@ function New-WddReport {
         # Phase 5: lifecycle, failure class and attempt totals come from result schema 2 (absent in schema 1).
         $pk = @(if ($r) { @($r.packages) | Where-Object { $_ } | ForEach-Object {
             $x = [ordered]@{ name = $_.name; packageIdentifier = $_.packageIdentifier; source = $_.source; status = $_.status; attempts = $_.attempts; exitCode = $_.exitCode; message = $_.message }
-            foreach ($k in 'operationId', 'lifecycle', 'failureClass', 'retryable', 'detection', 'totalAttempts', 'manualRetries') { if ($_.ContainsKey($k)) { $x[$k] = $_[$k] } }
+            foreach ($k in 'operationId', 'lifecycle', 'failureClass', 'retryable', 'detection', 'totalAttempts', 'manualRetries', 'installerExitCode') { if ($_.ContainsKey($k)) { $x[$k] = $_[$k] } }
+            $x.verification = Get-WddAppVerification $x
             $x
         } })
+        $verification = [ordered]@{}
+        foreach ($v in 'Verified', 'EngineReported', 'NotVerified', 'Failed', 'Deferred', 'Incomplete') { $verification[$v] = @($pk | Where-Object { $_.verification -eq $v }).Count }
         $add = @(if ($r) { @($r.additionalSoftware) | Where-Object { $_ } })
         $appsReport = [ordered]@{ state = $apps.state; status = $apps.status; reason = $apps.detail; reboots = $apps.reboots
                                   counts = $(if ($r) { $r.counts } else { $null }); packages = $pk; additionalSoftware = $add
                                   requiresInteraction = @($pk | Where-Object { $_.status -eq 'RequiresInteraction' } | ForEach-Object { $_.name })
+                                  verification = $verification
                                   bootstrap = $(if ($r) { $r.bootstrap } else { $null }) }
+        foreach ($p in @($pk | Where-Object { $_.verification -eq 'NotVerified' })) { $remaining += "Application $($p.name): reported installed, but WinGet does not find $($p.packageIdentifier); check it by hand." }
         foreach ($p in $pk) { if ($p.status -in 'RequiresInteraction', 'RequiresRestart', 'Failed', 'Unavailable', 'Pending') { $remaining += "Application $($p.name) ($($p.source):$($p.packageIdentifier)): $($p.status). $($p.message)" } }
         foreach ($a in $add) { if ($a.status -ne 'Succeeded') { $remaining += "Additional Software $($a.name): $($a.status). $($a.message)" } }
         if ($apps.state -ne 'Final') { $incomplete += "Applications ($($apps.state))" }
@@ -170,6 +260,10 @@ function New-WddReport {
                                          settings = @(@($restoration['settings']) | Where-Object { $_ } | ForEach-Object { [ordered]@{ adapterId = $_['adapterId']; name = $_['name']; outcome = $_['outcome']; detail = $_['detail'] } }) }
         if (@($restoration['settings']).Count) { $recoveryCommands.restoreSettings = "powershell.exe -ExecutionPolicy Bypass -File `"$tool`" -Action RestoreSettings -BackupPath <backup folder>" }
     }
+    # Orchestrator 1.2.0: Device Manager at the end (read-only), restarts and recoveries.
+    $devices = $(if ($State.ContainsKey('deviceReport') -and $State.deviceReport) { $State.deviceReport } else { Get-WddDeviceReport })
+    foreach ($d in @($devices.unresolved)) { $remaining += "Device: $($d.name)$(if (@($d.hardwareIds).Count) { " [$(@($d.hardwareIds)[0])]" }): $($d.note)" }
+    if (-not $devices.checked) { $remaining += "Device Manager: $($devices.error)" }
     $outcome = Get-WddDeploymentOutcome @{ status = 'Completed'; overall = $Overall; message = $Reason } $null
     [ordered]@{
         format             = 'windows-deployment-builder/deployment-report'
@@ -191,6 +285,8 @@ function New-WddReport {
         wifi               = $wifi
         drivers            = $(if ($driversReport) { $driversReport } elseif ($drvStage -and $drvStage['implemented']) { [ordered]@{ state = 'NotPartOfDeployment'; note = 'Hardware-aware driver provisioning was off; no driver was installed or changed by this deployment.' } } else { [ordered]@{ state = 'NotImplemented'; note = 'No driver was installed or changed by this deployment.' } })
         restarts           = [ordered]@{ windowsUpdate = $(if ($wu) { $wu.reboots } else { 0 }); applications = $(if ($apps) { $apps.reboots } else { 0 }); drivers = $(if ($drv) { $drv.reboots } else { 0 }) }
+        restartHistory     = @(if ($State.ContainsKey('restarts')) { @($State.restarts) | Where-Object { $_ } })
+        devices            = $devices
         incompleteStages   = $incomplete
         errors             = $errors
         remainingTasks     = $remaining
@@ -222,7 +318,9 @@ function Format-WddReport {
         $w = $Report.windowsUpdate
         $l.Add("  Result: $($w.status) ($($w.state)). $($w.reason)")
         $l.Add("  Installed: $($w.installed)  Skipped by policy: $($w.skipped)  Restarts: $($w.reboots)")
+        if ($w.Contains('installedOptional') -and $null -ne $w.installedOptional) { $l.Add("  Of these: optional updates $($w.installedOptional), drivers $($w.installedDrivers)") }
         foreach ($f in @($w.failedUpdates)) { $l.Add("  FAILED  $((@($f.kbs) -join ', ')) $($f.title) ($($f.attempts) attempts, $($f.lastHResult))") }
+        if ($w.Contains('requiresInteraction')) { foreach ($f in @($w.requiresInteraction)) { $l.Add("  PERSON  $((@($f.kbs) -join ', ')) $($f.title): needs a person to install it") } }
     } else { $l.Add('  Not part of this deployment.') }
     $l.Add('')
     $l.Add('Applications (WinGet)')
@@ -230,9 +328,11 @@ function Format-WddReport {
         $a = $Report.applications
         $l.Add("  Result: $($a.status) ($($a.state)). $($a.reason)")
         $l.Add("  Restarts: $($a.reboots)")
+        if ($a.Contains('verification') -and $a.verification) { $l.Add('  Confirmation: ' + (($a.verification.Keys | Where-Object { [int] $a.verification[$_] } | ForEach-Object { "$_ $($a.verification[$_])" }) -join ', ')) }
         foreach ($p in @($a.packages)) {
             $tries = $(if ($p.Contains('totalAttempts') -and [int] $p.totalAttempts -gt 1) { " [$($p.totalAttempts) attempts$(if ([int] $p.manualRetries) { ", $($p.manualRetries) manual retr$(if ([int] $p.manualRetries -eq 1) { 'y' } else { 'ies' })" })]" } else { '' })
-            $l.Add(('  {0,-20} {1} ({2}:{3}){4} {5}' -f $p.status, $p.name, $p.source, $p.packageIdentifier, $tries, $p.message))
+            $how = $(if ($p.Contains('verification')) { " <$($p.verification)>" } else { '' })
+            $l.Add(('  {0,-20} {1} ({2}:{3}){4}{5} {6}' -f $p.status, $p.name, $p.source, $p.packageIdentifier, $tries, $how, $p.message))
         }
         foreach ($s in @($a.additionalSoftware)) { $l.Add(('  {0,-20} {1} (Additional Software) {2}' -f $s.status, $s.name, $s.message)) }
     } else { $l.Add('  Not part of this deployment.') }
@@ -263,6 +363,31 @@ function Format-WddReport {
         $l.Add('  Not implemented in this version; nothing was installed or changed.')
     }
     $l.Add('')
+    if ($Report.Contains('devices') -and $Report.devices) {
+        $dv = $Report.devices
+        $l.Add('Device Manager (at the end of the deployment)')
+        if (-not $dv.checked) { $l.Add("  Not checked: $($dv.error)") }
+        elseif (-not @($dv.unresolved).Count) { $l.Add("  $($dv.devices) device(s); none reports a problem.") }
+        else {
+            $l.Add("  $($dv.devices) device(s); $(@($dv.unresolved).Count) need attention:")
+            foreach ($d in @($dv.unresolved)) {
+                $l.Add(('  {0,-20} {1} ({2}{3})' -f $d.kind, $d.name, $(if ($d.class) { "$($d.class), " }), $(if ($d.problemCode) { "code $($d.problemCode): $($d.problem)" } else { $d.problem })))
+                if (@($d.hardwareIds).Count) { $l.Add("                       hardware ID: $(@($d.hardwareIds) -join '; ')") }
+                $l.Add("                       $($d.note)")
+            }
+        }
+        $l.Add('')
+    }
+    if ($Report.Contains('restartHistory') -and @($Report.restartHistory).Count) {
+        $l.Add('Restarts during the deployment')
+        foreach ($x in @($Report.restartHistory)) { $l.Add("  $($x.bootUtc)  $(if ($x.planned) { "planned ($($x.by)$(if ($x.reason) { ": $($x.reason)" }))" } else { 'UNEXPECTED (not scheduled by the deployment)' })") }
+        $l.Add('')
+    }
+    if ($Report.Contains('recoveries') -and @($Report.recoveries).Count) {
+        $l.Add('Recoveries')
+        foreach ($x in @($Report.recoveries)) { $l.Add("  $($x.atUtc)  $($x.action) by $($x.by)$(if ($x.Contains('stage')) { ": $($x.stage)" })$(if ($x.Contains('reason') -and $x.reason) { " ($($x.reason))" })$(if ([string] $x.action -like 'Automatic*' -and @($x.refused).Count) { ' - FAILED' })") }
+        $l.Add('')
+    }
     $l.Add('Incomplete stages')
     if (@($Report.incompleteStages).Count) { foreach ($x in $Report.incompleteStages) { $l.Add("  - $x") } } else { $l.Add('  None.') }
     $l.Add('')
@@ -319,6 +444,9 @@ function Complete-WddDeployment {
     $overall = Get-WddOverall $Snapshot.stages -DeadlineReached:$DeadlineReached
     # A policy that could not be applied is a follow-up, never a silent success.
     if ($overall -eq 'Succeeded' -and $Manifest.ContainsKey('updatePolicy') -and $Manifest.updatePolicy -and -not ($State.ContainsKey('updatePolicy') -and $State.updatePolicy -and $State.updatePolicy.status -in 'Applied', 'AlreadyApplied')) { $overall = 'CompletedWithFollowUp' }
+    # Orchestrator 1.2.0: devices that still need attention are a follow-up too.
+    $State.deviceReport = Get-WddDeviceReport
+    if ($overall -eq 'Succeeded' -and (@($State.deviceReport.unresolved).Count -or -not $State.deviceReport.checked)) { $overall = 'CompletedWithFollowUp' }
     $reason = if ($DeadlineReached -and -not $Snapshot.allFinal) { "The deployment deadline ($($State.deadlineUtc)) passed before every stage finished." } elseif (@($Snapshot.stages).Count -eq 0) { 'No post-installation stage was enabled.' } else { 'Every enabled stage has a final result.' }
     $report = New-WddReport $Manifest $Paths $State $Snapshot $overall $reason
     Write-WddReport $report $Paths
@@ -333,6 +461,7 @@ function Complete-WddDeployment {
     Write-WddLog "FINISHED: $overall. $reason Report: $($Paths.ReportText)" $(if ($overall -eq 'Succeeded') { 'INFO' } else { 'WARN' })
     $eventId = switch ($overall) { 'Succeeded' { 3100 } 'CompletedWithFollowUp' { 3101 } 'CompletedWithFailures' { 3102 } 'Failed' { 3103 } default { 3104 } }
     Write-WddEvent $eventId "Deployment $($Manifest.packageId) finished: $overall. $reason Report: $($Paths.ReportText)" $(if ($overall -eq 'Succeeded') { 'Information' } elseif ($overall -eq 'Failed') { 'Error' } else { 'Warning' })
+    Add-WddActivity $Paths "Deployment finished: $overall. $reason$(if (@($report.devices.unresolved).Count) { " $(@($report.devices.unresolved).Count) device(s) need attention." }) Report: $($Paths.ReportText)" $(if ($overall -eq 'Succeeded') { 'info' } elseif ($overall -eq 'Failed') { 'error' } else { 'warning' })
     # Phase 9: verify what the stages reported against Windows itself, now that the state says Completed.
     $health = $null
     if (Get-Command Invoke-WdhAfterDeployment -ErrorAction SilentlyContinue) {
@@ -352,6 +481,8 @@ function Complete-WddDeployment {
         }
     } catch { Write-WddLog "Could not update the desktop shortcuts: $($_.Exception.Message)" 'WARN' }
     try { Unregister-WddTask '\WindowsDeploymentBuilder\' 'Deployment' } catch { Write-WddLog "Could not remove the monitor task: $($_.Exception.Message)" 'WARN' }
+    # Orchestrator 1.2.0: the progress window no longer opens at sign-in.
+    try { Unregister-WddTask '\WindowsDeploymentBuilder\' 'Progress' } catch { Write-WddLog "Could not remove the progress window task: $($_.Exception.Message)" 'WARN' }
     return $overall
 }
 

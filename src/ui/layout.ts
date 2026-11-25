@@ -214,6 +214,11 @@ export const FIELD_GROUPS: Partial<Record<SectionId, FieldGroup[]>> = {
     },
     { title: 'Reports', paths: ['health.technicianReport', 'health.customerReport', 'health.customerNotes'] },
     { title: 'What may be missing at delivery', paths: ['health.optionalApps'] },
+    {
+      title: 'Following the deployment',
+      description: 'The Deployment Progress window opens by itself at every sign-in while the deployment runs (refreshing every 7 seconds). The monitor shows the same status in a browser.',
+      paths: ['monitoring.enabled', 'monitoring.lanAccess', 'monitoring.port'],
+    },
   ],
   system: [
     { title: 'Startup & sign-in', paths: ['system.disableFastStartup', 'system.disableAutomaticRestartSignOn', 'system.deleteWindowsOld'] },

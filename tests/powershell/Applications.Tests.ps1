@@ -141,6 +141,8 @@ function Install-WdaPackage {
         'fail-but-installed' { $s.Installed = $true; $code = 0x8A150008 }
         'false-success' { $code = 0 }
         'locked-once'   { if ($s.InstallCalls -ge 2) { $s.Installed = $true } else { $code = 0x8A150102 } }
+        # Engine 1.4.0: the package's own installer fails (WinGet: SHELLEXEC_INSTALL_FAILED, with the installer's code in its output).
+        'installer-fail' { return @{ ExitCode = [int] 0x8A150006; TimedOut = $false; Output = "Starting package install...`r`nInstaller failed with exit code: 1603`r`n" } }
     }
     @{ ExitCode = [int] $code; TimedOut = $false; Output = '' }
 }
@@ -332,6 +334,46 @@ $tests['packages that need interaction are reported, not attempted: CompletedWit
     Assert-True (Test-Marker $c) 'marker written'
     Assert-True ((Get-Content -LiteralPath (Join-Path $c.dataRoot 'Applications\follow-up.txt') -Raw) -match 'Vendor.Interactive|App Vendor') 'follow-up list'
     Save-Result $c 'followup'
+}
+
+$tests['installer failure keeps the installer exit code; the other applications continue (Chrome/Spotify-style failure)'] = {
+    Reset-Sim @((New-SimPackage 'Vendor.Broken' 'installer-fail'), (New-SimPackage 'Git.Git'))
+    $c = New-AppTestConfig $script:Sim.Packages -Overrides @{ maxAttemptsPerPackage = 3 }
+    $o = Invoke-Logons $c
+    Assert-Equal $o[-1] 'Finished:CompletedWithFailures' 'outcome'
+    $p = Get-Pkg (Get-Result $c) 'Vendor.Broken'
+    Assert-Equal $p.status 'Failed' 'never reported as installed'
+    Assert-Equal $p.exitCode '0x8A150006' 'WinGet result kept'
+    Assert-True ($p.message -like '*Installer exit code: 1603*') "installer exit code in the message: $($p.message)"
+    Assert-Equal $p.installerExitCode '1603' 'installer exit code in result.json'
+    Assert-Equal $script:Sim.Packages[0].InstallCalls 3 'three attempts in total, no more'
+    Assert-Equal (Get-Pkg (Get-Result $c) 'Git.Git').status 'Succeeded' 'the next application was installed'
+    $attempts = @(Get-Content -LiteralPath (Join-Path $c.dataRoot 'Applications\logs\attempts.jsonl') | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.packageIdentifier -eq 'Vendor.Broken' })
+    Assert-Equal (@($attempts | ForEach-Object { $_.installerExitCode }) -join ',') '1603,1603,1603' 'installer exit code in every attempt record'
+    $status = Get-Content -LiteralPath (Join-Path $c.dataRoot 'Applications\status.json') -Raw | ConvertFrom-Json
+    Assert-True ($status.lastFailure.message -like 'App Vendor.Broken could not be installed*The failure was recorded; deployment is continuing with the remaining applications.') "status message: $($status.lastFailure.message)"
+    Assert-Equal $status.failed 1 'failed count'
+    Assert-Equal $status.installed 1 'installed count'
+    Assert-Equal $status.progress 'unavailable' 'no invented progress'
+}
+
+$tests['an installer that may prompt and times out needs a person; not retried for another full timeout (Battle.net-style)'] = {
+    Reset-Sim @((New-SimPackage 'Vendor.Prompting' 'timeout' -Interaction mayPrompt), (New-SimPackage 'Git.Git'))
+    $c = New-AppTestConfig $script:Sim.Packages -Overrides @{ maxAttemptsPerPackage = 3 }
+    $o = Invoke-Logons $c
+    Assert-Equal $o[-1] 'Finished:CompletedWithFollowUp' 'outcome'
+    $p = Get-Pkg (Get-Result $c) 'Vendor.Prompting'
+    Assert-Equal $p.status 'RequiresInteraction' 'status'
+    Assert-Equal $script:Sim.Packages[0].InstallCalls 1 'one attempt only'
+    Assert-Equal (Get-Pkg (Get-Result $c) 'Git.Git').status 'Succeeded' 'the other application was installed'
+}
+
+$tests['an ordinary timeout is still retried within the attempt budget'] = {
+    Reset-Sim @((New-SimPackage 'Vendor.Slow' 'timeout'))
+    $c = New-AppTestConfig $script:Sim.Packages -Overrides @{ maxAttemptsPerPackage = 3 }
+    $o = Invoke-Logons $c
+    Assert-Equal $o[-1] 'Finished:CompletedWithFailures' 'outcome'
+    Assert-Equal $script:Sim.Packages[0].InstallCalls 3 'three attempts'
 }
 
 $tests['cancelled installer is RequiresInteraction'] = {

@@ -9,7 +9,7 @@ import type { Profile } from '../schema/profile';
  * profile can change goes into config.json, which both scripts read at run time.
  */
 
-export const ENGINE_VERSION = '1.1.0';
+export const ENGINE_VERSION = '1.2.0';
 export const DATA_ROOT = 'C:\\ProgramData\\WindowsDeploymentBuilder';
 /** Where the answer file extracts the assets during specialize (Administrators-only by default). */
 export const STAGING_DIR = 'C:\\Windows\\Setup\\Scripts\\WindowsUpdate';
@@ -65,6 +65,8 @@ export interface EngineConfig {
   rebootWarningSeconds: number;
   /** Phase 3 coordination: how long to wait for the shared install lock before trying later. */
   lockWaitMinutes: number;
+  /** Engine 1.2.0: delay before a failed download or installation is retried (multiplied by the attempt). */
+  retryDelaySeconds: number;
   excludedKbs: string[];
 }
 
@@ -116,6 +118,7 @@ export function engineConfig(p: Profile): EngineConfig {
     resetComponentsOnce: w.resetComponentsOnce,
     rebootWarningSeconds: w.rebootWarningSeconds,
     lockWaitMinutes: 60,
+    retryDelaySeconds: 120,
     excludedKbs: parseKbList(w.excludedKbs).kbs,
   };
 }
@@ -148,7 +151,15 @@ What happens
   Agent API, restarts when required (with a warning to signed-in users) and resumes after each
   restart, until nothing applicable remains. It stops at the configured limits instead of
   looping: maximum restarts, attempts per update, total runtime and unexpected errors. Updates
-  that keep failing are given up and reported. Installing updates and scheduling a restart both
+  that keep failing are given up and reported.
+
+  Selection: recommended updates always; optional updates (cumulative previews, optional driver
+  updates) when "optional updates" is Install; drivers when drivers are included. Windows decides
+  what is applicable; feature updates and Insider builds are not installed. An update that can
+  ask for input is installed on its own, quietly; only if Windows answers that it needs a person
+  is it reported for follow-up. Each update is downloaded on its own; a transient failure is
+  retried after a delay, up to the attempts per update (download and installation count
+  together); a permanent one (for example "not applicable") is not retried. Installing updates and scheduling a restart both
   take the install lock (${DATA_ROOT}\\state\\install.lock) shared with the
   application engine, so a restart never interrupts an application installation.
 
@@ -156,11 +167,12 @@ Results
   Log:     ${DATA_ROOT}\\Updates\\logs\\engine.log
   Status:  ${DATA_ROOT}\\Updates\\status.json   (live phase)
   Result:  ${RESULT_FILE}
-           status = Succeeded | CompletedWithFailures | Failed | Offline
+           status = Succeeded | CompletedWithFollowUp | CompletedWithFailures | Failed | Offline
   Marker:  ${COMPLETION_MARKER}
-           written only for Succeeded and CompletedWithFailures (deployment orchestrator signal)
+           written for Succeeded, CompletedWithFollowUp and CompletedWithFailures
   Events:  Application log, source "WindowsDeploymentBuilder", IDs 1000 started, 1001 restart,
-           1100 Succeeded, 1101 CompletedWithFailures, 1102 Failed, 1103 Offline
+           1100 Succeeded, 1101 CompletedWithFailures, 1102 Failed, 1103 Offline,
+           1104 CompletedWithFollowUp
 
 Status: not yet validated on a Windows installation in a VM. Test before relying on it.
 `;

@@ -36,6 +36,7 @@ function Reset-Sim {
         Updates = @($Updates); Boots = 0; Online = $Online; OnlineAfterBoot = $OnlineAfterBoot
         RebootPending = $false; RebootRequested = $false; Resets = 0; Events = @(); TaskRemoved = $false
         ScanThrows = 0; InstallThrows = $false; UnexpectedThrows = $false; Busy = 0; LockPolls = 0
+        DownloadCalls = @(); InstallBatches = @()
     }
 }
 
@@ -63,7 +64,14 @@ function Get-WduAvailableUpdates {
 function Invoke-WduDownload {
     param([object[]] $Updates)
     $out = @{}
-    foreach ($u in $Updates) { $out[$u.Id] = @{ Result = $(if ($u.Behavior -eq 'download-fail') { 'Failed' } else { 'Succeeded' }); HResult = $(if ($u.Behavior -eq 'download-fail') { -2145107924 } else { 0 }) } }
+    $script:Sim.DownloadCalls += , @($Updates | ForEach-Object { $_.Kbs[0] })
+    foreach ($u in $Updates) {
+        if (-not $u.ContainsKey('DownloadCalls')) { $u.DownloadCalls = 0 }
+        $u.DownloadCalls++
+        # 0x8024402C WU_E_PT_WINHTTP_NAME_NOT_RESOLVED (transient)
+        $fail = $u.Behavior -eq 'download-fail' -or ($u.Behavior -eq 'download-fail-once' -and $u.DownloadCalls -eq 1)
+        $out[$u.Id] = @{ Result = $(if ($fail) { 'Failed' } else { 'Succeeded' }); HResult = $(if ($fail) { -2145107924 } else { 0 }) }
+    }
     $out
 }
 
@@ -71,10 +79,16 @@ function Invoke-WduInstall {
     param([object[]] $Updates)
     if ($script:Sim.InstallThrows) { throw 'Simulated unexpected engine error' }
     $out = @{ RebootRequired = $false; Results = @{} }
+    $script:Sim.InstallBatches += , @($Updates | ForEach-Object { $_.Kbs[0] })
     foreach ($u in $Updates) {
         $u.InstallCalls++
         switch ($u.Behavior) {
             'ok'        { $u.Installed = $true; $out.Results[$u.Id] = @{ Result = 'Succeeded'; HResult = 0 } }
+            'download-fail-once' { $u.Installed = $true; $out.Results[$u.Id] = @{ Result = 'Succeeded'; HResult = 0 } }
+            # 0x80240020 WU_E_NO_INTERACTIVE_USER: Windows says a person is needed.
+            'needs-person' { $out.Results[$u.Id] = @{ Result = 'Failed'; HResult = -2145124320 } }
+            # 0x80240017 WU_E_NOT_APPLICABLE: permanent.
+            'not-applicable' { $out.Results[$u.Id] = @{ Result = 'Failed'; HResult = -2145124329 } }
             'ok-reboot' { $u.Installed = $true; $out.RebootRequired = $true; $script:Sim.RebootPending = $true; $out.Results[$u.Id] = @{ Result = 'Succeeded'; HResult = 0 } }
             'reoffer'   { $out.Results[$u.Id] = @{ Result = 'Succeeded'; HResult = 0 } }
             'fail'      { $out.Results[$u.Id] = @{ Result = 'Failed'; HResult = -2145124330 } }
@@ -92,7 +106,7 @@ function New-TestConfig {
         drivers = 'exclude'; featureUpdates = 'skip'; optionalUpdates = 'skip'; microsoftUpdate = $false
         maxReboots = 10; maxAttemptsPerUpdate = 2; maxRuntimeHours = 6; maxErrors = 5; networkWaitMinutes = 15
         confirmationScans = 1; confirmationDelaySeconds = 60; resetComponentsOnce = $true; rebootWarningSeconds = 60
-        initialDelaySeconds = 60; excludedKbs = @(); lockWaitMinutes = 1
+        initialDelaySeconds = 60; excludedKbs = @(); lockWaitMinutes = 1; retryDelaySeconds = 120
     }
     foreach ($k in $Overrides.Keys) { $c[$k] = $Overrides[$k] }
     $c
@@ -200,7 +214,7 @@ $tests['reboot limit stops the engine with Failed'] = {
     Assert-True ($script:Sim.Events -contains 1102) 'error event'
 }
 
-$tests['policy: feature, driver, optional, interactive and excluded KB updates are skipped'] = {
+$tests['policy: feature, driver, optional and excluded KB updates are skipped; one that can ask for input is tried'] = {
     Reset-Sim @(
         (New-SimUpdate KB5000001 'ok' -Upgrade), (New-SimUpdate KB5000002 'ok' -Driver), (New-SimUpdate KB5000003 'ok' -Optional),
         (New-SimUpdate KB5000004 'ok' -Interactive), (New-SimUpdate KB5000005 'ok'), (New-SimUpdate KB5000006 'ok'))
@@ -208,12 +222,95 @@ $tests['policy: feature, driver, optional, interactive and excluded KB updates a
     $o = Invoke-Boots $c
     Assert-Equal $o[-1] 'Finished:Succeeded' 'skips are not failures'
     $installed = @($script:Sim.Updates | Where-Object { $_.Installed } | ForEach-Object { $_.Kbs[0] })
-    Assert-Equal ($installed -join ',') 'KB5000006' 'only the plain update is installed'
+    # CanRequestUserInput alone is no reason to skip: Windows installs it quietly.
+    Assert-Equal ($installed -join ',') 'KB5000004,KB5000006' 'the plain update and the one that can ask for input are installed'
     $reasons = @((Get-Result $c).skipped | ForEach-Object { $_.reason })
     Assert-True ($reasons -match 'feature update') 'feature update reason'
     Assert-True ($reasons -match 'optional') 'optional reason'
-    Assert-True ($reasons -match 'user input') 'interactive reason'
+    Assert-True (-not ($reasons -match 'user input')) 'no update is skipped for "user input" alone'
     Assert-True ($reasons -match 'excluded by configuration') 'excluded reason'
+    # The update that can ask for input is installed on its own, after the others.
+    Assert-Equal (($script:Sim.InstallBatches | ForEach-Object { $_ -join '+' }) -join ' | ') 'KB5000006 | KB5000004' 'install batches'
+}
+
+$tests['owner defaults: optional updates, optional drivers and drivers are installed and counted'] = {
+    Reset-Sim @((New-SimUpdate KB5200001 'ok'), (New-SimUpdate KB5200002 'ok' -Optional), (New-SimUpdate KB5200003 'ok' -Driver -Optional), (New-SimUpdate KB5200004 'ok' -Driver))
+    $c = New-TestConfig @{ drivers = 'include'; optionalUpdates = 'install'; maxAttemptsPerUpdate = 3 }
+    $o = Invoke-Boots $c
+    Assert-Equal $o[-1] 'Finished:Succeeded' 'outcome'
+    $r = Get-Result $c
+    Assert-Equal $r.counts.installed 4 'installed'
+    Assert-Equal $r.counts.installedOptional 2 'optional installed (including the optional driver)'
+    Assert-Equal $r.counts.installedDrivers 2 'drivers installed'
+    $kinds = @($r.installed | ForEach-Object { "$($_.kbs[0])=$($_.kind)" }) -join ','
+    Assert-Equal $kinds 'KB5200001=Update,KB5200002=Optional,KB5200003=Optional driver,KB5200004=Driver' 'kinds'
+    Assert-Equal $r.policy.optionalUpdates 'install' 'policy recorded in the result'
+}
+
+$tests['transient download failure is retried after a delay, and the update installs'] = {
+    Reset-Sim @((New-SimUpdate KB5300001 'download-fail-once'), (New-SimUpdate KB5300002 'ok'))
+    $c = New-TestConfig @{ maxAttemptsPerUpdate = 3; resetComponentsOnce = $false }
+    $start = $script:Sim.Now
+    $o = Invoke-Boots $c
+    Assert-Equal $o[-1] 'Finished:Succeeded' 'outcome'
+    Assert-Equal $script:Sim.Updates[0].DownloadCalls 2 'downloaded twice'
+    Assert-True ($script:Sim.Updates[1].Installed) 'the other update was installed meanwhile'
+    Assert-True (($script:Sim.Now - $start).TotalSeconds -ge 120) 'waited for the retry delay'
+    Assert-Equal (($script:Sim.DownloadCalls | ForEach-Object { $_.Count }) -join ',') '1,1,1' 'one update per download call'
+    $log = Get-Content -LiteralPath (Join-Path $c.dataRoot 'Updates\logs\engine.log') -Raw
+    Assert-True ($log -match 'Unable to download KB5300001 .*0x8024402C WU_E_PT_WINHTTP_NAME_NOT_RESOLVED.*Attempt 1 of 3; retrying in 120 s\. Other operations will continue where possible') 'retry message in the log'
+}
+
+$tests['download that keeps failing: three attempts in total, HRESULT name kept, other updates installed'] = {
+    Reset-Sim @((New-SimUpdate KB5400001 'download-fail'), (New-SimUpdate KB5400002 'ok'))
+    $c = New-TestConfig @{ maxAttemptsPerUpdate = 3; resetComponentsOnce = $false }
+    $o = Invoke-Boots $c
+    Assert-Equal $o[-1] 'Finished:CompletedWithFailures' 'outcome'
+    Assert-Equal $script:Sim.Updates[0].DownloadCalls 3 'exactly three attempts'
+    $r = Get-Result $c
+    Assert-Equal $r.failed[0].attempts 3 'attempts recorded'
+    Assert-Equal $r.failed[0].lastHResult '0x8024402C' 'HRESULT kept'
+    Assert-True ($r.failed[0].error -like '*WU_E_PT_WINHTTP_NAME_NOT_RESOLVED*') "named error: $($r.failed[0].error)"
+    Assert-True ($script:Sim.Updates[1].Installed) 'the other update was installed'
+    $status = Get-Content -LiteralPath (Join-Path $c.dataRoot 'Updates\status.json') -Raw | ConvertFrom-Json
+    Assert-True ($status.lastError -like 'Unable to download KB5400001*Attempt 3 of 3; given up*') "last error in status.json: $($status.lastError)"
+    Assert-Equal $status.progress 'unavailable' 'no invented progress'
+}
+
+$tests['permanent failure (not applicable) is not retried'] = {
+    Reset-Sim @((New-SimUpdate KB5500001 'not-applicable'), (New-SimUpdate KB5500002 'ok'))
+    $c = New-TestConfig @{ maxAttemptsPerUpdate = 3 }
+    $o = Invoke-Boots $c
+    Assert-Equal $o[-1] 'Finished:CompletedWithFailures' 'outcome'
+    Assert-Equal $script:Sim.Updates[0].InstallCalls 1 'installed once only'
+    Assert-Equal $script:Sim.Resets 0 'no component reset for a permanent failure'
+    $r = Get-Result $c
+    Assert-True ($r.failed[0].reason -like 'gave up: 0x80240017 WU_E_NOT_APPLICABLE*') "reason: $($r.failed[0].reason)"
+}
+
+$tests['update that Windows says needs a person: tried quietly once, CompletedWithFollowUp, marker written'] = {
+    Reset-Sim @((New-SimUpdate KB5600001 'needs-person' -Interactive), (New-SimUpdate KB5600002 'ok'))
+    $c = New-TestConfig @{ maxAttemptsPerUpdate = 3 }
+    $o = Invoke-Boots $c
+    Assert-Equal $o[-1] 'Finished:CompletedWithFollowUp' 'outcome'
+    Assert-Equal $script:Sim.Updates[0].InstallCalls 1 'not retried in a loop'
+    $r = Get-Result $c
+    Assert-Equal (@($r.requiresInteraction).Count) 1 'listed as needing a person'
+    Assert-Equal (@($r.failed).Count) 0 'not a failure'
+    Assert-Equal $r.counts.requiresInteraction 1 'counted'
+    Assert-True (Test-Marker $c) 'marker written'
+    Assert-True ($script:Sim.Events -contains 1104) 'follow-up event'
+}
+
+$tests['feature enablement packages and Insider builds are recognised by title'] = {
+    Assert-True (Test-WduFeatureTitle 'Feature update to Windows 11, version 25H2 via Enablement Package (KB5054156)') 'enablement package'
+    Assert-True (-not (Test-WduFeatureTitle '2026-11 Cumulative Update for Windows 11, version 25H2 for x64-based Systems (KB5070000)')) 'cumulative update is not a feature update'
+    $s = New-WduState
+    $c = New-TestConfig @{ featureUpdates = 'install'; optionalUpdates = 'install' }
+    $u = New-SimUpdate KB5700001 'ok'; $u.IsInsider = $true
+    Assert-True ((Get-WduSkipReason $u $c $s) -like 'Insider Preview build*') 'Insider builds never install, even with feature updates allowed'
+    $p = New-SimUpdate KB5700002 'ok' -Optional
+    Assert-Equal (Get-WduSkipReason $p $c $s) '' 'optional cumulative preview installs with optionalUpdates=install'
 }
 
 $tests['policy: drivers, feature and optional updates install when allowed'] = {
@@ -402,7 +499,8 @@ $tests['Get-WduConfig fills defaults and normalises KB numbers'] = {
     Set-Content -LiteralPath $p -Value '{ "maxReboots": 4, "excludedKbs": ["kb5000001"] }'
     $cfg = Get-WduConfig $p
     Assert-Equal $cfg.maxReboots 4 'explicit value'
-    Assert-Equal $cfg.maxAttemptsPerUpdate 2 'default value'
+    Assert-Equal $cfg.maxAttemptsPerUpdate 3 'default value (three attempts in total)'
+    Assert-Equal $cfg.retryDelaySeconds 120 'retry delay default'
     Assert-Equal $cfg.lockWaitMinutes 60 'coordination default for configs written before 1.1.0'
     Assert-Equal ($cfg.excludedKbs -join ',') 'KB5000001' 'normalised KB'
     Remove-Item -LiteralPath $p

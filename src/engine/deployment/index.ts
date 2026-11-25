@@ -8,6 +8,7 @@ import completeSource from './scripts/Complete-Deployment.ps1?raw';
 import setupSource from './scripts/setup.ps1?raw';
 import policySource from './scripts/Set-UpdatePolicy.ps1?raw';
 import recoverySource from './scripts/DeploymentRecovery.ps1?raw';
+import statusServerSource from './scripts/DeploymentStatusServer.ps1?raw';
 import type { GenContext } from '../context';
 import type { GenerateResult } from '../pipeline';
 import type { Profile } from '../schema/profile';
@@ -38,7 +39,7 @@ import { EMBEDDED_HEALTH_FILES, HEALTH_DIR, HEALTH_ENGINE_VERSION, HEALTH_REPORT
  * verification, manual runs on other installations (setup.cmd) and recovery.
  */
 
-export const DEPLOYMENT_VERSION = '1.1.0';
+export const DEPLOYMENT_VERSION = '1.2.0';
 export const PACKAGE_DIR = 'WindowsDeployment';
 export const PACKAGE_FILE_NAME = 'windows-deployment-package.zip';
 export const MANIFEST_FILE = 'deployment-manifest.json';
@@ -58,6 +59,15 @@ export const STATUS_SCRIPT = 'scripts/orchestrator/Show-DeploymentStatus.ps1';
 /** Phase 5: the technician recovery tool (status, retry, resume, diagnostics). */
 export const RECOVERY_SCRIPT = 'scripts/recovery/DeploymentRecovery.ps1';
 export const RECOVERY_TOOL = `${PACKAGE_ROOT}\\scripts\\recovery\\DeploymentRecovery.ps1`;
+/** Orchestrator 1.2.0: the read-only deployment monitor (HTTP) and the viewer tasks. */
+export const STATUS_SERVER_SCRIPT = 'scripts/monitor/DeploymentStatusServer.ps1';
+export const PROGRESS_TASK = { path: TASK_PATH, name: 'Progress' } as const;
+export const STATUS_SERVER_TASK = { path: TASK_PATH, name: 'StatusServer' } as const;
+/** The progress window and the monitor page refresh this often. */
+export const PROGRESS_REFRESH_SECONDS = 7;
+/** How long the monitor shows the final results after the deployment before it stops. */
+export const MONITOR_FINAL_REPORT_HOURS = 24;
+export const monitorActive = (p: Profile) => deploymentActive(p) && p.monitoring.enabled;
 /** Machine-readable outcomes (status.json, the report and the recovery tool's exit code). */
 export const OUTCOME_CODES = {
   Succeeded: 0,
@@ -78,7 +88,16 @@ export const STATE_SCHEMAS = { deploymentState: 2, applicationState: 2, applicat
 export const recoveryToolIncluded = (p: Profile) => p.applications.recovery.includeRecoveryTool;
 
 /** Orchestrator limits (in addition to each engine's own limits, which are unchanged). */
-export const ORCHESTRATOR_LIMITS = { launchAttempts: 2, stalledAfterMinutes: 120, monitorIntervalMinutes: 15, graceHours: 24 } as const;
+export const ORCHESTRATOR_LIMITS = {
+  launchAttempts: 2,
+  stalledAfterMinutes: 120,
+  /** No-progress limit while Windows Update downloads or installs (and never while Windows is servicing). */
+  longOperationMinutes: 240,
+  /** Automatic recoveries of one stalled stage before a technician is needed. */
+  autoRecoveries: 2,
+  monitorIntervalMinutes: 5,
+  graceHours: 24,
+} as const;
 
 export type FileRole = 'entry' | 'orchestrator' | 'engine' | 'configuration' | 'profile' | 'documentation';
 
@@ -159,6 +178,9 @@ export function packageFiles(p: Profile): PackageFile[] {
   ];
   if (updatePolicyPlan(p)) {
     files.push({ path: POLICY_SCRIPT, content: crlf(policySource), role: 'orchestrator', description: 'Applies the ongoing Windows Update policy once the initial update stage is final', embedded: embeddedDeploymentPath(POLICY_SCRIPT) });
+  }
+  if (monitorActive(p)) {
+    files.push({ path: STATUS_SERVER_SCRIPT, content: crlf(statusServerSource), role: 'orchestrator', description: 'Read-only deployment monitor (HTTP status page, access token; SYSTEM task while the deployment runs)', embedded: embeddedDeploymentPath(STATUS_SERVER_SCRIPT) });
   }
   if (recoveryToolIncluded(p)) {
     files.push({ path: RECOVERY_SCRIPT, content: crlf(recoverySource), role: 'orchestrator', description: 'Technician recovery: status, retry failed applications, resume, pending actions, diagnostics ZIP', embedded: embeddedDeploymentPath(RECOVERY_SCRIPT) });
@@ -269,6 +291,21 @@ export function buildManifest(p: Profile) {
     generator: { name: 'Windows Deployment Builder', orchestrator: DEPLOYMENT_VERSION, windowsUpdateEngine: ENGINE_VERSION, applicationEngine: APP_ENGINE_VERSION, ...(drv ? { driverEngine: DRIVER_ENGINE_VERSION } : {}), ...(healthActive(p) ? { healthEngine: HEALTH_ENGINE_VERSION } : {}) },
     dataRoot: DATA_ROOT,
     packageFolder: PACKAGE_DIR,
+    /** Orchestrator 1.2.0: the progress window at sign-in and the read-only deployment monitor. */
+    progress: { task: `${PROGRESS_TASK.path}${PROGRESS_TASK.name}`, refreshSeconds: PROGRESS_REFRESH_SECONDS, opensAtSignIn: deploymentActive(p) },
+    monitor: monitorActive(p)
+      ? {
+          enabled: true,
+          port: p.monitoring.port,
+          lanAccess: p.monitoring.lanAccess,
+          refreshSeconds: PROGRESS_REFRESH_SECONDS,
+          finalReportHours: MONITOR_FINAL_REPORT_HOURS,
+          script: STATUS_SERVER_SCRIPT,
+          task: `${STATUS_SERVER_TASK.path}${STATUS_SERVER_TASK.name}`,
+          readOnly: true,
+          firewall: p.monitoring.lanAccess ? { profile: 'Private', remoteAddress: 'LocalSubnet', protocol: 'TCP' } : null,
+        }
+      : { enabled: false },
     answerFile: {
       fileName: p.output.answerFileName,
       location: 'Root of the Windows installation USB drive',
@@ -617,6 +654,22 @@ Offline driver bundle (not included in this ZIP)
 `;
 }
 
+/** How to reach the deployment monitor (README and INSTALLATION). */
+function monitorText(p: Profile): string {
+  if (!monitorActive(p)) return '';
+  const m = p.monitoring;
+  return m.lanAccess
+    ? `Deployment monitor (read-only): open the address shown in the progress window, for example
+  http://192.168.1.100:${m.port}/#t=<access token>, in a browser on another computer, phone or tablet
+  on the same network. The part after #t= is the access token; without it no status is shown. One
+  Windows Firewall rule (TCP ${m.port}, Private networks, local subnet) is added while it runs; on a
+  network set to Public, Windows keeps blocking it. Never exposed to the Internet by this package.
+`
+    : `Deployment monitor (read-only): http://127.0.0.1:${m.port}/#t=<access token> on the computer itself
+  (the full address is shown in the progress window). LAN access is off in this package.
+`;
+}
+
 function readme(p: Profile): string {
   return `Windows Deployment Builder - deployment package ${DEPLOYMENT_VERSION}
 ==================================================
@@ -642,8 +695,12 @@ ${stageLines(p)}
 Windows Setup still stops at the disk selection page. Nothing in this package partitions,
 formats or selects a disk; you choose where Windows is installed.
 
-Progress on the installed computer: "Deployment progress" on the desktop, or
+Progress on the installed computer: the Deployment Progress window opens by itself at every
+sign-in while the deployment runs (refreshed every ${PROGRESS_REFRESH_SECONDS} seconds; closing it does not stop
+anything). Also "Deployment progress" on the desktop, or
   C:\\ProgramData\\WindowsDeploymentBuilder\\Deployment\\status.json
+  C:\\ProgramData\\WindowsDeploymentBuilder\\Deployment\\activity.jsonl   (timestamped activity)
+${monitorText(p)}
 ${recoveryText(p)}${backupText(p)}${driversText(p)}
 Status: generated and tested with simulations only. Validate in a virtual machine or on a spare
 computer before relying on it.
@@ -684,8 +741,10 @@ official Windows 11 media, and this ZIP.
 
 4. Windows installs, restarts and signs in. At the first sign-in the deployment starts by itself:
 ${stageLines(p)}
-   A "Deployment progress" window opens. You can close it; the deployment continues. The computer
-   restarts by itself when updates or applications need it.
+   A "Deployment progress" window opens, and opens again after every restart and sign-in while
+   the deployment runs. You can close it; the deployment continues. The computer restarts by
+   itself when updates or applications need it, and the deployment resumes by itself.
+${monitorText(p).replace(/^(?=.)/gm, '   ')}
 
 5. When it is finished, "Deployment report" appears on the desktop.
 

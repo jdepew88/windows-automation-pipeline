@@ -20,11 +20,20 @@
     copy (Read-WddDeploymentState falls back to it and never mistakes a damaged state for "no
     deployment"), and every snapshot carries a machine-readable outcome with a stable exit code
     (Get-WddDeploymentOutcome) for DeploymentRecovery.ps1 and later health reporting.
+
+    Orchestrator 1.2.0 (deployment reliability):
+      - Every stage in a snapshot says what it is doing in words (activity), why it waits
+        (waitingReason), when its engine last reported progress (lastActivityUtc) and how it stands
+        (condition: active, waiting, idle, blocked, finished). A stage with no progress for longer
+        than its limit is flagged (stale); the limit is longer for Windows Update downloads and
+        installations, and never applies while Windows itself is still servicing updates.
+      - The activity feed <dataRoot>\Deployment\activity.jsonl: one timestamped JSON line per event
+        (restarts, recoveries, stage changes, retries and failures reported by the engines).
 #>
 
 Set-StrictMode -Version 2.0
 
-$script:DeployVersion = '1.1.0'
+$script:DeployVersion = '1.2.0'
 $script:DeployStateVersion = 2
 $script:EventSource = 'WindowsDeploymentBuilder'
 $script:ManifestFormat = 'windows-deployment-builder/deployment-manifest'
@@ -63,6 +72,23 @@ function Start-WddTask {
 }
 
 function Get-WddBootTime { (Get-CimInstance -ClassName Win32_OperatingSystem).LastBootUpTime.ToUniversalTime() }
+
+<# Task state for the watchdog: @{ Exists; State (Ready, Running, Disabled, Queued); LastRunUtc; LastResult }. #>
+function Get-WddTaskInfo {
+    param([string] $TaskPath, [string] $TaskName)
+    $t = Get-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -ErrorAction SilentlyContinue
+    if (-not $t) { return @{ Exists = $false; State = ''; LastRunUtc = $null; LastResult = $null } }
+    $i = $t | Get-ScheduledTaskInfo -ErrorAction SilentlyContinue
+    @{ Exists = $true; State = [string] $t.State
+       LastRunUtc = $(if ($i -and $i.LastRunTime -and $i.LastRunTime.Year -gt 2000) { $i.LastRunTime.ToUniversalTime() } else { $null })
+       LastResult = $(if ($i) { [int64] $i.LastTaskResult } else { $null }) }
+}
+
+<# True while Windows is installing updates itself (the Windows Update installer or TrustedInstaller is busy). #>
+function Test-WddUpdateServicing {
+    try { if ((New-Object -ComObject 'Microsoft.Update.Installer').IsBusy) { return $true } } catch { }
+    return [bool] (Get-Process -Name 'TiWorker' -ErrorAction SilentlyContinue)
+}
 
 function Write-WddEvent {
     param([int] $EventId, [string] $Message, [ValidateSet('Information', 'Warning', 'Error')] [string] $EntryType = 'Information')
@@ -177,7 +203,84 @@ function Get-WddPaths {
         Reports       = $reports
         ReportJson    = Join-Path $reports 'deployment-report.json'
         ReportText    = Join-Path $reports 'deployment-report.txt'
+        # Orchestrator 1.2.0: the timestamped activity feed and the LAN monitor's address and token.
+        Activity      = Join-Path $deployment 'activity.jsonl'
+        MonitorInfo   = Join-Path $state 'monitor.json'
     }
+}
+
+# ------------------------------------------------------------------------------------------------
+# Activity feed (orchestrator 1.2.0)
+# ------------------------------------------------------------------------------------------------
+
+<#
+    Appends one event to <dataRoot>\Deployment\activity.jsonl: {utc, level, source, message}.
+    The engines append their own retry and failure messages to the same file (Add-WdbActivity).
+    Never contains secrets: only the deployment's own messages.
+#>
+function Add-WddActivity {
+    param([hashtable] $Paths, [string] $Message, [ValidateSet('info', 'warning', 'error')] [string] $Level = 'info', [string] $Source = 'deployment')
+    $line = ([ordered]@{ utc = (Get-WddNow).ToString('o'); level = $Level; source = $Source; message = $Message } | ConvertTo-Json -Compress)
+    Write-WddLog "Activity: $Message" $(switch ($Level) { 'error' { 'ERROR' } 'warning' { 'WARN' } default { 'INFO' } })
+    $dir = Split-Path -Parent $Paths.Activity
+    if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    for ($i = 0; $i -lt 3; $i++) {
+        try {
+            # A line left unfinished by a writer that was stopped must not swallow this one.
+            $fs = New-Object System.IO.FileStream($Paths.Activity, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::Read)
+            try {
+                $prefix = ''
+                if ($fs.Length -gt 0) { [void] $fs.Seek(-1, [System.IO.SeekOrigin]::End); if ($fs.ReadByte() -ne 10) { $prefix = "`r`n" } }
+                [void] $fs.Seek(0, [System.IO.SeekOrigin]::End)
+                $bytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes($prefix + $line + "`r`n")
+                $fs.Write($bytes, 0, $bytes.Length)
+            } finally { $fs.Dispose() }
+            return
+        } catch { Start-Sleep -Milliseconds 100 }
+    }
+}
+
+<# The last $Last events, oldest first. A line that is being written (incomplete JSON) is skipped. #>
+function Read-WddActivity {
+    param([hashtable] $Paths, [int] $Last = 30)
+    # Returns the events one by one (callers collect them with @()).
+    if (-not $Paths.ContainsKey('Activity') -or -not (Test-Path -LiteralPath $Paths.Activity)) { return }
+    $lines = $null
+    for ($i = 0; $i -lt 3 -and $null -eq $lines; $i++) {
+        try {
+            $fs = New-Object System.IO.FileStream($Paths.Activity, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+            try { $lines = (New-Object System.IO.StreamReader($fs, [System.Text.Encoding]::UTF8)).ReadToEnd() -split "`r?`n" } finally { $fs.Dispose() }
+        } catch { Start-Sleep -Milliseconds 100 }
+    }
+    $out = @()
+    foreach ($l in @($lines | Where-Object { $_ -and $_.Trim() } | Select-Object -Last $Last)) {
+        try { $e = ConvertTo-WddHashtable ($l | ConvertFrom-Json); if ($e -is [hashtable] -and $e['utc'] -and $e['message']) { $out += , $e } } catch { }
+    }
+    return $out
+}
+
+<# Keeps the feed small: above $MaxBytes only the last $Keep events are kept. #>
+function Limit-WddActivity {
+    param([hashtable] $Paths, [int64] $MaxBytes = 1MB, [int] $Keep = 500)
+    if (-not (Test-Path -LiteralPath $Paths.Activity) -or (Get-Item -LiteralPath $Paths.Activity).Length -le $MaxBytes) { return }
+    try {
+        $keep = @([System.IO.File]::ReadAllLines($Paths.Activity, [System.Text.Encoding]::UTF8) | Select-Object -Last $Keep)
+        $tmp = "$($Paths.Activity).tmp"
+        [System.IO.File]::WriteAllLines($tmp, [string[]] $keep, (New-Object System.Text.UTF8Encoding($false)))
+        Move-Item -LiteralPath $tmp -Destination $Paths.Activity -Force
+    } catch { Write-WddLog "Could not shorten the activity feed: $($_.Exception.Message)" 'WARN' }
+}
+
+<# "just now", "1 minute ago", "12 minutes ago", "3 hours ago". #>
+function Format-WddAge {
+    param($Since)
+    $d = ConvertTo-WddDate $Since
+    if (-not $d) { return 'unknown' }
+    $m = [int] [Math]::Floor(((Get-WddNow) - $d).TotalMinutes)
+    if ($m -lt 1) { return 'just now' }
+    if ($m -eq 1) { return '1 minute ago' }
+    if ($m -lt 120) { return "$m minutes ago" }
+    return "$([int] [Math]::Floor($m / 60)) hours ago"
 }
 
 function Initialize-WddLogging {
@@ -353,15 +456,18 @@ function Get-WddStageSnapshot {
     param([hashtable] $Stage, [hashtable] $Paths, [hashtable] $State)
     $root = $Paths.Root
     $launch = if ($State -and $State.stages -and $State.stages.ContainsKey($Stage.id)) { $State.stages[$Stage.id] } else { $null }
-    $o = [ordered]@{ id = $Stage.id; name = $Stage.name; enabled = [bool] $Stage.enabled; context = $Stage.context; state = 'NotStarted'; status = ''; outcome = ''; detail = ''; reboots = 0; updatedUtc = $null; current = ''; done = $null; total = $null; result = $null; idle = ''; outstanding = 0 }
+    $o = [ordered]@{ id = $Stage.id; name = $Stage.name; enabled = [bool] $Stage.enabled; context = $Stage.context; state = 'NotStarted'; status = ''; outcome = ''; detail = ''; reboots = 0; updatedUtc = $null; current = ''; done = $null; total = $null; result = $null; idle = ''; outstanding = 0
+                     condition = 'waiting'; activity = ''; waitingReason = ''; lastActivityUtc = $null; stale = $false; staleMinutes = 0; counts = [ordered]@{}; lastError = ''; lastErrorUtc = $null; progress = 'unavailable'; engine = $null }
     $result = Read-WddJson (Join-Path $root $Stage.result)
     if ($result -and $result.status -in $script:FinalStageStatuses) {
         $o.state = 'Final'; $o.status = $result.status; $o.outcome = Get-WddOutcome $result.status; $o.detail = [string] $result.reason
         $o.reboots = [int] $result.reboots; $o.updatedUtc = $result.finishedUtc; $o.result = $result
         if ($result.ContainsKey('outstanding')) { $o.outstanding = @($result.outstanding).Count }
+        Set-WddStageNarrative $o $Stage $null $null $State
         return $o
     }
     $status = Read-WddJson (Join-Path $root $Stage.status)
+    $o.engine = $status
     $taskExists = Get-WddTask $Stage.task.path $Stage.task.name
     if ($status) {
         $o.status = [string] $status.phase; $o.detail = [string] $status.detail; $o.updatedUtc = $status.updatedUtc
@@ -369,8 +475,8 @@ function Get-WddStageSnapshot {
         if ($status.ContainsKey('done')) { $o.done = [int] $status.done; $o.total = [int] $status.total }
         if ($status.phase -eq 'Installing' -and $status.detail) { $o.current = [string] $status.detail }
     }
-    if (-not $launch) { return $o }
-    if ($launch.launchResult -eq 'LaunchFailed') { $o.state = 'LaunchFailed'; $o.detail = [string] $launch.message; return $o }
+    if (-not $launch) { Set-WddStageNarrative $o $Stage $status $launch $State; return $o }
+    if ($launch.launchResult -eq 'LaunchFailed') { $o.state = 'LaunchFailed'; $o.detail = [string] $launch.message; Set-WddStageNarrative $o $Stage $status $launch $State; return $o }
     $since = ConvertTo-WddDate $launch.launchedUtc
     $age = if ($since) { ((Get-WddNow) - $since).TotalMinutes } else { 0 }
     if ($taskExists) {
@@ -383,12 +489,97 @@ function Get-WddStageSnapshot {
             $who = $(if ($launch.ContainsKey('user') -and $launch.user) { [string] $launch.user } else { 'the user who started the deployment' })
             $o.idle = "has not run for more than $limit minutes; it runs only while $who is signed in."
         }
+        Set-WddStageNarrative $o $Stage $status $launch $State
         return $o
     }
     # No task and no result: the engine removed its task without a result, or the task was deleted.
     if ($age -ge [int] $State.stalledAfterMinutes) { $o.state = 'Stalled'; if (-not $o.detail) { $o.detail = 'The scheduled task is missing and there is no result. Run Resume-Deployment.ps1.' } }
     else { $o.state = $(if ($status) { 'Running' } else { 'Pending' }) }
+    Set-WddStageNarrative $o $Stage $status $launch $State
     return $o
+}
+
+# Engine phases that mean "waiting for something", with the reason in words.
+$script:WaitingPhases = @{
+    WaitingForNetwork   = 'Waiting for a network connection.'
+    WaitingForInstaller = 'Waiting for Windows Update to finish.'
+    WaitingForLock      = 'Waiting for another installation to finish.'
+    WaitingForRetry     = 'Waiting before the next retry.'
+    WaitingForUpdates   = 'Waiting for Windows Update to finish first.'
+    WaitingForDrivers   = 'Waiting for the driver stage to finish first.'
+    WaitingForRestart   = 'Waiting for the scheduled restart.'
+    WaitingForReboot    = 'Waiting for a restart.'
+    RebootDeferred      = 'A restart is needed; it waits until the current installation has finished.'
+    Rebooting           = 'Restarting Windows; the deployment continues after the restart.'
+    Error               = 'The engine hit an unexpected error and tries again at its next run.'
+}
+# Phases during which Windows Update legitimately works for a long time without a new status.
+$script:LongPhases = @('Downloading', 'Installing', 'WaitingForInstaller', 'Rebooting', 'ResettingComponents')
+
+<#
+    Orchestrator 1.2.0: what a stage is doing, in words, from evidence only (the engine's own
+    status.json and result.json, its task, the launch record):
+      condition  finished | active | waiting | idle | blocked
+      activity   one sentence for people (the progress window and the LAN monitor)
+      stale      no progress reported for longer than the limit (not while Windows is servicing)
+#>
+function Set-WddStageNarrative {
+    param($O, [hashtable] $Stage, $Status, $Launch, $State)
+    $limit = [int] $(if ($State -and $State['stalledAfterMinutes']) { $State['stalledAfterMinutes'] } else { 120 })
+    $long = [int] $(if ($State -and $State['longOperationMinutes']) { $State['longOperationMinutes'] } else { [Math]::Max(240, $limit) })
+    if ($Status -is [hashtable]) {
+        $O.lastActivityUtc = $Status['updatedUtc']
+        foreach ($k in 'installed', 'failed', 'needsPerson', 'selected', 'done', 'total', 'attempt', 'maxAttempts', 'queued') { if ($Status.ContainsKey($k) -and $null -ne $Status[$k]) { $O.counts[$k] = $Status[$k] } }
+        if ($Status.ContainsKey('current') -and $Status['current']) { $O.current = [string] $Status['current'] }
+        if ($Status.ContainsKey('lastError') -and $Status['lastError']) { $O.lastError = [string] $Status['lastError']; $O.lastErrorUtc = $Status['lastErrorUtc'] }
+        if ($Status.ContainsKey('lastFailure') -and $Status['lastFailure'] -is [hashtable]) { $O.lastError = [string] $Status['lastFailure']['message']; $O.lastErrorUtc = $Status['lastFailure']['atUtc'] }
+    }
+    switch ($O.state) {
+        'Final' {
+            $O.condition = 'finished'; $O.lastActivityUtc = $O.updatedUtc
+            $O.activity = "Finished: $($O.status).$(if ($O.detail) { " $($O.detail)" })"
+            if ($O.result -is [hashtable]) {
+                foreach ($k in 'installed', 'failed', 'skipped', 'requiresInteraction') { if ($O.result.ContainsKey($k) -and $O.result[$k] -is [array]) { $O.counts[$k] = @($O.result[$k]).Count } }
+                if ($O.result.ContainsKey('counts') -and $O.result['counts'] -is [hashtable]) { foreach ($k in $O.result['counts'].Keys) { $O.counts[$k] = $O.result['counts'][$k] } }
+            }
+            return
+        }
+        'LaunchFailed' { $O.condition = 'blocked'; $O.activity = "Could not be started: $($O.detail)"; return }
+        'Stalled' { $O.condition = 'blocked'; $O.activity = "No progress: $($O.detail)"; return }
+        'NotStarted' { $O.condition = 'waiting'; $O.activity = 'Not started yet.'; $O.waitingReason = 'Waiting for the deployment to launch this stage.'; return }
+        'Pending' {
+            $O.condition = 'waiting'
+            $since = $(if ($Launch -is [hashtable]) { $Launch['launchedUtc'] } else { $null })
+            $O.waitingReason = $(if ($Stage.context -eq 'user') { 'Scheduled; it starts when the deployment user is signed in.' } else { 'Scheduled; waiting for the engine to start.' })
+            $O.activity = "$($O.waitingReason) Launched $(Format-WddAge $since)."
+            $O.lastActivityUtc = $since
+            return
+        }
+    }
+    # Running: the engine has checked in.
+    $phase = [string] $O.status
+    $age = $(if (ConvertTo-WddDate $O.lastActivityUtc) { ((Get-WddNow) - (ConvertTo-WddDate $O.lastActivityUtc)).TotalMinutes } else { 0 })
+    if ($O.idle) {
+        $O.condition = 'idle'; $O.activity = "Idle: $($O.idle)"; $O.waitingReason = $O.idle
+    } elseif ($script:WaitingPhases.ContainsKey($phase)) {
+        $O.condition = 'waiting'; $O.waitingReason = $script:WaitingPhases[$phase]
+        $O.activity = "$($script:WaitingPhases[$phase])$(if ($O.detail -and $O.detail -ne $script:WaitingPhases[$phase]) { " $($O.detail)" }) Last activity: $(Format-WddAge $O.lastActivityUtc)."
+    } else {
+        $O.condition = 'active'
+        $O.activity = "$(if ($O.detail) { $O.detail } else { $phase })$(if ($O.detail -notmatch '\.$') { '.' }) Last activity: $(Format-WddAge $O.lastActivityUtc)."
+    }
+    # No progress for longer than the limit. Never while Windows Update is still servicing.
+    $max = $(if ($phase -in $script:LongPhases -and $Stage.id -eq 'windowsUpdate') { $long } else { $limit })
+    if ($O.condition -ne 'idle' -and $age -ge $max -and $phase -notin 'Rebooting') {
+        $servicing = $false
+        if ($Stage.id -eq 'windowsUpdate' -or $phase -eq 'WaitingForInstaller') { try { $servicing = [bool] (Test-WddUpdateServicing) } catch { } }
+        if (-not $servicing) {
+            $O.stale = $true; $O.staleMinutes = [int] $age; $O.condition = 'blocked'
+            $O.activity = "No progress detected for $([int] $age) minutes (limit $max). Last step: $(if ($O.detail) { $O.detail } else { $phase })."
+        } else {
+            $O.activity = "$($O.activity) Windows is still installing updates, so this is not treated as stalled."
+        }
+    }
 }
 
 function Get-WddSnapshot {
@@ -402,7 +593,7 @@ function Get-WddSnapshot {
                   else { [ordered]@{ id = 'drivers'; state = 'NotImplemented'; detail = $(if ($drivers) { [string] $drivers['note'] } else { '' }) } })
     $engine = @($stages)
     $allFinal = ($engine.Count -eq 0) -or (@($engine | Where-Object { $_.state -ne 'Final' }).Count -eq 0)
-    $blocked = @($engine | Where-Object { $_.state -in 'Stalled', 'LaunchFailed' })
+    $blocked = @($engine | Where-Object { $_.state -in 'Stalled', 'LaunchFailed' -or $_.stale })
     $current = @($engine | Where-Object { $_.state -in 'Running', 'Pending' } | Select-Object -First 1)
     $snap = [ordered]@{
         packageId       = $Manifest.packageId
@@ -414,11 +605,41 @@ function Get-WddSnapshot {
         networkDriverMissing = (Get-WddNetworkDriverFlag $Paths)
         allFinal        = $allFinal
         restartPending  = (Test-WddRestartPending $Paths)
-        needsAttention  = @($blocked | ForEach-Object { "$($_.name): $($_.state). $($_.detail)" })
+        needsAttention  = @($blocked | ForEach-Object { if ($_.stale) { "$($_.name): $($_.activity)" } else { "$($_.name): $($_.state). $($_.detail)" } })
         overall         = $(if ($allFinal) { Get-WddOverall $engine } else { 'InProgress' })
+        lastActivityUtc = (Get-WddLastActivity $engine)
+        recovering      = [bool] ($State -and $State['recoveringUntilUtc'] -and (ConvertTo-WddDate $State['recoveringUntilUtc']) -gt (Get-WddNow))
+        restarts        = @(if ($State -and $State['restarts']) { @($State['restarts']) | Select-Object -Last 10 })
     }
     Set-WddSnapshotOutcome $snap $State
+    $snap.condition = Get-WddCondition $snap $State
     return $snap
+}
+
+<# The most recent progress any stage reported (ISO 8601), or $null. #>
+function Get-WddLastActivity {
+    param([object[]] $Stages)
+    $best = $null
+    foreach ($s in @($Stages)) { $d = ConvertTo-WddDate $s.lastActivityUtc; if ($d -and (-not $best -or $d -gt $best)) { $best = $d } }
+    if ($best) { return $best.ToString('o') }
+    return $null
+}
+
+<#
+    One word for the whole deployment (progress window, LAN monitor):
+      complete   finished (see overall)            attention  something needs a person
+      recovering after a restart or an automatic recovery, while unfinished work is checked
+      active     an engine is working              waiting    every running stage waits for something
+#>
+function Get-WddCondition {
+    param($Snapshot, $State)
+    if ($State -and [string] $State['status'] -eq 'Completed') { return 'complete' }
+    if (-not $State -or [string] $State['status'] -in 'StagingFailed', 'IntegrityFailed') { return 'attention' }
+    if (@($Snapshot.needsAttention).Count) { return 'attention' }
+    if ($Snapshot.recovering) { return 'recovering' }
+    if (@($Snapshot.stages | Where-Object { $_.condition -eq 'active' }).Count) { return 'active' }
+    if (@($Snapshot.stages | Where-Object { $_.condition -ne 'finished' }).Count -eq 0) { return 'active' }
+    return 'waiting'
 }
 
 <# Adds outcome, outcomeCode and outcomeDetail (Phase 5) to a snapshot. #>
@@ -538,5 +759,10 @@ function Get-WddDeploymentOutcome {
     if ($net.Count) { return & $o 'PausedAwaitingNetwork' ("$(($net | ForEach-Object { $_.name }) -join ', '): waiting for the network. $(($net | ForEach-Object { $_.detail } | Where-Object { $_ }) -join '; ')".Trim()) }
     $user = @($live | Where-Object { $_.state -in 'Stalled', 'LaunchFailed' -or $_.idle })
     if ($user.Count) { return & $o 'PausedAwaitingUser' (($user | ForEach-Object { "$($_.name): $(if ($_.idle) { $_.idle } else { "$($_.state). $($_.detail)" })" }) -join ' ') }
-    return & $o 'InProgress' $(if ($Snapshot -and $Snapshot.currentStage) { "Current stage: $($Snapshot.currentStage)." } else { 'Stages are starting.' })
+    if ($Snapshot -and $Snapshot.currentStage) {
+        $cur = @($live | Where-Object { $_.id -eq $Snapshot.currentStage } | Select-Object -First 1)
+        return & $o 'InProgress' $(if ($cur.Count -and $cur[0].activity) { "$($cur[0].name): $($cur[0].activity)" } else { "Current stage: $($Snapshot.currentStage)." })
+    }
+    $waiting = @($live | Where-Object { $_.activity })
+    return & $o 'InProgress' $(if ($waiting.Count) { (($waiting | ForEach-Object { "$($_.name): $($_.activity)" }) -join ' ') } else { 'Launching the deployment stages; no engine has reported yet.' })
 }

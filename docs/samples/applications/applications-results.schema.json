@@ -204,6 +204,9 @@
           "source": {
             "type": "string"
           },
+          "installerExitCode": {
+            "type": "string"
+          },
           "status": {
             "enum": [
               "Pending",

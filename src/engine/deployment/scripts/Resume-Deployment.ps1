@@ -84,7 +84,7 @@ function Invoke-WddResume {
             Write-WddLog "Resume: $($script:ResumeDetail)" 'ERROR'
             return 'MonitorRegistrationFailed'
         }
-        try { Start-WddTask $script:MonitorTask.path $script:MonitorTask.name } catch { Write-WddLog "Resume: could not start the monitor now; it runs within 15 minutes: $($_.Exception.Message)" 'WARN' }
+        try { Start-WddTask $script:MonitorTask.path $script:MonitorTask.name } catch { Write-WddLog "Resume: could not start the monitor now; it runs within $(Get-WddMonitorInterval $manifest) minutes: $($_.Exception.Message)" 'WARN' }
         Write-WddEvent 3001 "Deployment $($manifest.packageId) resumed manually$(if ($RestartStage) { " (stage $RestartStage restarted)" })."
         return 'Resumed'
     } finally {

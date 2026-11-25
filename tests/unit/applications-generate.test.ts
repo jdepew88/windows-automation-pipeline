@@ -85,10 +85,18 @@ describe('earlier milestones are preserved', () => {
     // The older profile keeps its explicit driver policy and gets no health engine (schema 6 migration).
     expect(r.profile!.updates.excludeDrivers).toBe(true);
     expect(r.profile!.health.enabled).toBe(false);
+    // It keeps its explicit Windows Update choices (optional updates skipped, two attempts) and gets
+    // no deployment monitor (schema 8 migration); today's defaults differ only there.
+    expect(r.profile!.windowsUpdate.optionalUpdates).toBe('skip');
+    expect(r.profile!.windowsUpdate.maxAttemptsPerUpdate).toBe(2);
+    expect(r.profile!.monitoring.enabled).toBe(false);
     expect(generate(r.profile).xml).toBe(generate(profile((p) => {
       noApps(p);
       p.updates.excludeDrivers = true;
       p.health.enabled = false;
+      p.windowsUpdate.optionalUpdates = 'skip';
+      p.windowsUpdate.maxAttemptsPerUpdate = 2;
+      p.monitoring.enabled = false;
     })).xml);
   });
 

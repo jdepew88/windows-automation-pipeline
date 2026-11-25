@@ -423,6 +423,258 @@ Test-Scenario 'stalled stage and deadline: reported as Incomplete with a recover
     Assert-True ($r.recovery -match 'Resume-Deployment.ps1') 'recovery command'
 }
 
+# ------------------------------------------------------------------------------------------------
+# Orchestrator 1.2.0: reliability, restart recovery, progress window, clear messages, devices
+# ------------------------------------------------------------------------------------------------
+
+Test-Scenario 'orchestrator 1.2.0: initialization registers and checks the monitor, progress window and LAN monitor tasks' {
+    Assert-Equal (Initialize-Embedded) 'Initialized' 'outcome'
+    Assert-True $script:SimTasks.ContainsKey('\WindowsDeploymentBuilder\Deployment') 'monitor task'
+    Assert-Equal $script:SimTasks['\WindowsDeploymentBuilder\Progress'] 'PC\Alex' 'progress window task for the deployment user'
+    Assert-Equal (Get-WddMonitorInterval $script:Manifest) 5 'monitor runs every 5 minutes'
+    Assert-Equal $script:Manifest.progress.refreshSeconds 7 'progress refresh declared in the manifest'
+    Assert-True ([bool] $script:Manifest.monitor.enabled) 'the owner-default package enables the monitor'
+    Assert-True (-not $script:Manifest.monitor.lanAccess) 'LAN access is off by default (localhost only)'
+    Assert-True $script:SimTasks.ContainsKey('\WindowsDeploymentBuilder\StatusServer') 'LAN monitor task'
+    Assert-True ($script:StartedTasks -contains '\WindowsDeploymentBuilder\StatusServer') 'LAN monitor started'
+    Assert-True (Test-Path -LiteralPath (Join-Path $script:Paths.Package 'scripts\monitor\DeploymentStatusServer.ps1')) 'monitor script staged'
+    $events = @(Read-WddActivity $script:Paths 10)
+    Assert-True (@($events | Where-Object { $_.message -like 'Deployment started: 2 stage(s) scheduled*' }).Count -eq 1) 'activity: deployment started'
+    $s = Read-WddJson $script:Paths.State
+    Assert-Equal $s.longOperationMinutes 240 'long-operation limit recorded'
+    Assert-Equal $s.lastBootUtc $script:SimBoot.ToString('o') 'boot recorded for restart detection'
+}
+
+Test-Scenario 'orchestrator 1.2.0: a stage task that cannot be registered ends InitializedWithProblems with the reason, never a plain success' {
+    $script:InstallerBehaviour['Install-UpdateEngine.ps1'] = 'noTask'
+    Assert-Equal (Initialize-Embedded) 'InitializedWithProblems' 'outcome'
+    $s = Read-WddJson $script:Paths.State
+    Assert-True ($s.message -like "Initialized, but 1 stage(s) could not be started: Windows Update*Access to the path*") "message: $($s.message)"
+    Assert-True ($script:Events -contains 3002) 'event 3002'
+    Assert-True $script:SimTasks.ContainsKey('\WindowsDeploymentBuilder\Deployment') 'the monitor still follows the deployment'
+    Assert-True (@(Read-WddActivity $script:Paths 5 | Where-Object { $_.level -eq 'error' -and $_.message -like '*could not be started*' }).Count -eq 1) 'error in the activity feed'
+}
+
+Test-Scenario 'orchestrator 1.2.0: a helper task that cannot be registered is reported; the deployment still starts' {
+    $script:HelperRegistrationFails = $true
+    Assert-Equal (Initialize-Embedded) 'Initialized' 'stages and monitor are what initialization needs'
+    $s = Read-WddJson $script:Paths.State
+    Assert-True ($s.message -like '*helper task could not be registered*progress window task*') "message: $($s.message)"
+    # The monitor registers it again once it can.
+    $script:HelperRegistrationFails = $false
+    Invoke-WddMonitor $script:Paths | Out-Null
+    Assert-True $script:SimTasks.ContainsKey('\WindowsDeploymentBuilder\Progress') 're-registered by the monitor'
+}
+
+Test-Scenario 'restart detection: planned and unexpected restarts are recorded and shown; unfinished work is checked, nothing is relaunched' {
+    Initialize-Embedded | Out-Null
+    $launched = $script:Installers.Count
+    Set-EngineStatus 'windowsUpdate' 'Installing' 'Installing 2 update(s)'
+    Invoke-WddMonitor $script:Paths | Out-Null
+    # Planned: the Windows Update engine wrote its restart marker in this boot, then Windows restarted.
+    Write-WddJson $script:Paths.RestartMarker ([ordered]@{ owner = 'WindowsUpdate'; reason = 'installed updates require a restart'; requestedUtc = $script:SimNow.ToString('o'); bootTimeUtc = $script:SimBoot.ToString('yyyy-MM-ddTHH:mm:ssZ') })
+    $script:SimNow = $script:SimNow.AddMinutes(5); $script:SimBoot = $script:SimNow; $script:SimNow = $script:SimNow.AddMinutes(3)
+    Invoke-WddMonitor $script:Paths | Out-Null
+    $s = Read-WddJson $script:Paths.State
+    Assert-Equal @($s.restarts).Count 1 'one restart recorded'
+    Assert-True ($s.restarts[0].planned -and $s.restarts[0].by -eq 'WindowsUpdate') 'planned by Windows Update'
+    $snap = Get-WddSnapshot $script:Manifest $script:Paths $s
+    Assert-True $snap.recovering 'recovering after the restart'
+    Assert-Equal $snap.condition 'recovering' 'overall condition'
+    Assert-True (@(Read-WddActivity $script:Paths 20 | Where-Object { $_.message -like 'Windows restarted (scheduled by WindowsUpdate: installed updates require a restart). Restoring deployment progress and checking unfinished tasks.' }).Count -eq 1) 'planned restart message'
+    # Unexpected: no marker, no stage was restarting.
+    Remove-Item -LiteralPath $script:Paths.RestartMarker -Force
+    $script:SimNow = $script:SimNow.AddMinutes(30); $script:SimBoot = $script:SimNow; $script:SimNow = $script:SimNow.AddMinutes(3)
+    Invoke-WddMonitor $script:Paths | Out-Null
+    $s = Read-WddJson $script:Paths.State
+    Assert-Equal @($s.restarts).Count 2 'second restart recorded'
+    Assert-True (-not $s.restarts[1].planned) 'unexpected'
+    Assert-True (@(Read-WddActivity $script:Paths 20 | Where-Object { $_.level -eq 'warning' -and $_.message -like 'Windows restarted unexpectedly*Restoring deployment progress and checking unfinished tasks*' }).Count -eq 1) 'unexpected restart message'
+    Assert-True ($script:Events -contains 3007) 'event 3007'
+    Assert-Equal $script:Installers.Count $launched 'nothing relaunched by a restart'
+    $script:SimNow = $script:SimNow.AddMinutes(15)
+    Assert-True (-not (Get-WddSnapshot $script:Manifest $script:Paths (Read-WddJson $script:Paths.State)).recovering) 'recovering ends'
+}
+
+Test-Scenario 'watchdog: a SYSTEM stage whose task disappeared is started again automatically, at most twice, then a technician is asked' {
+    Initialize-Embedded | Out-Null
+    $launched = $script:Installers.Count
+    foreach ($round in 1, 2) {
+        $script:SimTasks.Remove('\WindowsDeploymentBuilder\WindowsUpdate')
+        $script:SimNow = $script:SimNow.AddHours(3)
+        Invoke-WddMonitor $script:Paths | Out-Null
+        Assert-Equal $script:Installers.Count ($launched + $round) "relaunch $round"
+        Assert-True $script:SimTasks.ContainsKey('\WindowsDeploymentBuilder\WindowsUpdate') "task back after $round"
+    }
+    $s = Read-WddJson $script:Paths.State
+    Assert-Equal $s.stages.windowsUpdate.autoRecoveries 2 'two automatic recoveries'
+    Assert-Equal @($s.recoveries | Where-Object { $_.action -eq 'AutomaticRelaunch' }).Count 2 'recorded as recoveries'
+    Assert-True ($script:Events -contains 3008) 'event 3008'
+    # Third time: the budget is used up; no loop, a technician is asked.
+    $script:SimTasks.Remove('\WindowsDeploymentBuilder\WindowsUpdate')
+    $script:SimNow = $script:SimNow.AddHours(3)
+    Invoke-WddMonitor $script:Paths | Out-Null
+    Invoke-WddMonitor $script:Paths | Out-Null
+    Assert-Equal $script:Installers.Count ($launched + 2) 'not relaunched a third time'
+    Assert-Equal @(Read-WddActivity $script:Paths 50 | Where-Object { $_.message -like 'Windows Update:*Automatic recovery was already attempted 2 time(s). Technician attention required*' }).Count 1 'asked once'
+    Assert-True (@((Read-WddJson $script:Paths.Status).needsAttention) -match 'Windows Update').Count 'needs attention'
+}
+
+Test-Scenario 'watchdog: the WinGet stage is never started from SYSTEM; the technician is told what to do, once' {
+    Initialize-Embedded | Out-Null
+    $launched = $script:Installers.Count
+    Set-EngineResult 'windowsUpdate' 'Succeeded'
+    $script:SimTasks.Remove('\WindowsDeploymentBuilder\Applications')
+    $script:SimNow = $script:SimNow.AddHours(3)
+    Invoke-WddMonitor $script:Paths | Out-Null
+    Invoke-WddMonitor $script:Paths | Out-Null
+    Assert-Equal $script:Installers.Count $launched 'not relaunched'
+    Assert-Equal @(Read-WddActivity $script:Paths 50 | Where-Object { $_.level -eq 'error' -and $_.message -like 'Applications (WinGet):*must be restarted by PC\Alex*Resume-Deployment.ps1 -RestartStage applications*' }).Count 1 'told once'
+}
+
+Test-Scenario 'stale detection: long Windows Update phases get the longer limit, never while Windows is servicing; a stopped task is started again' {
+    Initialize-Embedded | Out-Null
+    $wuTask = '\WindowsDeploymentBuilder\WindowsUpdate'
+    Set-EngineStatus 'windowsUpdate' 'Installing' 'Installing 3 update(s)'
+    $script:SimNow = $script:SimNow.AddMinutes(130)
+    $wu = @((Get-WddSnapshot $script:Manifest $script:Paths (Read-WddJson $script:Paths.State)).stages | Where-Object { $_.id -eq 'windowsUpdate' })[0]
+    Assert-True (-not $wu.stale) 'installing for 130 minutes is not stalled (limit 240)'
+    Assert-Equal $wu.condition 'active' 'active'
+    $script:SimNow = $script:SimNow.AddMinutes(120)
+    $script:SimServicing = $true
+    $wu = @((Get-WddSnapshot $script:Manifest $script:Paths (Read-WddJson $script:Paths.State)).stages | Where-Object { $_.id -eq 'windowsUpdate' })[0]
+    Assert-True (-not $wu.stale) 'not stalled while Windows is servicing'
+    Assert-True ($wu.activity -like '*Windows is still installing updates, so this is not treated as stalled.') "activity: $($wu.activity)"
+    $script:SimServicing = $false
+    $snap = Get-WddSnapshot $script:Manifest $script:Paths (Read-WddJson $script:Paths.State)
+    $wu = @($snap.stages | Where-Object { $_.id -eq 'windowsUpdate' })[0]
+    Assert-True $wu.stale 'stalled after 250 minutes'
+    Assert-True ($wu.activity -like 'No progress detected for 250 minutes (limit 240).*') "activity: $($wu.activity)"
+    Assert-True (@($snap.needsAttention) -match 'No progress detected').Count 'needs attention'
+    Assert-Equal $snap.condition 'attention' 'overall condition'
+    # Task still running: report only.
+    $script:SimTaskStates[$wuTask] = 'Running'
+    Invoke-WddMonitor $script:Paths | Out-Null
+    Assert-True (-not ($script:StartedTasks -contains $wuTask)) 'a running task is not started again'
+    Assert-True (@(Read-WddActivity $script:Paths 30 | Where-Object { $_.message -like '*while its task is still running*' }).Count -eq 1) 'reported'
+    # Task stopped with an error: started again once.
+    $script:SimTaskStates[$wuTask] = 'Ready'; $script:SimTaskResults[$wuTask] = 1
+    Invoke-WddMonitor $script:Paths | Out-Null
+    Assert-True ($script:StartedTasks -contains $wuTask) 'task started again'
+    $s = Read-WddJson $script:Paths.State
+    Assert-Equal @($s.recoveries | Where-Object { $_.action -eq 'AutomaticStartTask' }).Count 1 'recorded'
+}
+
+Test-Scenario 'clear messages: waiting, retries and failures reported by the engines reach the snapshot and the activity feed' {
+    Initialize-Embedded | Out-Null
+    Write-WddJson (Join-Path $script:Paths.Root 'Updates\status.json') @{ phase = 'WaitingForInstaller'; detail = 'Windows is already installing updates (for example its own automatic updates); waiting for it to finish.'; updatedUtc = $script:SimNow.AddMinutes(-2).ToString('o'); reboots = 0 }
+    $snap = Get-WddSnapshot $script:Manifest $script:Paths (Read-WddJson $script:Paths.State)
+    $wu = @($snap.stages | Where-Object { $_.id -eq 'windowsUpdate' })[0]
+    Assert-Equal $wu.condition 'waiting' 'waiting'
+    Assert-True ($wu.activity -like 'Waiting for Windows Update to finish.*Last activity: 2 minutes ago.') "activity: $($wu.activity)"
+    Assert-True ($snap.outcomeDetail -like 'Windows Update: Waiting for Windows Update to finish.*') "outcome detail: $($snap.outcomeDetail)"
+    Assert-True ($snap.outcomeDetail -notlike '*Stages are starting*') 'no vague message'
+    Write-WddJson (Join-Path $script:Paths.Root 'Updates\status.json') @{ phase = 'Downloading'; detail = 'Downloading KB5000002 Update, update 2 of 3, attempt 1 of 3. Progress unavailable.'; updatedUtc = $script:SimNow.ToString('o'); reboots = 0
+        current = 'KB5000002 Update'; attempt = 1; maxAttempts = 3; lastError = 'Unable to download KB5000001 Update: 0x8024402C WU_E_PT_WINHTTP_NAME_NOT_RESOLVED (the update server name could not be resolved). Attempt 2 of 3; retrying in 240 s. Other operations will continue where possible.'; lastErrorUtc = $script:SimNow.ToString('o') }
+    $wu = @((Get-WddSnapshot $script:Manifest $script:Paths (Read-WddJson $script:Paths.State)).stages | Where-Object { $_.id -eq 'windowsUpdate' })[0]
+    Assert-Equal $wu.condition 'active' 'downloading is active'
+    Assert-True ($wu.lastError -like 'Unable to download KB5000001*Attempt 2 of 3*') 'last error'
+    Assert-Equal $wu.counts.attempt 1 'attempt'
+    # Engines append to the same feed; a line being written is skipped.
+    Add-WdbActivity $script:Paths.Root 'applications' 'App Spotify could not be installed (installer failed). The failure was recorded; deployment is continuing with the remaining applications.' 'warning'
+    [IO.File]::AppendAllText($script:Paths.Activity, '{"utc":"2026-10-20T08:')
+    $feed = @(Read-WddActivity $script:Paths 10)
+    Assert-True (@($feed | Where-Object { $_.source -eq 'applications' -and $_.message -like '*deployment is continuing with the remaining applications.' }).Count -eq 1) 'engine message in the feed'
+    Assert-True ($feed.Count -ge 2) 'the partial line does not hide the others'
+    Assert-True ($feed[0] -is [hashtable]) 'events are returned one by one'
+    # The next event is not swallowed by the unfinished line.
+    Add-WddActivity $script:Paths 'After the partial line.'
+    Assert-Equal (@(Read-WddActivity $script:Paths 1)[0].message) 'After the partial line.' 'next event readable'
+}
+
+Test-Scenario 'completion: Device Manager problems with hardware IDs; a USB descriptor failure is a connection problem; follow-up; progress task removed' {
+    Initialize-Embedded | Out-Null
+    $script:SimDevices = @(
+        @{ name = 'PCI Simple Communications Controller'; class = ''; problemCode = 28; hardwareIds = @('PCI\VEN_8086&DEV_A2BA&SUBSYS_86941043', 'PCI\VEN_8086&DEV_A2BA') },
+        @{ name = 'Unknown USB Device (Device Descriptor Request Failed)'; class = 'USB'; problemCode = 43; hardwareIds = @('USB\DEVICE_DESCRIPTOR_FAILURE') },
+        @{ name = 'Intel(R) Ethernet Connection I219-V'; class = 'Net'; problemCode = 0; hardwareIds = @('PCI\VEN_8086&DEV_15B8') },
+        @{ name = 'Disabled on purpose'; class = 'Media'; problemCode = 22; hardwareIds = @() })
+    Set-EngineResult 'windowsUpdate' 'Succeeded'
+    Set-EngineResult 'applications' 'Succeeded'
+    Assert-Equal (Invoke-WddMonitor $script:Paths) 'Completed:CompletedWithFollowUp' 'unresolved devices make it a follow-up'
+    $r = Read-WddJson $script:Paths.ReportJson
+    Assert-Equal $r.devices.devices 4 'devices checked'
+    Assert-Equal (@($r.devices.unresolved | ForEach-Object { $_.kind }) -join ',') 'NoDriver,HardwareOrConnection' 'kinds (working and disabled devices are not listed)'
+    Assert-Equal $r.devices.unresolved[0].hardwareIds[0] 'PCI\VEN_8086&DEV_A2BA&SUBSYS_86941043' 'hardware ID'
+    Assert-True ($r.devices.unresolved[1].note -like '*hardware, cable, hub or port problem, not a missing driver*') 'USB descriptor note'
+    $text = Get-Content -LiteralPath $script:Paths.ReportText -Raw
+    Assert-True ($text -match 'Device Manager \(at the end of the deployment\)' -and $text -match 'hardware ID: PCI\\VEN_8086&DEV_A2BA') 'text report section'
+    Assert-True (@($r.remainingTasks) -match '^Device: PCI Simple Communications Controller').Count 'listed as remaining task'
+    Assert-True (-not $script:SimTasks.ContainsKey('\WindowsDeploymentBuilder\Progress')) 'progress window no longer opens at sign-in'
+    Assert-True (@(Read-WddActivity $script:Paths 10 | Where-Object { $_.message -like 'Deployment finished: CompletedWithFollowUp.*2 device(s) need attention.*' }).Count -eq 1) 'final activity'
+}
+
+Test-Scenario 'completion: the device list cannot be read: reported, never a silent success' {
+    Initialize-Embedded | Out-Null
+    $script:SimDevicesThrow = $true
+    Set-EngineResult 'windowsUpdate' 'Succeeded'
+    Set-EngineResult 'applications' 'Succeeded'
+    Assert-Equal (Invoke-WddMonitor $script:Paths) 'Completed:CompletedWithFollowUp' 'outcome'
+    $r = Read-WddJson $script:Paths.ReportJson
+    Assert-True (-not $r.devices.checked) 'not checked'
+    Assert-True (@($r.remainingTasks) -match '^Device Manager: The device list could not be read').Count 'follow-up'
+}
+
+Test-Scenario 'report: how each application was confirmed; Windows Update optional updates, drivers and updates needing a person' {
+    Initialize-Embedded | Out-Null
+    $pk = @(
+        @{ name = 'Git'; packageIdentifier = 'Git.Git'; source = 'winget'; status = 'Succeeded'; detection = 'Installed'; attempts = 1; exitCode = '0x00000000'; message = 'Installed.' },
+        @{ name = 'VLC'; packageIdentifier = 'VideoLAN.VLC'; source = 'winget'; status = 'Succeeded'; detection = 'Unconfirmed'; attempts = 1; exitCode = '0x00000000'; message = 'WinGet reported success, but winget list does not show the package; verify it manually.' },
+        @{ name = 'Old engine result'; packageIdentifier = 'Example.Old'; source = 'winget'; status = 'Succeeded'; attempts = 1; exitCode = '0x00000000'; message = 'Installed.' },
+        @{ name = 'Spotify'; packageIdentifier = 'Spotify.Spotify'; source = 'winget'; status = 'Failed'; attempts = 3; exitCode = '0x8A150006'; installerExitCode = '53'; message = 'The installer reported a failure (SHELLEXEC_INSTALL_FAILED). Installer exit code: 53.' },
+        @{ name = 'Battle.net'; packageIdentifier = 'Blizzard.BattleNet'; source = 'winget'; status = 'RequiresInteraction'; attempts = 1; exitCode = 'timeout'; message = 'Did not finish within 30 min; this installer may wait for a person. Install it manually.' })
+    Set-EngineResult 'windowsUpdate' 'CompletedWithFollowUp' @{ installed = @(@{ kbs = @('KB1') }, @{ kbs = @('KB2') }, @{ kbs = @('KB3') }); failed = @(); skipped = @()
+        requiresInteraction = @(@{ kbs = @('KB5099999'); title = 'Example update'; reason = 'gave up: Windows reported that it needs a signed-in person to install it' })
+        counts = @{ installed = 3; installedOptional = 2; installedDrivers = 1; failed = 0; requiresInteraction = 1; skipped = 0 } }
+    Set-EngineResult 'applications' 'CompletedWithFailures' @{ packages = $pk }
+    Invoke-WddMonitor $script:Paths | Out-Null
+    $r = Read-WddJson $script:Paths.ReportJson
+    Assert-Equal (@($r.applications.packages | ForEach-Object { $_.verification }) -join ',') 'Verified,NotVerified,EngineReported,Failed,Deferred' 'verification per application'
+    Assert-Equal $r.applications.verification.Verified 1 'counts'
+    Assert-Equal $r.applications.packages[3].installerExitCode '53' 'installer exit code kept'
+    Assert-Equal "$($r.windowsUpdate.installedOptional)/$($r.windowsUpdate.installedDrivers)" '2/1' 'optional updates and drivers'
+    Assert-True (@($r.remainingTasks) -match 'KB5099999.*needs a person').Count 'update needing a person is a follow-up'
+    Assert-True (@($r.remainingTasks) -match '^Application VLC: reported installed, but WinGet does not find').Count 'not-verified install is a follow-up'
+    $text = Get-Content -LiteralPath $script:Paths.ReportText -Raw
+    Assert-True ($text -match 'Of these: optional updates 2, drivers 1' -and $text -match '<NotVerified>' -and $text -match 'Confirmation: Verified 1') 'text report'
+}
+
+Test-Scenario 'progress window: one per session, refreshes every 7 seconds, opens automatically only while the deployment runs, shows the monitor address' {
+    $script:ProgressMutexName = "Local\WDD-Progress-Test-$([guid]::NewGuid().ToString('N'))"
+    $first = Enter-WddProgressWindow
+    Assert-True $first 'first window'
+    $ps = [powershell]::Create()
+    [void] $ps.AddScript("`$m = New-Object System.Threading.Mutex(`$false, '$($script:ProgressMutexName)'); `$m.WaitOne(0)")
+    Assert-Equal (@($ps.Invoke())[0]) $false 'a second window (another thread) is refused'
+    $ps.Dispose()
+    $first.ReleaseMutex(); $first.Dispose()
+    $t = $null; $e = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $pkgScripts 'orchestrator\Show-DeploymentStatus.ps1'), [ref] $t, [ref] $e)
+    $interval = @($ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'IntervalSeconds' })[0]
+    Assert-Equal $interval.DefaultValue.Extent.Text '7' 'refresh interval default'
+    Assert-True (-not (Test-WddShowAutomatically @{ status = 'Completed' })) 'not opened after completion'
+    Assert-True (-not (Test-WddShowAutomatically $null)) 'not opened before a deployment'
+    Assert-True (Test-WddShowAutomatically @{ status = 'InProgress' }) 'opened while running'
+    Initialize-Embedded | Out-Null
+    $text = (Format-WddStatus $script:Manifest $script:Paths (Read-WddJson $script:Paths.State)).Text
+    Assert-True ($text -match 'Monitor        : starting') 'monitor starting'
+    Assert-True ($text -match 'Last activity  : ') 'last activity line'
+    Write-WddJson $script:Paths.MonitorInfo ([ordered]@{ port = 8765; lanAccess = $false; token = ('A' * 43); mode = 'serving'; urls = @('http://127.0.0.1:8765'); message = '' })
+    $text = (Format-WddStatus $script:Manifest $script:Paths (Read-WddJson $script:Paths.State)).Text
+    Assert-True ($text -match [regex]::Escape("Monitor        : http://127.0.0.1:8765/#t=$('A' * 43)  (this computer only)")) 'address with token'
+    Assert-True ($text -match 'Recent activity') 'recent activity section'
+}
+
 Test-Scenario 'integrity: a modified staged script stops the monitor; nothing is completed or run' {
     Initialize-Embedded | Out-Null
     Add-Content -LiteralPath (Join-Path $script:Paths.Package 'scripts\finalization\Complete-Deployment.ps1') -Value '# tampered'
@@ -596,7 +848,7 @@ Test-Scenario 'Phase 5 package: recovery tool shipped, embedded, staged; manifes
     Assert-Equal "$($script:Manifest.recovery.stateSchemas.deploymentState) $($script:Manifest.recovery.stateSchemas.applicationState) $($script:Manifest.recovery.stateSchemas.applicationResult)" '2 2 2' 'state schema versions'
     Assert-Equal $script:Manifest.recovery.outcomeCodes.PausedAwaitingNetwork 30 'outcome codes'
     $cfg = Read-WddJson (Join-Path $pkgRoot 'scripts\applications\applications-config.json')
-    Assert-Equal "$($cfg.engineVersion) $($cfg.maxAttemptsPerPackage) $($cfg.retry.automatic) $($cfg.retry.baseDelaySeconds)" '1.3.0 3 True 60' 'retry configuration'
+    Assert-Equal "$($cfg.engineVersion) $($cfg.maxAttemptsPerPackage) $($cfg.retry.automatic) $($cfg.retry.baseDelaySeconds)" '1.4.0 3 True 60' 'retry configuration'
     Initialize-Embedded | Out-Null
     Assert-True (Test-Path -LiteralPath (Join-Path $script:Paths.Package 'scripts\recovery\DeploymentRecovery.ps1')) 'staged on the computer'
     Assert-True $script:Shortcuts.ContainsKey('Deployment recovery') 'recovery shortcut'

@@ -76,6 +76,28 @@ test('Advanced: Verification & Health is on by default, read-only, and its choic
   expect(json('WindowsDeployment/deployment-manifest.json').verification).toMatchObject({ enabled: true, readOnly: true });
 });
 
+test('Advanced: the deployment monitor is on and local-only by default; LAN access and the port reach the package', async ({ page }) => {
+  await adv(page, 'section-health');
+  const section = page.locator('#section-health');
+  await expect(section.getByText('Following the deployment', { exact: true })).toBeVisible();
+  await expect(section).toContainText('opens by itself at every sign-in');
+  await expect(field(page, 'monitoring.enabled').locator('input')).toBeChecked();
+  await expect(field(page, 'monitoring.lanAccess').locator('input')).not.toBeChecked();
+  await field(page, 'monitoring.lanAccess').locator('input').check();
+  // The port is an Advanced-view setting.
+  await expect(field(page, 'monitoring.port')).toBeHidden();
+  await page.getByRole('button', { name: 'Advanced', exact: true }).click();
+  await field(page, 'monitoring.port').locator('input').fill('80');
+  await expect(field(page, 'monitoring.port')).toContainText(/1024 to 65535/);
+  await field(page, 'monitoring.port').locator('input').fill('8890');
+  await quickReview(page);
+  const { entries, json } = await zip(page);
+  expect(entries.some((e) => e.path === 'WindowsDeployment/scripts/monitor/DeploymentStatusServer.ps1')).toBe(true);
+  const manifest = json('WindowsDeployment/deployment-manifest.json');
+  expect(manifest.monitor).toMatchObject({ enabled: true, port: 8890, lanAccess: true, refreshSeconds: 7, readOnly: true, firewall: { profile: 'Private', remoteAddress: 'LocalSubnet' } });
+  expect(manifest.progress).toMatchObject({ refreshSeconds: 7, opensAtSignIn: true });
+});
+
 test('Advanced: turning verification off removes the engine from the package; notes with a password are refused', async ({ page }) => {
   await adv(page, 'section-health');
   await page.getByTestId('health-notes').fill('Wi-Fi password: hunter22');

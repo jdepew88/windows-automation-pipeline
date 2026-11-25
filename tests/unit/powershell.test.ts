@@ -112,6 +112,22 @@ describe.skipIf(!onWindows)('PowerShell (Windows only)', () => {
     }
   }, 240_000);
 
+  it('deployment monitor scenarios pass: token, sanitized status, read-only, LAN rule, final report, real HTTP on 127.0.0.1', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'wdb-monitor-fixture-'));
+    try {
+      writeDeploymentFixture(dir);
+      let out: string;
+      try {
+        out = await psAsync(['-File', script('../powershell/Monitor.Tests.ps1'), '-Fixture', dir]);
+      } catch (e) {
+        throw new Error(`Monitor.Tests.ps1 failed:\n${(e as { stdout?: string }).stdout ?? e}`);
+      }
+      expect(out).toMatch(/\b\d+ passed, 0 failed/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 240_000);
+
   it('NTFS permissions: the shipped folder-protection code leaves every staged script, log and state file usable (real icacls)', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'wdb-acl-fixture-'));
     try {

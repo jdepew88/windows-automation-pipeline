@@ -147,6 +147,16 @@ export const MIGRATIONS: Record<number, Migration> = {
       note: on ? 'The Windows 11 requirements bypass is now three separate options. This profile keeps the TPM and Secure Boot bypasses; the RAM check is no longer bypassed, and the CPU bypass is off. Change them under "Setup, region & edition".' : undefined,
     };
   },
+
+  // v8 adds the read-only deployment monitor (an HTTP status page). An older profile keeps the
+  // package it produced: the monitor is off and never reachable from the network.
+  7: (input) => {
+    if (isObj(input.monitoring)) return { value: input };
+    return {
+      value: { ...input, monitoring: { enabled: false, lanAccess: false } },
+      note: 'The deployment monitor (added in schema version 8) is turned off for this older profile. Turn it on under "Verification & Health" if you want to follow the deployment from another device.',
+    };
+  },
 };
 
 /** The six (empty) built-in profiles of schema version 3, for the v2→v3 step. */

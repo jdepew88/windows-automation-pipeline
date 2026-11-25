@@ -57,6 +57,15 @@ Unit test coverage by acceptance criterion:
   `acl-commands.test.ts` (no recursive `(OI)(CI)` grants, no `/C` on checked calls) and the
   task-registration and recovery scenarios in `Deployment.Tests.ps1`; see
   [bare-metal-package-permissions](bare-metal-package-permissions/root-cause.md).
+- **Deployment reliability, automatic updates and remote monitoring**: the new scenarios in
+  `Engine.Tests.ps1` (optional updates and drivers, updates that can ask for input, per-update
+  download retries, permanent HRESULTs), `Applications.Tests.ps1` (installer exit codes, prompting
+  installers, continuation), `Deployment.Tests.ps1` (task verification, restart detection, bounded
+  automatic recovery, stale detection, messages, Device Manager, verification categories, the
+  progress window), the new `Monitor.Tests.ps1` (token, sanitized status, read-only, LAN rule,
+  final report, real HTTP on 127.0.0.1) and `deployment-reliability.test.ts`; see
+  [deployment-reliability](deployment-reliability/README.md), which also has the bare-metal
+  checklist.
 - **Phase 8 (hardware-aware drivers)**: `drivers.test.ts`, `Drivers.Tests.ps1` (the engine of the
   real generated package against simulated hardware: fixtures A-H, selection, Windows Update,
   restarts, recovery, orchestrator and recovery-tool integration), driver scenarios in
