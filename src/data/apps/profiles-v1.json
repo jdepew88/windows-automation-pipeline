@@ -1,0 +1,127 @@
+{
+  "$comment": "FROZEN: revision 1 of the built-in application profiles, kept unchanged so deployments and saved profiles created before the 2026-11-26 rebuild keep exactly the applications they selected (src/engine/applications/builtin.ts). Do not edit. Original note: Built-in application profiles (Phase 4.2). Templates only: they reference catalog ids, are validated at load (src/engine/applications/builtin.ts) and are never edited by the UI. 'defaults' are ticked when the profile is active; 'optional' are shown unticked as recommendations. Device profiles are activated by the device answers, not by a checkbox. Phase 10: the owner's inventory (docs/application-inventory) added optional memberships, the Content Creator and Personal Workstation profiles, and moved RustDesk from the Core Essentials defaults to its optional list.",
+  "profilesVersion": 1,
+  "universal": ["core"],
+  "profiles": [
+    {
+      "id": "core",
+      "name": "Core Essentials",
+      "category": "core",
+      "description": "The small universal baseline: browser, media player, archives, verified copying, a password manager and the Visual C++ runtimes. Remote support (RustDesk) and power-user tools stay optional. Every app stays individually removable.",
+      "inherits": [],
+      "defaults": ["chrome", "vlc", "7zip", "teracopy", "bitwarden", "vcredist-x64", "vcredist-x86"],
+      "optional": ["rustdesk", "notepadpp", "everything", "powertoys"],
+      "activation": "selectable"
+    },
+    {
+      "id": "everyday",
+      "name": "Everyday / Home",
+      "category": "everyday",
+      "description": "Home use: a PDF reader by default, with email, video calls, messaging, cloud storage and photo viewing to choose from.",
+      "inherits": [],
+      "defaults": ["acrobat-reader"],
+      "optional": ["firefox", "edge", "thunderbird", "zoom", "whatsapp", "google-drive", "onedrive", "xnview", "everything", "quicklook", "spotify", "powertoys", "libreoffice", "thunderbird-esr", "teams", "kindle", "calibre", "imageglass"],
+      "activation": "selectable"
+    },
+    {
+      "id": "gaming",
+      "name": "Gaming",
+      "category": "gaming",
+      "description": "Steam and the Epic Games Launcher, with the other launchers, Playnite and Discord to choose from. No accounts, logins or game libraries are configured.",
+      "inherits": [],
+      "defaults": ["steam", "epic"],
+      "optional": ["battlenet", "ea-app", "ubisoft-connect", "gog-galaxy", "playnite", "discord", "retroarch", "launchbox", "rtss", "rockstar-launcher", "scummvm", "hidhide", "obs-studio"],
+      "activation": "selectable"
+    },
+    {
+      "id": "developer",
+      "name": "General Developer",
+      "category": "developer",
+      "description": "A lean developer baseline: Git, Visual Studio Code, Python and Node.js LTS. Editors, AI tools, containers and network tools are optional.",
+      "inherits": [],
+      "defaults": ["git", "vscode", "python-314", "nodejs-lts"],
+      "optional": ["github-desktop", "cursor", "claude-code", "claude-desktop", "chatgpt", "sublime-text", "docker-desktop", "wireshark", "winscp", "putty", "filezilla", "tailscale", "wireguard", "winmerge", "wiztree", "notepadpp", "windows-terminal", "powershell", "wsl", "python-313", "cmake", "github-cli", "drawio", "lm-studio", "ollama"],
+      "activation": "selectable"
+    },
+    {
+      "id": "network-engineer",
+      "name": "Network Engineer / Technician",
+      "category": "network",
+      "description": "A complete personal power-user workstation: the General Developer baseline plus AI and development tools, networking and remote administration, diagnostics, USB tools, downloads and synchronisation. VPNs, sync and download tools are installed only, never configured.",
+      "inherits": ["developer"],
+      "defaults": ["cursor", "claude-code", "claude-desktop", "chatgpt", "github-desktop", "sublime-text", "docker-desktop", "wireshark", "winscp", "putty", "filezilla", "tailscale", "wireguard", "winmerge", "wiztree", "hwinfo", "crystaldiskinfo", "crystaldiskmark", "bulk-rename-utility", "rufus", "ventoy", "qbittorrent", "sabnzbd", "syncthing"],
+      "optional": ["quicklook", "freefilesync", "everything", "powertoys", "sysinternals", "nmap", "notepadpp", "windows-terminal", "powershell", "virtualbox", "revo-uninstaller", "qemu", "bind9", "nomachine", "tabby", "termius", "unifi-os-server", "balena-etcher", "raspberry-pi-imager", "osfmount", "sd-card-formatter"],
+      "activation": "selectable"
+    },
+    {
+      "id": "music",
+      "name": "Music Lover",
+      "category": "music",
+      "description": "Local music libraries and playback: MusicBee as the library manager by default, with other players, editors, converters and streaming apps to choose from (VLC is already in Core Essentials).",
+      "inherits": [],
+      "defaults": ["musicbee"],
+      "optional": ["tauon", "dopamine", "museeks", "mpv-net", "audacity", "handbrake", "spotify", "itunes", "apple-music", "obs-studio", "foobar2000", "mediamonkey", "mp3tag", "ffmpeg", "k-lite-codec-pack"],
+      "activation": "selectable"
+    },
+    {
+      "id": "creator",
+      "name": "Content Creator",
+      "category": "creator",
+      "description": "Recording, audio editing and video editing: OBS Studio, Audacity and OpenShot by default, with converters, image editors and the Adobe and Autodesk app managers to choose from. No accounts are signed in.",
+      "inherits": [],
+      "defaults": ["obs-studio", "audacity", "openshot"],
+      "optional": ["handbrake", "ffmpeg", "gimp", "imageglass", "photodemon", "adobe-creative-cloud", "autodesk-access"],
+      "activation": "selectable"
+    },
+    {
+      "id": "workstation",
+      "name": "Personal Workstation",
+      "category": "workstation",
+      "description": "The owner's personal additions: VPN, game streaming, media centre, downloads, PlayStation Remote Play and OpenRGB. Peripheral software (Corsair, Logitech, NZXT) and VMware Workstation Pro are optional: install them only for the hardware and needs of the computer. Nothing is signed in or configured.",
+      "inherits": [],
+      "defaults": ["pia", "parsec", "stremio", "jdownloader", "qbittorrent", "ps-remote-play", "openrgb"],
+      "optional": ["sabnzbd", "vmware-workstation", "corsair-icue", "logitech-ghub", "nzxt-cam"],
+      "activation": "selectable"
+    },
+    {
+      "id": "apple-devices",
+      "name": "iPhone / iPad",
+      "category": "devices",
+      "description": "Activated by an iPhone or iPad under Mobile devices & ecosystem: Apple Devices is recommended and ticked; Apple Music, iTunes and iCloud stay optional.",
+      "inherits": [],
+      "defaults": ["apple-devices"],
+      "optional": ["apple-music", "itunes", "icloud"],
+      "activation": "devices-apple"
+    },
+    {
+      "id": "android-devices",
+      "name": "Android",
+      "category": "devices",
+      "description": "Activated by an Android phone or tablet. Basic USB file transfer needs no extra software, so nothing is ticked; manufacturer tools are optional.",
+      "inherits": [],
+      "defaults": [],
+      "optional": ["google-quick-share", "samsung-smart-switch"],
+      "activation": "devices-android"
+    },
+    {
+      "id": "laptop",
+      "name": "Laptop",
+      "category": "laptop",
+      "description": "Portable computers: BatteryInfoView to check battery wear, with manufacturer update tools for Dell and Lenovo to choose from.",
+      "inherits": [],
+      "defaults": ["batteryinfoview"],
+      "optional": ["dell-command-update", "lenovo-system-update", "lenovo-vantage", "onedrive"],
+      "activation": "selectable"
+    },
+    {
+      "id": "touch",
+      "name": "Touchscreen / 2-in-1",
+      "category": "touch",
+      "description": "Pen and touch: Xournal++ for handwritten notes and PDF annotation, with Whiteboard and Joplin to choose from.",
+      "inherits": [],
+      "defaults": ["xournalpp"],
+      "optional": ["whiteboard", "joplin"],
+      "activation": "selectable"
+    }
+  ]
+}

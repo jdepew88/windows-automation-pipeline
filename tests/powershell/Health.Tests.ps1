@@ -189,7 +189,8 @@ Test-HealthScenario 'package: health engine, plan and template embedded and stag
     Assert-Equal $script:Manifest.paths.healthTool 'C:\ProgramData\WindowsDeploymentBuilder\Package\scripts\health\DeploymentHealth.ps1' 'manifest: tool path'
     $cfg = Get-HealthConfig
     $keys = @($cfg.applications.items | ForEach-Object { $_.key })
-    Assert-Equal $keys.Count 10 'ten selected applications, not the catalog'
+    # Core Essentials (nine apps since the 2026-11-26 profile rebuild) + Git, Apple Devices and Rufus.
+    Assert-Equal $keys.Count 12 'twelve selected applications, not the catalog'
     Assert-True ($keys -notcontains 'catalog:rustdesk') 'the removed RustDesk is not expected'
     Assert-Equal (@($cfg.applications.items | Where-Object { -not $_.required }) | ForEach-Object { $_.key }) 'winget:videolan.vlc' 'VLC is optional'
     Assert-Equal "$($cfg.account.username) $($cfg.identity.computerName) $($cfg.windows.expectedEditionIds -join ',')" 'owner owner-Computer Professional' 'account, name, edition'
@@ -213,7 +214,7 @@ Test-HealthScenario 'A. perfect deployment: every objective verified against Win
     Assert-Equal $r.trigger 'DeploymentComplete' 'run by the deployment'
     foreach ($c in @($r.categories)) { Assert-True ($c.status -in 'Verified', 'NotApplicable') "$($c.id) is $($c.status): $($c.summary)" }
     Assert-Equal (Get-Category $r 'restoration').status 'NotApplicable' 'no restoration: not shown as verified'
-    Assert-Equal @($r.applications).Count 10 'only the ten selected applications'
+    Assert-Equal @($r.applications).Count 12 'only the twelve selected applications'
     foreach ($a in @($r.applications)) { Assert-True ($a.independent -eq 'Found' -and $a.result -in 'InstalledVerified', 'AlreadyInstalledVerified') "$($a.name): $($a.result) ($($a.independent))" }
     Assert-Equal (@($r.applications) | Where-Object { $_.key -eq 'winget:rufus.rufus' }).foundIn 'machine' 'portable Rufus found by its WinGet record'
     Assert-Equal (@($r.applications) | Where-Object { $_.key -eq 'msstore:9np83lwlpz9k' }).independent 'Found' 'Store app found as a Store package'
@@ -234,7 +235,7 @@ Test-HealthScenario 'A. perfect deployment: every objective verified against Win
     $h = Read-WddJson (Join-Path $script:Paths.Root 'reports\health\customer-handoff.json')
     Assert-Equal $h.headline 'Your computer is set up and ready to use.' 'customer headline'
     Assert-Equal "$($h.computerName) $($h.windows) $($h.account)" 'owner-Computer Windows 11 Pro owner' 'customer basics'
-    Assert-Equal @($h.applications.installed).Count 10 'installed applications listed for the customer'
+    Assert-Equal @($h.applications.installed).Count 12 'installed applications listed for the customer'
     Assert-True (@($h.actions | Where-Object { $_ -match 'Bitwarden' }).Count -eq 1) 'sign-in task for Bitwarden'
     Assert-Equal $h.notes 'Your files from the old computer are in Documents. Call us with any question.' 'technician notes'
     $html = [IO.File]::ReadAllText((Join-Path $script:Paths.Root 'reports\health\customer-handoff.html'))

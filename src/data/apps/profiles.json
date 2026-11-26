@@ -1,76 +1,96 @@
 {
-  "$comment": "Built-in application profiles (Phase 4.2). Templates only: they reference catalog ids, are validated at load (src/engine/applications/builtin.ts) and are never edited by the UI. 'defaults' are ticked when the profile is active; 'optional' are shown unticked as recommendations. Device profiles are activated by the device answers, not by a checkbox. Phase 10: the owner's inventory (docs/application-inventory) added optional memberships, the Content Creator and Personal Workstation profiles, and moved RustDesk from the Core Essentials defaults to its optional list.",
-  "profilesVersion": 1,
+  "$comment": "Built-in application profiles, revision 2 (2026-11-26 rebuild; revision 1 is frozen in profiles-v1.json for older deployments and saved profiles). Templates only: they reference catalog ids, are validated at load (src/engine/applications/builtin.ts) and are never edited by the UI. Profiles are additive: ticking several combines their 'defaults' (each app installed once); 'optional' apps are shown unticked as recommendations. Competing tools (PDF readers, remote support, antivirus) are never defaults of two profiles that are meant to be combined. Device profiles are activated by the device answers, not by a checkbox.",
+  "profilesVersion": 2,
   "universal": ["core"],
   "profiles": [
     {
       "id": "core",
       "name": "Core Essentials",
       "category": "core",
-      "description": "The small universal baseline: browser, media player, archives, verified copying, a password manager and the Visual C++ runtimes. Remote support (RustDesk) and power-user tools stay optional. Every app stays individually removable.",
+      "description": "The foundation of every new deployment: Chrome, 7-Zip, VLC, Notepad++, Bitwarden, SumatraPDF (a lightweight PDF reader), ImageGlass (a photo viewer) and the Visual C++ runtimes most programs need. Technical utilities stay optional. Every app stays individually removable.",
       "inherits": [],
-      "defaults": ["chrome", "vlc", "7zip", "teracopy", "bitwarden", "vcredist-x64", "vcredist-x86"],
-      "optional": ["rustdesk", "notepadpp", "everything", "powertoys"],
+      "defaults": ["chrome", "7zip", "vlc", "notepadpp", "bitwarden", "sumatrapdf", "imageglass", "vcredist-x64", "vcredist-x86"],
+      "optional": ["teracopy", "everything", "powertoys", "quicklook", "firefox", "edge", "acrobat-reader", "xnview", "peazip"],
       "activation": "selectable"
     },
     {
       "id": "everyday",
       "name": "Everyday / Home",
       "category": "everyday",
-      "description": "Home use: a PDF reader by default, with email, video calls, messaging, cloud storage and photo viewing to choose from.",
+      "description": "A typical family member or customer: Zoom and Teams for calls, LibreOffice for documents, Everything for finding files and Revo Uninstaller for clean removals. Messaging, email, cloud storage, music and a remote-support tool are recommendations, never installed twice or in competing pairs.",
       "inherits": [],
-      "defaults": ["acrobat-reader"],
-      "optional": ["firefox", "edge", "thunderbird", "zoom", "whatsapp", "google-drive", "onedrive", "xnview", "everything", "quicklook", "spotify", "powertoys", "libreoffice", "thunderbird-esr", "teams", "kindle", "calibre", "imageglass"],
+      "defaults": ["zoom", "teams", "libreoffice", "everything", "revo-uninstaller"],
+      "optional": ["whatsapp", "signal", "thunderbird", "webex", "google-drive", "onedrive", "spotify", "firefox", "edge", "xnview", "quicklook", "powertoys", "kindle", "calibre", "acrobat-reader", "onlyoffice", "naps2", "pdfsam", "greenshot", "paint-net", "localsend", "malwarebytes", "teamviewer", "rustdesk", "anydesk"],
       "activation": "selectable"
     },
     {
       "id": "gaming",
-      "name": "Gaming",
+      "name": "Gamer",
       "category": "gaming",
-      "description": "Steam and the Epic Games Launcher, with the other launchers, Playnite and Discord to choose from. No accounts, logins or game libraries are configured.",
+      "description": "The major game launchers (Steam, Epic Games, Battle.net, GOG GALAXY, Ubisoft Connect, Rockstar Games) and Discord. EA app, Playnite, RetroArch, OBS Studio and gaming utilities are recommendations. No accounts are signed in and no games are downloaded.",
       "inherits": [],
-      "defaults": ["steam", "epic"],
-      "optional": ["battlenet", "ea-app", "ubisoft-connect", "gog-galaxy", "playnite", "discord", "retroarch", "launchbox", "rtss", "rockstar-launcher", "scummvm", "hidhide", "obs-studio"],
-      "activation": "selectable"
-    },
-    {
-      "id": "developer",
-      "name": "General Developer",
-      "category": "developer",
-      "description": "A lean developer baseline: Git, Visual Studio Code, Python and Node.js LTS. Editors, AI tools, containers and network tools are optional.",
-      "inherits": [],
-      "defaults": ["git", "vscode", "python-314", "nodejs-lts"],
-      "optional": ["github-desktop", "cursor", "claude-code", "claude-desktop", "chatgpt", "sublime-text", "docker-desktop", "wireshark", "winscp", "putty", "filezilla", "tailscale", "wireguard", "winmerge", "wiztree", "notepadpp", "windows-terminal", "powershell", "wsl", "python-313", "cmake", "github-cli", "drawio", "lm-studio", "ollama"],
-      "activation": "selectable"
-    },
-    {
-      "id": "network-engineer",
-      "name": "Network Engineer / Technician",
-      "category": "network",
-      "description": "A complete personal power-user workstation: the General Developer baseline plus AI and development tools, networking and remote administration, diagnostics, USB tools, downloads and synchronisation. VPNs, sync and download tools are installed only, never configured.",
-      "inherits": ["developer"],
-      "defaults": ["cursor", "claude-code", "claude-desktop", "chatgpt", "github-desktop", "sublime-text", "docker-desktop", "wireshark", "winscp", "putty", "filezilla", "tailscale", "wireguard", "winmerge", "wiztree", "hwinfo", "crystaldiskinfo", "crystaldiskmark", "bulk-rename-utility", "rufus", "ventoy", "qbittorrent", "sabnzbd", "syncthing"],
-      "optional": ["quicklook", "freefilesync", "everything", "powertoys", "sysinternals", "nmap", "notepadpp", "windows-terminal", "powershell", "virtualbox", "revo-uninstaller", "qemu", "bind9", "nomachine", "tabby", "termius", "unifi-os-server", "balena-etcher", "raspberry-pi-imager", "osfmount", "sd-card-formatter"],
+      "defaults": ["steam", "epic", "battlenet", "gog-galaxy", "ubisoft-connect", "rockstar-launcher", "discord"],
+      "optional": ["ea-app", "playnite", "retroarch", "obs-studio", "msi-afterburner", "rtss", "heroic", "amazon-games", "itch", "geforce-now", "prism-launcher", "minecraft-launcher", "moonlight", "parsec", "scummvm", "launchbox", "psplus", "ps-remote-play", "hidhide"],
       "activation": "selectable"
     },
     {
       "id": "music",
       "name": "Music Lover",
       "category": "music",
-      "description": "Local music libraries and playback: MusicBee as the library manager by default, with other players, editors, converters and streaming apps to choose from (VLC is already in Core Essentials).",
+      "description": "Spotify for streaming, MusicBee for the local library, Audacity for editing, mpv.net for playback and Mp3tag for tags. Other players, streaming services and audio tools are recommendations (VLC is already in Core Essentials).",
       "inherits": [],
-      "defaults": ["musicbee"],
-      "optional": ["tauon", "dopamine", "museeks", "mpv-net", "audacity", "handbrake", "spotify", "itunes", "apple-music", "obs-studio", "foobar2000", "mediamonkey", "mp3tag", "ffmpeg", "k-lite-codec-pack"],
+      "defaults": ["spotify", "musicbee", "audacity", "mpv-net", "mp3tag"],
+      "optional": ["foobar2000", "mediamonkey", "dopamine", "itunes", "apple-music", "ffmpeg", "aimp", "musicbrainz-picard", "exact-audio-copy", "tidal", "amazon-music", "deezer", "tauon", "museeks", "voicemeeter", "reaper", "musescore"],
+      "activation": "selectable"
+    },
+    {
+      "id": "student-office",
+      "name": "Student / Office",
+      "category": "student",
+      "description": "Documents, email, classes and study: LibreOffice, Thunderbird, Teams, PDFsam, Zotero and Anki. Other office suites, note apps and meeting tools are recommendations. Microsoft Office LTSC stays a separate, optional choice below.",
+      "inherits": [],
+      "defaults": ["libreoffice", "thunderbird", "teams", "pdfsam", "zotero", "anki"],
+      "optional": ["onlyoffice", "obsidian", "joplin", "notion", "evernote", "drawio", "naps2", "zoom", "webex", "google-drive", "onedrive", "acrobat-reader", "xournalpp", "greenshot", "musescore", "m365-copilot", "chatgpt", "claude-desktop"],
       "activation": "selectable"
     },
     {
       "id": "creator",
       "name": "Content Creator",
       "category": "creator",
-      "description": "Recording, audio editing and video editing: OBS Studio, Audacity and OpenShot by default, with converters, image editors and the Adobe and Autodesk app managers to choose from. No accounts are signed in.",
+      "description": "Streaming, images, audio and video: OBS Studio, GIMP, Inkscape, Audacity, HandBrake and ShareX. Krita, Blender, video editors and the Adobe and Autodesk app managers are recommendations. No accounts are signed in.",
       "inherits": [],
-      "defaults": ["obs-studio", "audacity", "openshot"],
-      "optional": ["handbrake", "ffmpeg", "gimp", "imageglass", "photodemon", "adobe-creative-cloud", "autodesk-access"],
+      "defaults": ["obs-studio", "gimp", "inkscape", "audacity", "handbrake", "sharex"],
+      "optional": ["krita", "blender", "kdenlive", "shotcut", "openshot", "darktable", "digikam", "paint-net", "figma", "screentogif", "greenshot", "ffmpeg", "mkvtoolnix", "mediainfo", "reaper", "voicemeeter", "photodemon", "freecad", "adobe-creative-cloud", "autodesk-access"],
+      "activation": "selectable"
+    },
+    {
+      "id": "developer",
+      "name": "Developer",
+      "category": "developer",
+      "description": "A sensible development foundation: Git, Visual Studio Code, Python, Node.js LTS and the GitHub CLI. Docker Desktop, GitHub Desktop, Cursor, Claude Code, PowerShell 7, WSL, IDEs, languages and AI tools are recommendations.",
+      "inherits": [],
+      "defaults": ["git", "vscode", "python-314", "nodejs-lts", "github-cli"],
+      "optional": ["docker-desktop", "github-desktop", "cursor", "claude-code", "powershell", "wsl", "windows-terminal", "claude-desktop", "chatgpt", "sublime-text", "visual-studio-community", "go", "rustup", "jetbrains-toolbox", "dbeaver", "windsurf", "zed", "nvm-windows", "neovim", "postman", "miniconda", "android-studio", "podman-desktop", "ubuntu-2404", "python-313", "cmake", "drawio", "winmerge", "ripgrep", "gsudo", "lm-studio", "ollama", "gpt4all"],
+      "activation": "selectable"
+    },
+    {
+      "id": "network-engineer",
+      "name": "IT Technician / Network Engineer",
+      "category": "network",
+      "description": "Diagnostics, system utilities, networking and remote administration: HWiNFO, CrystalDiskInfo, Sysinternals, WinSCP, PuTTY, Wireshark, Rufus and Revo Uninstaller. Scanners, VPN clients, USB tools and more diagnostics are recommendations. VPNs and remote tools are installed only, never configured.",
+      "inherits": [],
+      "defaults": ["hwinfo", "crystaldiskinfo", "sysinternals", "winscp", "putty", "wireshark", "rufus", "revo-uninstaller"],
+      "optional": ["crystaldiskmark", "cpu-z", "gpu-z", "hwmonitor", "bluescreenview", "ddu", "bulk-crap-uninstaller", "ventoy", "balena-etcher", "raspberry-pi-imager", "nmap", "advanced-ip-scanner", "angry-ip-scanner", "mremoteng", "mobaxterm", "tabby", "termius", "filezilla", "tailscale", "wireguard", "openvpn-connect", "speedtest", "powershell", "windows-terminal", "winmerge", "wiztree", "treesize-free", "everything", "powertoys", "virtualbox", "qemu", "teamviewer", "rustdesk", "anydesk", "osfmount", "sd-card-formatter", "guiformat", "bind9", "gsudo"],
+      "activation": "selectable"
+    },
+    {
+      "id": "remote-support",
+      "name": "Remote Support",
+      "category": "remote",
+      "description": "Lets a technician help this computer remotely: TeamViewer is installed automatically; RustDesk (open source, a manual download because it has no WinGet package) and AnyDesk are alternatives. Tick both deliberately if needed. Installation never turns on unattended access or sets a password: the user accepts each session.",
+      "inherits": [],
+      "defaults": ["teamviewer"],
+      "optional": ["rustdesk", "anydesk", "chrome-remote-desktop"],
       "activation": "selectable"
     },
     {
@@ -90,17 +110,17 @@
       "description": "Activated by an iPhone or iPad under Mobile devices & ecosystem: Apple Devices is recommended and ticked; Apple Music, iTunes and iCloud stay optional.",
       "inherits": [],
       "defaults": ["apple-devices"],
-      "optional": ["apple-music", "itunes", "icloud"],
+      "optional": ["apple-music", "itunes", "icloud", "localsend"],
       "activation": "devices-apple"
     },
     {
       "id": "android-devices",
       "name": "Android",
       "category": "devices",
-      "description": "Activated by an Android phone or tablet. Basic USB file transfer needs no extra software, so nothing is ticked; manufacturer tools are optional.",
+      "description": "Activated by an Android phone or tablet. Basic USB file transfer needs no extra software, so nothing is ticked; sharing, phone-link and manufacturer tools are optional.",
       "inherits": [],
       "defaults": [],
-      "optional": ["google-quick-share", "samsung-smart-switch"],
+      "optional": ["google-quick-share", "kde-connect", "localsend", "samsung-smart-switch"],
       "activation": "devices-android"
     },
     {

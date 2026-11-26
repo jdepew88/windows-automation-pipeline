@@ -24,6 +24,10 @@ import { importDriverBundleManifest } from '../../src/engine/drivers';
 export function writeDeploymentFixture(dir: string): { packageId: string; files: number } {
   const p = ownerDefaults();
   p.accounts.personName = 'Alex';
+  // A deployment saved before the 2026-11-26 profile rebuild (revision 1): the Phase 5 scenarios
+  // (ProvisioningSim.ps1 $FixtureApps) are written for its Core Essentials, including TeraCopy, and
+  // the engine runs a package from the frozen revision too.
+  p.applications.selection.profileRevision = 1;
   // The Phase 4-7 orchestrator scenarios run without the Phase 8 driver stage (the "off" regression);
   // the driver stage has its own fixture below (<dir>/drivers).
   p.drivers.enabled = false;
@@ -57,7 +61,8 @@ export function writeDeploymentFixture(dir: string): { packageId: string; files:
  * Phase 9 fixture (<dir>/health): a new deployment as the owner defaults make it (account "owner",
  * Windows Update, the driver stage and verification on), Core Essentials (no manual entry since
  * Phase 10, so a perfect computer can be "Ready"), plus Git, an iPhone (Apple Devices from the
- * Microsoft Store) and the portable Rufus. VLC is marked optional for delivery.
+ * Microsoft Store) and the portable Rufus: twelve apps with the 2026-11-26 Core Essentials. VLC is marked
+ * optional for delivery.
  */
 export function writeHealthFixture(dir: string): { packageId: string } {
   rmSync(dir, { recursive: true, force: true });

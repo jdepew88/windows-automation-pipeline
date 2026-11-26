@@ -13,30 +13,34 @@ For every package: "winget list" first (already installed = left unchanged), the
 
   1. Google Chrome  [winget: Google.Chrome]
      winget install --id Google.Chrome --exact --source winget --silent --no-upgrade --accept-package-agreements --accept-source-agreements --disable-interactivity
-  2. VLC media player  [winget: VideoLAN.VLC]
-     winget install --id VideoLAN.VLC --exact --source winget --silent --no-upgrade --accept-package-agreements --accept-source-agreements --disable-interactivity
-  3. 7-Zip  [winget: 7zip.7zip]
+  2. 7-Zip  [winget: 7zip.7zip]
      winget install --id 7zip.7zip --exact --source winget --silent --no-upgrade --accept-package-agreements --accept-source-agreements --disable-interactivity
-  4. TeraCopy  [winget: CodeSector.TeraCopy]
-     winget install --id CodeSector.TeraCopy --exact --source winget --silent --no-upgrade --accept-package-agreements --accept-source-agreements --disable-interactivity
+  3. VLC media player  [winget: VideoLAN.VLC]
+     winget install --id VideoLAN.VLC --exact --source winget --silent --no-upgrade --accept-package-agreements --accept-source-agreements --disable-interactivity
+  4. Notepad++  [winget: Notepad++.Notepad++]
+     winget install --id Notepad++.Notepad++ --exact --source winget --silent --no-upgrade --accept-package-agreements --accept-source-agreements --disable-interactivity
   5. Bitwarden  [winget: Bitwarden.Bitwarden]
      needs an account sign-in after installation
      winget install --id Bitwarden.Bitwarden --exact --source winget --silent --no-upgrade --accept-package-agreements --accept-source-agreements --disable-interactivity
-  6. Visual C++ Redistributable 2015-2026 (x64)  [winget: Microsoft.VCRedist.2015+.x64]
+  6. SumatraPDF  [winget: SumatraPDF.SumatraPDF]
+     winget install --id SumatraPDF.SumatraPDF --exact --source winget --silent --no-upgrade --accept-package-agreements --accept-source-agreements --disable-interactivity
+  7. ImageGlass  [winget: DuongDieuPhap.ImageGlass]
+     winget install --id DuongDieuPhap.ImageGlass --exact --source winget --silent --no-upgrade --accept-package-agreements --accept-source-agreements --disable-interactivity
+  8. Visual C++ Redistributable 2015-2026 (x64)  [winget: Microsoft.VCRedist.2015+.x64]
      may need a restart
      winget install --id Microsoft.VCRedist.2015+.x64 --exact --source winget --silent --no-upgrade --accept-package-agreements --accept-source-agreements --disable-interactivity
-  7. Visual C++ Redistributable 2015-2026 (x86)  [winget: Microsoft.VCRedist.2015+.x86]
+  9. Visual C++ Redistributable 2015-2026 (x86)  [winget: Microsoft.VCRedist.2015+.x86]
      may need a restart
      winget install --id Microsoft.VCRedist.2015+.x86 --exact --source winget --silent --no-upgrade --accept-package-agreements --accept-source-agreements --disable-interactivity
-  8. Git  [winget: Git.Git]
+ 10. Git  [winget: Git.Git]
      winget install --id Git.Git --exact --source winget --silent --no-upgrade --accept-package-agreements --accept-source-agreements --disable-interactivity
-  9. Windows Subsystem for Linux  [winget: Microsoft.WSL]
+ 11. Windows Subsystem for Linux  [winget: Microsoft.WSL]
      may need a restart
      winget install --id Microsoft.WSL --exact --source winget --silent --no-upgrade --accept-package-agreements --accept-source-agreements --disable-interactivity
- 10. Docker Desktop  [winget: Docker.DockerDesktop]
+ 12. Docker Desktop  [winget: Docker.DockerDesktop]
      needs an account sign-in after installation; may need a restart; after winget:microsoft.wsl
      winget install --id Docker.DockerDesktop --exact --source winget --silent --no-upgrade --accept-package-agreements --accept-source-agreements --disable-interactivity
- 11. Microsoft Whiteboard  [msstore: 9MSPC6MP8FM4]
+ 13. Microsoft Whiteboard  [msstore: 9MSPC6MP8FM4]
      needs an account sign-in after installation; Microsoft Store package
      winget install --id 9MSPC6MP8FM4 --exact --source msstore --silent --no-upgrade --accept-package-agreements --accept-source-agreements --disable-interactivity
 

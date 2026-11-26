@@ -43,11 +43,19 @@ export const PackageRefSchema = z
   .strict();
 export type PackageRef = z.infer<typeof PackageRefSchema>;
 
-export const APP_PROFILE_CATEGORIES = ['core', 'everyday', 'gaming', 'developer', 'network', 'music', 'creator', 'workstation', 'devices', 'laptop', 'touch', 'custom'] as const;
+export const APP_PROFILE_CATEGORIES = ['core', 'everyday', 'gaming', 'developer', 'network', 'music', 'creator', 'workstation', 'devices', 'laptop', 'touch', 'student', 'remote', 'custom'] as const;
 export const AppProfileCategorySchema = z.enum(APP_PROFILE_CATEGORIES);
 export type AppProfileCategory = z.infer<typeof AppProfileCategorySchema>;
 
 export const APP_PROFILE_ID = /^[a-z0-9][a-z0-9-]{0,47}$/;
+
+/**
+ * Revision of the built-in application profiles (src/data/apps): 1 = the original Phase 4.2/10
+ * definitions (frozen in profiles-v1.json), 2 = the 2026-11-26 rebuild (profiles.json). A deployment
+ * and a saved custom profile keep the revision they were created with, so new defaults never change
+ * them silently; adopting the current revision is an explicit action. Absent means 1.
+ */
+export const ProfileRevisionSchema = z.union([z.literal(1), z.literal(2)]);
 
 /**
  * Phase 4.2: the customer's devices. Only the kind of device is recorded, never a device name,
@@ -87,6 +95,8 @@ export const AppProfileSchema = z
     devices: DevicesSchema.optional(),
     createdUtc: UtcStamp.optional(),
     updatedUtc: UtcStamp.optional(),
+    /** Custom profiles: the built-in profile revision its inherits refer to (absent = 1). */
+    builtinRevision: ProfileRevisionSchema.optional(),
   })
   .strict();
 export type AppProfile = z.infer<typeof AppProfileSchema>;
@@ -109,6 +119,8 @@ export const ApplicationsSelectionSchema = z
     addedWith: z.record(z.string().max(200), z.array(z.string().max(48)).max(50)).optional(),
     /** Package keys ("source:id", lower case) removed from the combined selection. */
     removed: z.array(z.string().max(200)).max(1000),
+    /** Built-in profile revision this deployment uses (schema version 10; absent = 1). */
+    profileRevision: ProfileRevisionSchema.optional(),
   })
   .strict();
 export type ApplicationsSelection = z.infer<typeof ApplicationsSelectionSchema>;

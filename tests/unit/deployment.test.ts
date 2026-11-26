@@ -179,6 +179,7 @@ describe('customer application selections', () => {
       sel.profiles.push({ id: 'home', name: 'Home', category: 'custom', description: '', builtin: false, inherits: [], packages: [ref('Mozilla.Firefox', 'Firefox'), ref('7zip.7zip', '7-Zip')] });
       sel.profiles.push({ id: 'extra', name: 'Extra', category: 'custom', description: '', builtin: false, inherits: [], packages: [ref('Valve.Steam', 'Steam'), ref('7ZIP.7ZIP', '7-Zip')] });
       sel.selectedProfiles = ['home', 'gaming', 'extra'];
+      sel.profileRevision = 1; // Gaming = Steam + Epic (revision 1; an older saved deployment)
       sel.added.push(ref('Adobe.Acrobat.Reader.64-bit', 'Acrobat Reader'));
       sel.removed.push('winget:epicgames.epicgameslauncher');
     });

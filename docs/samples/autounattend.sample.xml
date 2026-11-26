@@ -7833,17 +7833,6 @@ exit 1
       "method": "winget"
     },
     {
-      "key": "winget:videolan.vlc",
-      "packageIdentifier": "VideoLAN.VLC",
-      "source": "winget",
-      "displayName": "VLC media player",
-      "version": "",
-      "scope": "",
-      "interaction": "unknown",
-      "after": [],
-      "method": "winget"
-    },
-    {
       "key": "winget:7zip.7zip",
       "packageIdentifier": "7zip.7zip",
       "source": "winget",
@@ -7855,10 +7844,21 @@ exit 1
       "method": "winget"
     },
     {
-      "key": "winget:codesector.teracopy",
-      "packageIdentifier": "CodeSector.TeraCopy",
+      "key": "winget:videolan.vlc",
+      "packageIdentifier": "VideoLAN.VLC",
       "source": "winget",
-      "displayName": "TeraCopy",
+      "displayName": "VLC media player",
+      "version": "",
+      "scope": "",
+      "interaction": "unknown",
+      "after": [],
+      "method": "winget"
+    },
+    {
+      "key": "winget:notepad++.notepad++",
+      "packageIdentifier": "Notepad++.Notepad++",
+      "source": "winget",
+      "displayName": "Notepad++",
       "version": "",
       "scope": "",
       "interaction": "unknown",
@@ -7870,6 +7870,28 @@ exit 1
       "packageIdentifier": "Bitwarden.Bitwarden",
       "source": "winget",
       "displayName": "Bitwarden",
+      "version": "",
+      "scope": "",
+      "interaction": "unknown",
+      "after": [],
+      "method": "winget"
+    },
+    {
+      "key": "winget:sumatrapdf.sumatrapdf",
+      "packageIdentifier": "SumatraPDF.SumatraPDF",
+      "source": "winget",
+      "displayName": "SumatraPDF",
+      "version": "",
+      "scope": "",
+      "interaction": "unknown",
+      "after": [],
+      "method": "winget"
+    },
+    {
+      "key": "winget:duongdieuphap.imageglass",
+      "packageIdentifier": "DuongDieuPhap.ImageGlass",
+      "source": "winget",
+      "displayName": "ImageGlass",
       "version": "",
       "scope": "",
       "interaction": "unknown",
@@ -7915,16 +7937,22 @@ exit 1
           "PackageIdentifier": "Google.Chrome"
         },
         {
-          "PackageIdentifier": "VideoLAN.VLC"
-        },
-        {
           "PackageIdentifier": "7zip.7zip"
         },
         {
-          "PackageIdentifier": "CodeSector.TeraCopy"
+          "PackageIdentifier": "VideoLAN.VLC"
+        },
+        {
+          "PackageIdentifier": "Notepad++.Notepad++"
         },
         {
           "PackageIdentifier": "Bitwarden.Bitwarden"
+        },
+        {
+          "PackageIdentifier": "SumatraPDF.SumatraPDF"
+        },
+        {
+          "PackageIdentifier": "DuongDieuPhap.ImageGlass"
         },
         {
           "PackageIdentifier": "Microsoft.VCRedist.2015+.x64"
@@ -14206,25 +14234,6 @@ if ($script:WdhMain) {
         "url": ""
       },
       {
-        "key": "winget:videolan.vlc",
-        "operationId": "app:winget:videolan.vlc",
-        "name": "VLC media player",
-        "names": [
-          "VLC media player"
-        ],
-        "source": "winget",
-        "packageIdentifier": "VideoLAN.VLC",
-        "method": "winget",
-        "kind": "automatic",
-        "required": true,
-        "scope": "unknown",
-        "version": "",
-        "shortcut": "",
-        "signIn": false,
-        "instructions": "",
-        "url": ""
-      },
-      {
         "key": "winget:7zip.7zip",
         "operationId": "app:winget:7zip.7zip",
         "name": "7-Zip",
@@ -14244,14 +14253,33 @@ if ($script:WdhMain) {
         "url": ""
       },
       {
-        "key": "winget:codesector.teracopy",
-        "operationId": "app:winget:codesector.teracopy",
-        "name": "TeraCopy",
+        "key": "winget:videolan.vlc",
+        "operationId": "app:winget:videolan.vlc",
+        "name": "VLC media player",
         "names": [
-          "TeraCopy"
+          "VLC media player"
         ],
         "source": "winget",
-        "packageIdentifier": "CodeSector.TeraCopy",
+        "packageIdentifier": "VideoLAN.VLC",
+        "method": "winget",
+        "kind": "automatic",
+        "required": true,
+        "scope": "unknown",
+        "version": "",
+        "shortcut": "",
+        "signIn": false,
+        "instructions": "",
+        "url": ""
+      },
+      {
+        "key": "winget:notepad++.notepad++",
+        "operationId": "app:winget:notepad++.notepad++",
+        "name": "Notepad++",
+        "names": [
+          "Notepad++"
+        ],
+        "source": "winget",
+        "packageIdentifier": "Notepad++.Notepad++",
         "method": "winget",
         "kind": "automatic",
         "required": true,
@@ -14278,6 +14306,44 @@ if ($script:WdhMain) {
         "version": "",
         "shortcut": "",
         "signIn": true,
+        "instructions": "",
+        "url": ""
+      },
+      {
+        "key": "winget:sumatrapdf.sumatrapdf",
+        "operationId": "app:winget:sumatrapdf.sumatrapdf",
+        "name": "SumatraPDF",
+        "names": [
+          "SumatraPDF"
+        ],
+        "source": "winget",
+        "packageIdentifier": "SumatraPDF.SumatraPDF",
+        "method": "winget",
+        "kind": "automatic",
+        "required": true,
+        "scope": "either",
+        "version": "",
+        "shortcut": "",
+        "signIn": false,
+        "instructions": "",
+        "url": ""
+      },
+      {
+        "key": "winget:duongdieuphap.imageglass",
+        "operationId": "app:winget:duongdieuphap.imageglass",
+        "name": "ImageGlass",
+        "names": [
+          "ImageGlass"
+        ],
+        "source": "winget",
+        "packageIdentifier": "DuongDieuPhap.ImageGlass",
+        "method": "winget",
+        "kind": "automatic",
+        "required": true,
+        "scope": "unknown",
+        "version": "",
+        "shortcut": "",
+        "signIn": false,
         "instructions": "",
         "url": ""
       },
@@ -14804,7 +14870,7 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
   "format": "windows-deployment-builder/deployment-manifest",
   "manifestVersion": 1,
   "packageVersion": "1.3.0",
-  "packageId": "DE7E3A8CA8CC9199",
+  "packageId": "79B446A37AD1A722",
   "scope": "answerFile",
   "generator": {
     "name": "Windows Deployment Builder",
@@ -14978,19 +15044,6 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
         "requiresAttention": false
       },
       {
-        "displayName": "VLC media player",
-        "packageIdentifier": "VideoLAN.VLC",
-        "source": "winget",
-        "method": "winget",
-        "version": "",
-        "scope": "",
-        "resolution": "verified",
-        "origins": [
-          "core"
-        ],
-        "requiresAttention": false
-      },
-      {
         "displayName": "7-Zip",
         "packageIdentifier": "7zip.7zip",
         "source": "winget",
@@ -15004,8 +15057,21 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
         "requiresAttention": false
       },
       {
-        "displayName": "TeraCopy",
-        "packageIdentifier": "CodeSector.TeraCopy",
+        "displayName": "VLC media player",
+        "packageIdentifier": "VideoLAN.VLC",
+        "source": "winget",
+        "method": "winget",
+        "version": "",
+        "scope": "",
+        "resolution": "verified",
+        "origins": [
+          "core"
+        ],
+        "requiresAttention": false
+      },
+      {
+        "displayName": "Notepad++",
+        "packageIdentifier": "Notepad++.Notepad++",
         "source": "winget",
         "method": "winget",
         "version": "",
@@ -15019,6 +15085,32 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
       {
         "displayName": "Bitwarden",
         "packageIdentifier": "Bitwarden.Bitwarden",
+        "source": "winget",
+        "method": "winget",
+        "version": "",
+        "scope": "",
+        "resolution": "verified",
+        "origins": [
+          "core"
+        ],
+        "requiresAttention": false
+      },
+      {
+        "displayName": "SumatraPDF",
+        "packageIdentifier": "SumatraPDF.SumatraPDF",
+        "source": "winget",
+        "method": "winget",
+        "version": "",
+        "scope": "",
+        "resolution": "verified",
+        "origins": [
+          "core"
+        ],
+        "requiresAttention": false
+      },
+      {
+        "displayName": "ImageGlass",
+        "packageIdentifier": "DuongDieuPhap.ImageGlass",
         "source": "winget",
         "method": "winget",
         "version": "",
@@ -15377,9 +15469,9 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
     {
       "path": "scripts/health/health-config.json",
       "role": "configuration",
-      "size": 8284,
-      "sha256": "7D7927F6A4985E81522740FCEAC40BD428E38A964D7EA80BFCE977332A6D1666",
-      "textSha256": "43E701A9A539DB7094C64ECF2258BEC28F3CE1868ABC5198FECA5B37B619D00B",
+      "size": 9366,
+      "sha256": "0A8568D555DF5CB30A348B76D29636C4C899EBC12B9EC47844B987DB90DA590E",
+      "textSha256": "41360067852C62E4E2E5EA8E0049113A3CEE082D598A143C6921F8390E0ADEE8",
       "embedded": "Deployment\\scripts\\health\\health-config.json"
     },
     {
@@ -15417,17 +15509,17 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
     {
       "path": "scripts/applications/applications-config.json",
       "role": "configuration",
-      "size": 3684,
-      "sha256": "305F78A08745F9DA40DB41BBEB5E3A9C8D08953A9E81A6623DFB6AE68C5569D3",
-      "textSha256": "67C2CA879247FC658BAD2B9596664A115DD273283738120667008FD2CB648AE5",
+      "size": 4287,
+      "sha256": "C6D34CB6741EC0CF358CBCD8B9E18CD7FF6ACFB8F05CA2622B1EEF5F55B03451",
+      "textSha256": "50267E77889A2F1BF049C500F9731A1249CF97DAE032F87BCB058EA2CB94026A",
       "embedded": "Applications\\applications-config.json"
     },
     {
       "path": "scripts/applications/winget-packages.json",
       "role": "configuration",
-      "size": 906,
-      "sha256": "9DADA2560B92A793E82F06A292753E39E7CAB2B75BD0F111C77398740CA022BD",
-      "textSha256": "12BE4D718AF99768DEC932AF9E7EC41E92E9B5BFA2AE5952A61102EF4A1D9A08",
+      "size": 1067,
+      "sha256": "97CA0B8B2C940880FCA585CEC926017B581ED9EFC4B6ECAEA4FBA97582D40183",
+      "textSha256": "FA428A6385DB95AE7108EA6F6C62AF8F818716332C2D21D6408717582B7BDF26",
       "embedded": "Applications\\winget-packages.json"
     },
     {

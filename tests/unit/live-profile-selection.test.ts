@@ -20,7 +20,9 @@ import { generateOk, profile } from './helpers';
 
 const key = (catalogId: string) => entryKey(catalogEntryById(catalogId)!);
 const ref = (catalogId: string) => catalogRef(catalogEntryById(catalogId)!)!;
-const fresh = (): ApplicationsSelection => structuredClone(ownerDefaults().applications.selection);
+// Revision 1 of the built-in profiles: Network Engineer inherits General Developer there, which these
+// inheritance and recommendation rules need (revision 2 has no inheriting built-in profile).
+const fresh = (): ApplicationsSelection => ({ ...structuredClone(ownerDefaults().applications.selection), profileRevision: 1 });
 const keys = (s: ApplicationsSelection) => resolveSelection(s).packages.map((p) => p.key);
 const defaultsOf = (s: ApplicationsSelection, id: string) => new Set(expandProfile(id, allProfiles(s)).map(packageKey));
 
@@ -170,7 +172,8 @@ describe('step 2 checklist, Final Review and the package agree', () => {
     expect(list.items.filter((x) => !x.selected).map((x) => x.key)).toEqual([key('git')]);
     expect(list.items.find((x) => x.key === key('git'))!.excludedBy).toBe('Unticked by you');
     expect(new Set(list.items.map((x) => x.key)).size).toBe(list.items.length);
-    expect(list.items.find((x) => x.key === key('docker-desktop'))!.origin).toBe('Recommended by General Developer, ticked by you');
+    // A new deployment (revision 2): the profile is now called "Developer".
+    expect(list.items.find((x) => x.key === key('docker-desktop'))!.origin).toBe('Recommended by Developer, ticked by you');
     expect(list.items.find((x) => x.key === key('gimp'))!.origin).toBe('Added by you');
     expect(list.items.find((x) => x.key === key('wsl'))!.origin).toContain('Required by Docker Desktop');
     // Sorted by name, so ticking or unticking never moves a row.

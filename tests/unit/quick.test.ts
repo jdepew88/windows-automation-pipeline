@@ -5,10 +5,11 @@ import { exportProfile, ownerDefaults } from '../../src/engine/profiles';
 import { buildDeploymentPackage, buildManifest, updatePolicyPlan } from '../../src/engine/deployment';
 import { ongoingPolicyDeferred } from '../../src/engine/windows-update';
 import { resolveSelection } from '../../src/engine/applications/selection';
-import { BUILTIN_PROFILES } from '../../src/engine/applications/builtin';
+import { BUILTIN_PROFILES, builtinProfiles } from '../../src/engine/applications/builtin';
 import {
   CUSTOMER_TYPES,
   STEPS,
+  customerTypesFor,
   ackKey,
   blockingStep,
   computerNameInput,
@@ -52,13 +53,23 @@ describe('Phase 4.3 defaults', () => {
     expect(BUILTIN_PROFILES.find((x) => x.id === 'core')!.packages.map((x) => x.packageIdentifier)).toEqual(expect.arrayContaining(['Microsoft.VCRedist.2015+.x64', 'Microsoft.VCRedist.2015+.x86']));
   });
 
-  it('the Phase 4.2 profile defaults are unchanged, except RustDesk (Phase 10: optional in Core Essentials)', () => {
-    const defaults = (id: string) => BUILTIN_PROFILES.find((x) => x.id === id)!.packages.map((x) => x.displayName);
-    expect(defaults('gaming')).toEqual(expect.arrayContaining(['Steam', 'Epic Games Launcher']));
-    expect(defaults('developer')).toEqual(expect.arrayContaining(['Git', 'Visual Studio Code', 'Python 3.14', 'Node.js (LTS)']));
+  it('revision 1 (older deployments) keeps the Phase 4.2 defaults, except RustDesk (Phase 10: optional in Core Essentials)', () => {
+    const defaults = (id: string) => builtinProfiles(1).find((x) => x.id === id)!.packages.map((x) => x.displayName);
+    expect(defaults('gaming')).toEqual(['Steam', 'Epic Games Launcher']);
+    expect(defaults('developer')).toEqual(['Git', 'Visual Studio Code', 'Python 3.14', 'Node.js (LTS)']);
     expect(defaults('core')).not.toContain('RustDesk');
-    expect(BUILTIN_PROFILES.find((x) => x.id === 'core')!.optional!.map((x) => x.displayName)).toContain('RustDesk');
-    expect(CUSTOMER_TYPES.map((t) => t.profile)).toEqual(['everyday', 'gaming', 'developer', 'network-engineer', 'music', 'laptop', 'touch']);
+    expect(builtinProfiles(1).find((x) => x.id === 'core')!.optional!.map((x) => x.displayName)).toContain('RustDesk');
+  });
+
+  it('new deployments use the rebuilt profiles (revision 2); Quick Deployment offers every type, older deployments only theirs', () => {
+    const defaults = (id: string) => BUILTIN_PROFILES.find((x) => x.id === id)!.packages.map((x) => x.displayName);
+    expect(ownerDefaults().applications.selection.profileRevision).toBe(2);
+    expect(defaults('gaming')).toEqual(['Steam', 'Epic Games Launcher', 'Battle.net', 'GOG GALAXY', 'Ubisoft Connect', 'Rockstar Games Launcher', 'Discord']);
+    expect(defaults('developer')).toEqual(['Git', 'Visual Studio Code', 'Python 3.14', 'Node.js (LTS)', 'GitHub CLI']);
+    expect(CUSTOMER_TYPES.map((t) => t.profile)).toEqual(['everyday', 'gaming', 'music', 'student-office', 'creator', 'developer', 'network-engineer', 'remote-support', 'laptop', 'touch']);
+    expect(customerTypesFor(ownerDefaults().applications.selection)).toEqual(CUSTOMER_TYPES);
+    const old = { ...ownerDefaults().applications.selection, profileRevision: 1 as const };
+    expect(customerTypesFor(old).map((t) => t.profile)).toEqual(['everyday', 'gaming', 'music', 'creator', 'developer', 'network-engineer', 'laptop', 'touch']);
   });
 });
 

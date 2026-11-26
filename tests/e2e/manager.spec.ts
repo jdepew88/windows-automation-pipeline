@@ -189,7 +189,7 @@ test('profiles stack without duplicates; the selection is saved through the agen
   await expect(combined.locator('[data-combined="winget:obsproject.obsstudio"]')).toHaveCount(1);
   await expect(combined.locator('[data-combined="winget:obsproject.obsstudio"]')).toContainText('Content Creator');
   await tab(page, 'browse').click();
-  await expect(app(page, 'steam')).toContainText('Selected by Gaming');
+  await expect(app(page, 'steam')).toContainText('Selected by Gamer');
   await app(page, 'steam').locator('input').uncheck();
   await expect(app(page, 'steam')).toContainText('Unticked by you');
   await expect.poll(() => JSON.stringify(m.profiles)).toContain('"removed":["winget:valve.steam"]');

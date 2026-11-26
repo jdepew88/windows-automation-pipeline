@@ -5,19 +5,20 @@ import type { Devices } from '../engine/schema/applications';
 import { EDITIONS } from '../data';
 import { resolveIdentity, MAX_COMPUTER_NAME, MAX_USERNAME } from '../engine/naming';
 import { BUILTIN_PROFILES } from '../engine/applications/builtin';
-import { resolveSelection, type SelectionResult } from '../engine/applications/selection';
+import { allProfiles, resolveSelection, type SelectionResult } from '../engine/applications/selection';
 import { deploymentChecklist, effectiveApps, profilePreview, type ChecklistItem } from '../engine/applications/preview';
-import { addPackage, pruneDetached, removePackage } from '../engine/applications/profiles';
+import { addPackage, adoptCurrentProfiles, pruneDetached, removePackage, usesEarlierProfiles } from '../engine/applications/profiles';
+import { CATALOG } from '../engine/applications/catalog';
 import { SETTINGS_BY_PATH } from '../features';
 import { BYPASSES, targetsWindows11 } from '../features/setup';
 import {
-  CUSTOMER_TYPES,
   LAPTOP_PROFILE,
   STEPS,
   ackKey,
   blockingStep,
   computerNameInput,
   considerations,
+  customerTypesFor,
   customizedSettings,
   isTypeSelected,
   locationAllowed,
@@ -37,7 +38,7 @@ import {
   type StepStatus,
 } from '../engine/quick';
 import { appLogo } from './app-icon';
-import { createApplicationsEditor } from './app-selection';
+import { createApplicationsEditor, type ApplicationsEditor } from './app-selection';
 import { profilePreviewView, selectedAppsSummary } from './app-summary';
 import { currentPackage, downloadPackage } from './deployment';
 import { clear, h, patchChildren, render as patch, uid } from './dom';
@@ -73,7 +74,7 @@ const STATUS_LABEL: Record<StepStatus, string> = {
   attention: 'Needs attention',
 };
 const STATUS_ICON: Record<StepStatus, IconName> = { complete: 'checkCircle', defaults: 'check', customized: 'sliders', incomplete: 'info', attention: 'alert' };
-const TYPE_ICON: Record<string, IconName> = { everyday: 'home', gaming: 'gamepad', developer: 'code', 'network-engineer': 'globe', music: 'package', laptop: 'laptop', touch: 'pen' };
+const TYPE_ICON: Record<string, IconName> = { everyday: 'home', gaming: 'gamepad', developer: 'code', 'network-engineer': 'globe', music: 'package', 'student-office': 'file', creator: 'pen', 'remote-support': 'monitor', laptop: 'laptop', touch: 'pen' };
 
 function issueList(issues: Issue[], testid?: string): HTMLElement {
   return h(
@@ -298,6 +299,7 @@ export function renderWizard(ctx: WizardContext): WizardHandle {
 
   // Step 2: computer and customer type ----------------------------------------------------------
   const typeGrid = h('div', { class: 'type-grid', 'data-testid': 'wiz-types' });
+  const typeLegacy = h('div', { class: 'callout', 'data-testid': 'wiz-legacy-profiles', hidden: true });
   const deviceBox = h('div', { class: 'devices wiz-devices', 'data-testid': 'wiz-devices' });
   const deviceNote = h('div', { class: 'device-note', 'aria-live': 'polite', 'data-testid': 'wiz-device-note' });
   const locationBox = h('div', { 'data-testid': 'wiz-location' });
@@ -309,7 +311,8 @@ export function renderWizard(ctx: WizardContext): WizardHandle {
     h(
       'div',
       { class: 'wiz-panel', 'data-step': 'type' },
-      h('p', { class: 'wiz-lead' }, 'Tick everything that fits. Each type adds its default applications; you can still untick or add single apps in the next steps. Built-in profiles are never changed.'),
+      h('p', { class: 'wiz-lead' }, 'Tick every profile that fits: their applications are combined and each is installed once. Review the combined list below, untick what is not needed, or browse the whole catalog to add more. Built-in profiles are never changed.'),
+      typeLegacy,
       typeGrid,
       checklistBox,
       locationBox,
@@ -324,7 +327,8 @@ export function renderWizard(ctx: WizardContext): WizardHandle {
     const focusKey = (document.activeElement as HTMLElement | null)?.dataset?.wizKey;
     const sel = p.applications.selection;
     const r = resolveSelection(sel);
-    const core = BUILTIN_PROFILES.find((x) => x.id === 'core')!;
+    const profiles = allProfiles(sel);
+    const core = profiles.find((x) => x.id === 'core')!;
     // Selecting (the checkbox) and viewing (the button) are separate controls: viewing a profile's
     // applications never ticks or unticks it.
     const card = (profile: string, label: string, hint: string, ico: IconName) => {
@@ -371,7 +375,7 @@ export function renderWizard(ctx: WizardContext): WizardHandle {
     };
     const cards: HTMLElement[] = [];
     cards.push(card('core', 'Core Essentials (every computer)', `${core.packages.map((x) => x.displayName.replace(/ \(.*\)$/, '')).filter((v, i, a) => a.indexOf(v) === i).slice(0, 6).join(', ')} and the Visual C++ runtimes`, 'star'));
-    for (const t of CUSTOMER_TYPES) cards.push(card(t.profile, t.label, t.hint, TYPE_ICON[t.profile] ?? 'layers'));
+    for (const t of customerTypesFor(sel)) cards.push(card(t.profile, t.label, t.hint, TYPE_ICON[t.profile] ?? 'layers'));
     // Saved profiles (this browser's library or imported) are offered next to the built-in types.
     const saved = sel.profiles;
     if (saved.length) {
@@ -380,6 +384,7 @@ export function renderWizard(ctx: WizardContext): WizardHandle {
     }
     // Patched, not rebuilt: the cards stay the same elements, so the page keeps its scroll position.
     patchChildren(typeGrid, cards);
+    renderTypeLegacy(p);
 
     // The combined selection after every ticked profile, device answer and individual change, one
     // checkbox per application. Unticking keeps the profile; it is the same removal as in Applications.
@@ -507,7 +512,34 @@ export function renderWizard(ctx: WizardContext): WizardHandle {
             h('button', { type: 'button', class: 'linkish', 'data-wiz': 'checklist-apps', onclick: () => go('apps') }, 'Choose them in Applications'),
           )
         : null,
+      // The whole shared catalog is always one click away, in Quick Deployment too.
+      h(
+        'p',
+        { class: 'desc', 'data-key': 'checklist-browse' },
+        h('button', { type: 'button', class: 'btn sm', 'data-wiz': 'browse-all-apps', onclick: () => { go('apps'); editor.showAll(); } }, icon('search'), `Browse all ${CATALOG.length} applications`),
+        ' Search by name, publisher or category and tick any app to add it.',
+      ),
     ]);
+  }
+
+  /** An older deployment keeps the earlier built-in profile defaults until the technician adopts the new ones. */
+  function renderTypeLegacy(p: Profile): void {
+    const legacy = usesEarlierProfiles(p.applications.selection);
+    typeLegacy.hidden = !legacy;
+    patchChildren(
+      typeLegacy,
+      legacy
+        ? [
+            icon('info'),
+            h(
+              'span',
+              { 'data-key': 'legacy-text' },
+              'This deployment uses the earlier profile defaults, so its profiles select exactly what they did when it was saved. ',
+              h('button', { type: 'button', class: 'btn sm', 'data-wiz': 'adopt-profile-defaults', 'data-key': 'legacy-adopt', onclick: () => mutate((q) => adoptCurrentProfiles(q.applications.selection)) }, 'Use the new profile defaults'),
+            ),
+          ]
+        : [],
+    );
   }
 
   // Step 3: network ------------------------------------------------------------------------------
@@ -618,7 +650,7 @@ export function renderWizard(ctx: WizardContext): WizardHandle {
 
   // Step 4: applications (the Phase 4.2 editor, catalog and plan only) --------------------------
   const appDef = SETTINGS_BY_PATH.get('applications.selection')!;
-  const editor = createApplicationsEditor(appDef, store, { profiles: false, devices: false, troubleshooting: false, filter: 'relevant' });
+  const editor: ApplicationsEditor = createApplicationsEditor(appDef, store, { profiles: false, devices: false, troubleshooting: false, filter: 'relevant' });
   editor.el.querySelector('.meta')?.remove();
   editor.el.querySelector(':scope > .field-label, :scope > legend')?.remove();
   for (const slot of editor.el.querySelectorAll('[data-issues-for]')) slot.removeAttribute('data-issues-for');
@@ -630,11 +662,12 @@ export function renderWizard(ctx: WizardContext): WizardHandle {
   function updateApps(p: Profile): void {
     clear(appsHeader);
     const r = resolveSelection(p.applications.selection);
-    const names = r.activeProfiles.map((id) => [...BUILTIN_PROFILES, ...p.applications.selection.profiles].find((x) => x.id === id)?.name ?? id);
+    const names = r.activeProfiles.map((id) => allProfiles(p.applications.selection).find((x) => x.id === id)?.name ?? id);
     appsHeader.append(
       h('span', { class: 'desc' }, 'Profiles: '),
       ...names.map((n) => h('span', { class: 'chip static' }, n)),
-      h('button', { type: 'button', class: 'linkish', onclick: () => go('type') }, 'Change computer type'),
+      h('button', { type: 'button', class: 'linkish', onclick: () => go('type') }, 'Change profiles'),
+      h('button', { type: 'button', class: 'linkish', 'data-wiz': 'apps-browse-all', onclick: () => editor.showAll() }, `Browse all ${CATALOG.length} applications`),
       h('button', { type: 'button', class: 'linkish', onclick: () => ctx.openAdvanced('app-profiles') }, 'Saved profiles & import'),
     );
     appsOff.hidden = p.applications.enabled;

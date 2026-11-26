@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { CATALOG, CATALOG_CATEGORIES, CATALOG_EXCLUDED, catalogEntryById, entryKey, methodOf } from '../../src/engine/applications/catalog';
-import { BUILTIN_PROFILES, builtinProfile } from '../../src/engine/applications/builtin';
+import { builtinProfile as anyBuiltin, builtinProfiles } from '../../src/engine/applications/builtin';
 import { removePackage, toggleProfile } from '../../src/engine/applications/profiles';
 import { resolveSelection } from '../../src/engine/applications/selection';
 import { profile } from './helpers';
@@ -32,7 +32,10 @@ function parseCsv(text: string): { winget_package_id: string; application_name: 
 const CSV = parseCsv(csvText);
 const repository = JSON.parse(readFileSync(new URL('../../docs/phase-10-application-manager/winget-verification-2026-10-25.json', import.meta.url), 'utf8')) as { commit: string; results: { id: string; found: boolean; canonicalId?: string }[] };
 
-const fresh = () => profile().applications.selection;
+// The Phase 10 profile tests describe revision 1 of the built-in profiles (frozen for older deployments).
+const BUILTIN_PROFILES = builtinProfiles(1);
+const builtinProfile = (id: string) => anyBuiltin(id, 1);
+const fresh = () => ({ ...profile().applications.selection, profileRevision: 1 as const });
 const ids = (s: ReturnType<typeof fresh>) => resolveSelection(s).packages.map((p) => p.catalog?.id ?? p.key);
 
 describe('the owner inventory (CSV) in the catalog', () => {
@@ -88,7 +91,7 @@ describe('the owner inventory (CSV) in the catalog', () => {
 
 describe('categories are independent of profiles', () => {
   it('no category is named after a profile, and descriptions do not claim profile membership', () => {
-    const profileNames = BUILTIN_PROFILES.map((p) => p.name.toLowerCase());
+    const profileNames = [...builtinProfiles(1), ...builtinProfiles(2)].map((p) => p.name.toLowerCase());
     for (const [id, label] of Object.entries(CATALOG_CATEGORIES)) {
       // Category and profile ids live in separate namespaces ("music" is both); their labels never coincide.
       expect(profileNames, id).not.toContain(label.toLowerCase());
@@ -143,7 +146,7 @@ describe('stackable profiles', () => {
   });
 });
 
-describe('built-in profiles after Phase 10', () => {
+describe('built-in profiles after Phase 10 (revision 1, frozen for older deployments)', () => {
   it('Core Essentials stays small; remote support and power-user tools are optional, never universal', () => {
     const core = builtinProfile('core')!;
     expect(core.packages.map((p) => p.displayName)).toEqual(['Google Chrome', 'VLC media player', '7-Zip', 'TeraCopy', 'Bitwarden', 'Visual C++ Redistributable 2015-2026 (x64)', 'Visual C++ Redistributable 2015-2026 (x86)']);
@@ -197,7 +200,8 @@ describe('maintenance metadata', () => {
   });
 
   it('packages that WinGet upgrades only when named are marked (RequireExplicitUpgrade)', () => {
-    expect(CATALOG.filter((e) => e.upgrade === 'explicit').map((e) => e.id).sort()).toEqual(['discord', 'parsec', 'slack']);
+    // Android Studio, GPT4All and Miniconda (2026-11-26) are RequireExplicitUpgrade in their manifests too.
+    expect(CATALOG.filter((e) => e.upgrade === 'explicit').map((e) => e.id).sort()).toEqual(['android-studio', 'discord', 'gpt4all', 'miniconda', 'parsec', 'slack']);
     for (const e of CATALOG.filter((x) => methodOf(x) === 'manual')) expect(e.upgrade, e.id).toBe('manual');
   });
 

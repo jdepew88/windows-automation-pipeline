@@ -8,7 +8,7 @@ import { AUTOLOGON_WARNING } from '../features/accounts';
 import { BYPASSES, enabledBypasses } from '../features/setup';
 import { SETTINGS_BY_PATH } from '../features';
 import { BUILTIN_PROFILES, UNIVERSAL_PROFILES } from './applications/builtin';
-import { installable, resolveSelection, type SelectionResult } from './applications/selection';
+import { allProfiles, installable, resolveSelection, type SelectionResult } from './applications/selection';
 import { toggleProfile } from './applications/profiles';
 import { applicationsActive, isReviewed } from './applications';
 import { ongoingPolicyDeferred, resolveDrivers } from './windows-update';
@@ -34,16 +34,25 @@ export interface CustomerType {
 }
 
 export const CUSTOMER_TYPES: readonly CustomerType[] = [
-  { profile: 'everyday', label: 'Everyday home user', hint: 'PDF reader; email, calls and cloud storage to choose from' },
-  { profile: 'gaming', label: 'Gamer', hint: 'Steam and Epic Games Launcher; other launchers and Discord to choose from' },
-  { profile: 'developer', label: 'Developer', hint: 'Git, Visual Studio Code, Python and Node.js LTS' },
-  { profile: 'network-engineer', label: 'Network Engineer / Technician', hint: 'The full power-user workstation (includes Developer)' },
-  { profile: 'music', label: 'Music Lover', hint: 'MusicBee library manager; players and editors to choose from' },
+  { profile: 'everyday', label: 'Everyday / Home', hint: 'Zoom, Teams, LibreOffice, Everything and Revo Uninstaller' },
+  { profile: 'gaming', label: 'Gamer', hint: 'Steam, Epic, Battle.net, GOG, Ubisoft, Rockstar and Discord' },
+  { profile: 'music', label: 'Music Lover', hint: 'Spotify, MusicBee, Audacity, mpv.net and Mp3tag' },
+  { profile: 'student-office', label: 'Student / Office', hint: 'LibreOffice, Thunderbird, Teams, PDFsam, Zotero and Anki' },
+  { profile: 'creator', label: 'Content Creator', hint: 'OBS Studio, GIMP, Inkscape, Audacity, HandBrake and ShareX' },
+  { profile: 'developer', label: 'Developer', hint: 'Git, Visual Studio Code, Python, Node.js LTS and GitHub CLI' },
+  { profile: 'network-engineer', label: 'IT Technician / Network Engineer', hint: 'HWiNFO, CrystalDiskInfo, Sysinternals, WinSCP, PuTTY, Wireshark, Rufus, Revo' },
+  { profile: 'remote-support', label: 'Remote Support', hint: 'TeamViewer; RustDesk and AnyDesk as alternatives. Never unattended.' },
   { profile: 'laptop', label: 'Laptop', hint: 'Battery check tool; location services can be allowed' },
   { profile: 'touch', label: 'Touchscreen / 2-in-1', hint: 'Handwritten notes and PDF annotation' },
 ];
 
 for (const t of CUSTOMER_TYPES) if (!BUILTIN_PROFILES.some((p) => p.id === t.profile)) throw new Error(`Customer type refers to unknown profile ${t.profile}`);
+
+/** The customer types a selection can tick: an older deployment (earlier profile defaults) has no Student or Remote Support profile. */
+export const customerTypesFor = (sel: Profile['applications']['selection']): readonly CustomerType[] => {
+  const ids = new Set(allProfiles(sel).map((p) => p.id));
+  return CUSTOMER_TYPES.filter((t) => ids.has(t.profile));
+};
 
 export const LAPTOP_PROFILE = 'laptop';
 
@@ -317,7 +326,7 @@ export function reviewSummary(p: Profile, sel: SelectionResult = resolveSelectio
   const securityChanges = customizedSettings(p, ['security.']);
   const queue = installable(sel);
   const manual = sel.packages.filter((x) => x.resolution === 'manual');
-  const profileName = (pid: string) => [...BUILTIN_PROFILES, ...p.applications.selection.profiles].find((x) => x.id === pid)?.name ?? pid;
+  const profileName = (pid: string) => allProfiles(p.applications.selection).find((x) => x.id === pid)?.name ?? pid;
   return {
     computer: {
       computerName: id.computerName ?? 'Random name chosen by Windows',

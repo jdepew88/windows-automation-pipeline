@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 9,
+  "schemaVersion": 10,
   "profileName": "Owner default",
   "setup": {
     "languageMode": "unattended",
@@ -103,7 +103,8 @@
         "androidTablet": false
       },
       "added": [],
-      "removed": []
+      "removed": [],
+      "profileRevision": 2
     },
     "coordination": "updatesFirst",
     "restartPolicy": "whenRequired",

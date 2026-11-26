@@ -56,12 +56,12 @@ test.describe('Quick Deployment: profile previews', () => {
     const gaming = card(page, 'gaming').locator('input');
     await expect(gaming).not.toBeChecked();
     await expect(viewBtn(page, 'gaming')).toHaveAttribute('aria-expanded', 'false');
-    await expect(viewBtn(page, 'gaming')).toHaveText(/View applications \(2\)/);
+    await expect(viewBtn(page, 'gaming')).toHaveText(/View applications \(7\)/);
     await viewBtn(page, 'gaming').click();
     await expect(viewBtn(page, 'gaming')).toHaveAttribute('aria-expanded', 'true');
     await expect(viewBtn(page, 'gaming')).toHaveAttribute('aria-controls', 'wiz-preview-gaming');
     await expect(preview(page, 'gaming')).toHaveAttribute('role', 'region');
-    expect(await names(preview(page, 'gaming'))).toEqual(['Steam', 'Epic Games Launcher']);
+    expect(await names(preview(page, 'gaming'))).toEqual(['Steam', 'Epic Games Launcher', 'Battle.net', 'GOG GALAXY', 'Ubisoft Connect', 'Rockstar Games Launcher', 'Discord']);
     await expect(preview(page, 'gaming')).toContainText('Viewing does not select it');
     await expect(gaming).not.toBeChecked();
     await expect(wiz(page).locator('.wiz-step[data-step="type"]')).not.toHaveAttribute('data-status', 'customized');
@@ -83,7 +83,7 @@ test.describe('Quick Deployment: profile previews', () => {
     await expect(card(page, 'developer').locator('input')).toBeChecked();
     await expect(card(page, 'developer').locator('input')).toBeFocused();
     // Selecting it keeps the preview open and now describes it as part of the deployment.
-    await expect(preview(page, 'developer')).toContainText('4 apps from this profile');
+    await expect(preview(page, 'developer')).toContainText('5 apps from this profile');
   });
 
   test('switching and combining profiles; shared apps counted once in the combined selection', async ({ page }) => {
@@ -91,26 +91,25 @@ test.describe('Quick Deployment: profile previews', () => {
     await viewBtn(page, 'gaming').click();
     await viewBtn(page, 'network-engineer').click();
     await expect(preview(page, 'gaming')).toBeVisible();
-    await expect(preview(page, 'network-engineer')).toContainText('Git');
-    await expect(preview(page, 'network-engineer').locator('[data-key="winget:git.git"]')).toHaveAttribute('title', /From General Developer/);
-    await expect(preview(page, 'network-engineer').locator('[data-key="winget:microsoft.wsl"]')).toHaveAttribute('title', /Required by Docker Desktop/);
-    await card(page, 'developer').locator('input').check();
+    await expect(preview(page, 'network-engineer')).toContainText('Wireshark');
+    await card(page, 'everyday').locator('input').check();
     await card(page, 'network-engineer').locator('input').check();
     await card(page, 'gaming').locator('input').check();
     // The combined selection is listed under the profiles, one checkbox per application.
     const combined = wiz(page).getByTestId('wiz-checklist-list');
     const count = wiz(page).getByTestId('wiz-app-count');
     const all = await names(combined);
-    expect(all.filter((n) => n === 'Git')).toHaveLength(1);
+    // Revo Uninstaller is a default of Everyday / Home and of IT Technician: listed and installed once.
+    expect(all.filter((n) => n === 'Revo Uninstaller')).toHaveLength(1);
     expect(new Set(all).size).toBe(all.length);
-    // Core Essentials + Gaming + Network Engineer (incl. Developer and WSL). RustDesk is only recommended (Phase 10).
-    await expect(count).toHaveAttribute('data-count', String(7 + 2 + 29));
-    expect(all).toHaveLength(7 + 2 + 29);
+    // Core Essentials (9) + Everyday (5) + IT Technician (8) + Gamer (7), Revo counted once. Remote support is only recommended.
+    await expect(count).toHaveAttribute('data-count', String(9 + 5 + 8 + 7 - 1));
+    expect(all).toHaveLength(9 + 5 + 8 + 7 - 1);
     await expect(combined).not.toContainText('RustDesk');
-    await expect(combined.locator('[data-key="winget:git.git"] label')).toHaveAttribute('title', /General Developer, Network Engineer/);
+    await expect(combined.locator('[data-key="winget:revouninstaller.revouninstaller"] label')).toHaveAttribute('title', /Everyday \/ Home, IT Technician \/ Network Engineer/);
     // Unticking a profile updates the combined view immediately.
     await card(page, 'gaming').locator('input').uncheck();
-    await expect(count).toHaveAttribute('data-count', String(7 + 29));
+    await expect(count).toHaveAttribute('data-count', String(9 + 5 + 8 - 1));
     await expect(combined).not.toContainText('Steam');
   });
 
@@ -126,7 +125,7 @@ test.describe('Quick Deployment: profile previews', () => {
     const steam = preview(page, 'gaming').locator('[data-key="winget:valve.steam"]');
     await expect(steam).toHaveAttribute('data-status', 'excluded');
     await expect(steam).toHaveAttribute('title', /Unticked in this deployment/);
-    await expect(preview(page, 'gaming')).toContainText('1 app from this profile, 1 left out of this deployment');
+    await expect(preview(page, 'gaming')).toContainText('6 apps from this profile, 1 left out of this deployment');
     await toReview(page);
     await expect(summary(page)).not.toContainText('Steam');
     await expect(summary(page)).toContainText('Epic Games Launcher');
@@ -164,14 +163,15 @@ test.describe('Quick Deployment: Final Review application summary', () => {
     await toReview(page);
     const s = summary(page);
     await expect(s).toBeVisible();
-    await expect(wiz(page).getByTestId('review-app-summary-count')).toHaveText('9 applications selected: 9 installed automatically.');
+    // Core Essentials (9) + Gamer (7).
+    await expect(wiz(page).getByTestId('review-app-summary-count')).toHaveText('16 applications selected: 16 installed automatically.');
     expect(await names(wiz(page).getByTestId('review-app-summary-manual'))).toEqual([]);
     const auto = await names(wiz(page).getByTestId('review-app-summary-auto'));
-    expect(auto).toHaveLength(9);
-    expect(auto).toEqual(expect.arrayContaining(['Google Chrome', 'Steam', 'Epic Games Launcher']));
-    // Never the whole catalog: unselected apps are absent.
-    expect(auto).not.toContain('Discord');
-    await expect(s.locator('.app-sum-item')).toHaveCount(9);
+    expect(auto).toHaveLength(16);
+    expect(auto).toEqual(expect.arrayContaining(['Google Chrome', 'Steam', 'Epic Games Launcher', 'Discord']));
+    // Never the whole catalog: unselected apps (here a Gamer recommendation) are absent.
+    expect(auto).not.toContain('Playnite');
+    await expect(s.locator('.app-sum-item')).toHaveCount(16);
     await expect(wiz(page).locator('[data-testid="review-apps"] [data-action="review-edit"]')).toBeVisible();
     const cfg = await readConfig(page);
     expect(cfg.packages.map((x) => x.displayName).sort()).toEqual([...auto].sort());
@@ -207,7 +207,8 @@ test.describe('Quick Deployment: Final Review application summary', () => {
 
 const VIEWS = ['logos', 'grid', 'compact', 'detailed'] as const;
 // Spread through the catalog; GIMP and WhatsApp jumped the page before the fix.
-const APPS = ['whatsapp', 'gimp', 'notepadpp', 'virtualbox'];
+// Notepad++ became a Core Essentials default (2026-11-26); TeraCopy (now optional) takes its place.
+const APPS = ['whatsapp', 'gimp', 'teracopy', 'virtualbox'];
 
 async function openCatalog(page: Page, view: string) {
   await page.evaluate((v) => localStorage.setItem('wdb.catalogView', v), view);

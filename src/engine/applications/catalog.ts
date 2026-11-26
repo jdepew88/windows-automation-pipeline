@@ -33,7 +33,7 @@ export const CATALOG_CATEGORIES = {
   networking: 'Network Tools & Diagnostics',
   remote: 'Remote Access & Streaming',
   downloads: 'Downloads & Transfers',
-  files: 'File Management',
+  files: 'Files, Archives & Backup',
   storage: 'Disk & Storage Utilities',
   usb: 'USB & Imaging Tools',
   utilities: 'System Utilities & Diagnostics',
@@ -81,6 +81,18 @@ export const CONFLICT_GROUPS = {
   'realtime-antivirus': 'Real-time antivirus',
 } as const;
 export type ConflictGroup = keyof typeof CONFLICT_GROUPS;
+
+/**
+ * Tools that do the same job. Unlike a conflict group, selecting several is allowed (a technician may
+ * want both TeamViewer and RustDesk), but the plan says so, and built-in profiles never make two of
+ * them defaults of profiles that are combined. Catalog ids, checked at load.
+ */
+export const OVERLAP_GROUPS = {
+  'remote-support': { label: 'remote-support tools', ids: ['teamviewer', 'rustdesk', 'anydesk', 'chrome-remote-desktop'] },
+  'pdf-reader': { label: 'PDF readers', ids: ['sumatrapdf', 'acrobat-reader'] },
+  'office-suite': { label: 'office suites', ids: ['libreoffice', 'onlyoffice'] },
+} as const satisfies Record<string, { label: string; ids: readonly string[] }>;
+export type OverlapGroup = keyof typeof OVERLAP_GROUPS;
 
 const CatalogEntrySchema = z
   .object({
@@ -218,6 +230,9 @@ const CatalogSchema = z
   });
 
 const PARSED = CatalogSchema.parse(catalogJson);
+for (const g of Object.values(OVERLAP_GROUPS) as { ids: readonly string[] }[]) {
+  for (const id of g.ids) if (!PARSED.entries.some((e) => e.id === id)) throw new Error(`Overlap group refers to unknown catalog id ${id}`);
+}
 export const CATALOG: readonly CatalogEntry[] = PARSED.entries;
 export const CATALOG_EXCLUDED: readonly ExcludedApp[] = PARSED.excluded;
 export const CATALOG_UPDATED: string = PARSED.updated;
@@ -251,12 +266,15 @@ export function exclusionFor(ref: Pick<PackageRef, 'packageIdentifier'>): Exclud
   return CATALOG_EXCLUDED.find((x) => !!x.packageIdentifier && x.packageIdentifier.toLowerCase() === ref.packageIdentifier.toLowerCase());
 }
 
-/** Case-insensitive search over name, description, identifier and category label. */
+/** The text a catalog search looks in: name, publisher, description, identifier and category label. */
+export const searchText = (e: CatalogEntry): string => `${e.displayName} ${e.publisher ?? ''} ${e.description} ${e.packageIdentifier ?? ''} ${CATALOG_CATEGORIES[e.category]}`.toLowerCase();
+
+/** Case-insensitive search (every word must match) over name, publisher, description, identifier and category label. */
 export function searchCatalog(query: string, category: CatalogCategory | '' = ''): CatalogEntry[] {
   const words = query.toLowerCase().split(/\s+/).filter(Boolean);
   return CATALOG.filter((e) => {
     if (category && e.category !== category) return false;
-    const hay = `${e.displayName} ${e.description} ${e.packageIdentifier ?? ''} ${CATALOG_CATEGORIES[e.category]}`.toLowerCase();
+    const hay = searchText(e);
     return words.every((w) => hay.includes(w));
   });
 }

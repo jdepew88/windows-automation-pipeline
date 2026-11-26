@@ -14,7 +14,7 @@ import {
   entryKey,
   methodOf,
 } from '../../src/engine/applications/catalog';
-import { BUILTIN_PROFILES, BUILTIN_REFERENCED, UNIVERSAL_PROFILES, builtinProfile, deviceProfiles, isSelectableProfile } from '../../src/engine/applications/builtin';
+import { BUILTIN_REFERENCED, UNIVERSAL_PROFILES, builtinProfile as currentBuiltin, builtinProfiles, deviceProfiles, isSelectableProfile } from '../../src/engine/applications/builtin';
 import { MSSTORE_ID, WINGET_ID, packageKey } from '../../src/engine/applications/ids';
 import { installable, resolveSelection } from '../../src/engine/applications/selection';
 import {
@@ -44,13 +44,21 @@ const fixture = (name: string) => readFileSync(new URL(`./fixtures/${name}`, imp
 const M1_XML = fixture('m1-owner-default-alex.xml');
 const id = (catalogId: string) => entryKey(catalogEntryById(catalogId)!);
 const ref = (catalogId: string) => catalogRef(catalogEntryById(catalogId)!)!;
-const fresh = (): ApplicationsSelection => structuredClone(ownerDefaults().applications.selection);
+/**
+ * These tests pin revision 1 of the built-in profiles (frozen in profiles-v1.json): the definitions
+ * every deployment and saved profile created before the 2026-11-26 rebuild keeps. Revision 2 is
+ * covered by unified-catalog.test.ts.
+ */
+const BUILTIN_PROFILES = builtinProfiles(1);
+const builtinProfile = (id: string) => currentBuiltin(id, 1);
+const fresh = (): ApplicationsSelection => ({ ...structuredClone(ownerDefaults().applications.selection), profileRevision: 1 });
 const selected = (s: ApplicationsSelection) => resolveSelection(s).packages.map((p) => p.catalog?.id ?? p.key);
 const devices = (d: Partial<Devices>): Devices => ({ phone: 'none', ipad: false, extraIphone: false, androidTablet: false, ...d });
 // Phase 10 (owner's instruction): RustDesk is no longer a Core Essentials default; it is optional there.
 const CORE = ['chrome', 'vlc', '7zip', 'teracopy', 'bitwarden', 'vcredist-x64', 'vcredist-x86'];
 const verification = JSON.parse(fixture('../../../docs/phase-4-2-application-profiles/verification-2026-10-21.json')) as { id: string; source: string; ok: boolean; publisher: string }[];
 const repository = JSON.parse(fixture('../../../docs/phase-10-application-manager/winget-verification-2026-10-25.json')) as { results: { id: string; found: boolean }[] };
+const expansion = JSON.parse(fixture('../../../docs/unified-app-catalog/winget-verification-2026-11-26.json')) as { results: { id: string; canonicalId?: string; found: boolean; allHashed?: boolean }[] };
 
 describe('catalog (Phase 4.2)', () => {
   it('has unique ids and package keys, valid categories, and only https links', () => {
@@ -63,24 +71,34 @@ describe('catalog (Phase 4.2)', () => {
     }
   });
 
-  it('counts: the 115 Phase 4.2 entries (94 WinGet, 11 Store, 4 portable, 6 manual) plus 74 Phase 10 WinGet entries and VMware (manual)', () => {
+  it('counts: Phase 4.2 (94 WinGet, 11 Store, 4 portable, 6 manual), 74 Phase 10 WinGet entries and VMware, and the 99 WinGet entries of 2026-11-26', () => {
     const by = (list: typeof CATALOG, m: string) => list.filter((e) => methodOf(e) === m).length;
+    // Five Phase 4.2 manual entries (RustDesk, FileZilla, FreeFileSync, Spybot, LaunchBox) were rechecked on 2026-11-26.
     const p42 = CATALOG.filter((e) => e.validation.checkedAt === '2026-10-21');
-    expect([p42.length, by(p42, 'winget'), by(p42, 'msstore'), by(p42, 'portable'), by(p42, 'manual'), by(p42, 'vendor')]).toEqual([115, 94, 11, 4, 6, 0]);
+    expect([p42.length, by(p42, 'winget'), by(p42, 'msstore'), by(p42, 'portable'), by(p42, 'manual'), by(p42, 'vendor')]).toEqual([110, 94, 11, 4, 1, 0]);
     const p10 = CATALOG.filter((e) => e.validation.checkedAt === '2026-10-25');
     expect([p10.length, by(p10, 'winget'), by(p10, 'manual')]).toEqual([75, 74, 1]);
-    expect(CATALOG.length).toBe(190);
+    const ex = CATALOG.filter((e) => e.validation.checkedAt === '2026-11-26');
+    expect([ex.length, by(ex, 'winget'), by(ex, 'manual')]).toEqual([104, 99, 5]);
+    expect(ex.filter((e) => methodOf(e) === 'manual').map((e) => e.id).sort()).toEqual(['filezilla', 'freefilesync', 'launchbox', 'rustdesk', 'spybot']);
+    expect(CATALOG.length).toBe(289);
   });
 
   it('every WinGet and Store identifier is one that a recorded verification found (never invented)', () => {
     const found = new Set(verification.filter((v) => v.ok).map((v) => `${v.source}:${v.id}`.toLowerCase()));
     const repo = new Set(repository.results.filter((r) => r.found).map((r) => `winget:${r.id}`.toLowerCase()));
+    // 2026-11-26: exact-case identifiers whose every installer has a SHA-256.
+    const exp = new Set(expansion.results.filter((r) => r.found && r.allHashed).map((r) => `winget:${r.canonicalId}`));
     for (const e of CATALOG.filter((x) => x.packageIdentifier)) {
       const key = `${e.source}:${e.packageIdentifier}`.toLowerCase();
-      // Phase 4.2 entries: winget show (2026-10-21). Phase 10 entries: the WinGet repository (2026-10-25).
-      expect(e.validation.checkedAt === '2026-10-21' ? found.has(key) : repo.has(key), `${e.id} ${e.packageIdentifier}`).toBe(true);
-      // Every WinGet identifier, old or new, is also in the 2026-10-25 repository check.
-      if (e.source === 'winget') expect(repo.has(key), `${e.id} in the 2026-10-25 check`).toBe(true);
+      if (e.validation.checkedAt === '2026-11-26') {
+        expect(exp.has(`winget:${e.packageIdentifier}`), `${e.id} ${e.packageIdentifier} in the 2026-11-26 check`).toBe(true);
+      } else {
+        // Phase 4.2 entries: winget show (2026-10-21). Phase 10 entries: the WinGet repository (2026-10-25).
+        expect(e.validation.checkedAt === '2026-10-21' ? found.has(key) : repo.has(key), `${e.id} ${e.packageIdentifier}`).toBe(true);
+        // Every older WinGet identifier is also in the 2026-10-25 repository check.
+        if (e.source === 'winget') expect(repo.has(key), `${e.id} in the 2026-10-25 check`).toBe(true);
+      }
       expect(e.validation.status, e.id).toBe('verified');
       expect((e.source === 'winget' ? WINGET_ID : MSSTORE_ID).test(e.packageIdentifier!), e.id).toBe(true);
     }
@@ -134,9 +152,14 @@ describe('catalog (Phase 4.2)', () => {
 
   it('owner exclusions are recorded and none of them is a catalog entry', () => {
     const names = CATALOG_EXCLUDED.map((x) => x.name);
-    for (const n of ['Brave', 'Vivaldi', 'Pidgin', 'Dropbox', 'SugarSync', 'Foxit Reader', 'PDF24 Creator', 'CutePDF', 'Ghostscript', 'SumatraPDF', 'Paint.NET', 'Krita', 'IrfanView', 'Greenshot', 'ShareX', 'WinDirStat', 'Apple TV']) {
+    for (const n of ['Brave', 'Vivaldi', 'Pidgin', 'Dropbox', 'SugarSync', 'Foxit Reader', 'PDF24 Creator', 'CutePDF', 'Ghostscript', 'IrfanView', 'WinDirStat', 'Apple TV']) {
       expect(names, n).toContain(n);
       expect(CATALOG.some((e) => e.displayName.toLowerCase().includes(n.toLowerCase())), n).toBe(false);
+    }
+    // 2026-11-26 (owner decision): these five exclusions were lifted and are verified catalog entries now.
+    for (const [n, cid] of [['SumatraPDF', 'sumatrapdf'], ['Paint.NET', 'paint-net'], ['Krita', 'krita'], ['Greenshot', 'greenshot'], ['ShareX', 'sharex']] as const) {
+      expect(names, n).not.toContain(n);
+      expect(catalogEntryById(cid), n).toMatchObject({ displayName: n, source: 'winget', validation: { status: 'verified', checkedAt: '2026-11-26' } });
     }
     // Phase 10: the owner's inventory (2026-10-25) lists Opera and LibreOffice, superseding the earlier exclusions.
     for (const n of ['Opera', 'LibreOffice']) {
@@ -152,7 +175,7 @@ describe('catalog (Phase 4.2)', () => {
   });
 });
 
-describe('built-in profiles', () => {
+describe('built-in profiles, revision 1 (frozen for older deployments)', () => {
   it('are templates: validated, read-only, and only reference packages that exist', () => {
     expect(BUILTIN_PROFILES.map((p) => p.id)).toEqual(['core', 'everyday', 'gaming', 'developer', 'network-engineer', 'music', 'creator', 'workstation', 'apple-devices', 'android-devices', 'laptop', 'touch']);
     expect(BUILTIN_PROFILES.every((p) => p.builtin)).toBe(true);

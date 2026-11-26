@@ -55,17 +55,6 @@
       "method": "winget"
     },
     {
-      "key": "winget:videolan.vlc",
-      "packageIdentifier": "VideoLAN.VLC",
-      "source": "winget",
-      "displayName": "VLC media player",
-      "version": "",
-      "scope": "",
-      "interaction": "unknown",
-      "after": [],
-      "method": "winget"
-    },
-    {
       "key": "winget:7zip.7zip",
       "packageIdentifier": "7zip.7zip",
       "source": "winget",
@@ -77,10 +66,21 @@
       "method": "winget"
     },
     {
-      "key": "winget:codesector.teracopy",
-      "packageIdentifier": "CodeSector.TeraCopy",
+      "key": "winget:videolan.vlc",
+      "packageIdentifier": "VideoLAN.VLC",
       "source": "winget",
-      "displayName": "TeraCopy",
+      "displayName": "VLC media player",
+      "version": "",
+      "scope": "",
+      "interaction": "unknown",
+      "after": [],
+      "method": "winget"
+    },
+    {
+      "key": "winget:notepad++.notepad++",
+      "packageIdentifier": "Notepad++.Notepad++",
+      "source": "winget",
+      "displayName": "Notepad++",
       "version": "",
       "scope": "",
       "interaction": "unknown",
@@ -92,6 +92,28 @@
       "packageIdentifier": "Bitwarden.Bitwarden",
       "source": "winget",
       "displayName": "Bitwarden",
+      "version": "",
+      "scope": "",
+      "interaction": "unknown",
+      "after": [],
+      "method": "winget"
+    },
+    {
+      "key": "winget:sumatrapdf.sumatrapdf",
+      "packageIdentifier": "SumatraPDF.SumatraPDF",
+      "source": "winget",
+      "displayName": "SumatraPDF",
+      "version": "",
+      "scope": "",
+      "interaction": "unknown",
+      "after": [],
+      "method": "winget"
+    },
+    {
+      "key": "winget:duongdieuphap.imageglass",
+      "packageIdentifier": "DuongDieuPhap.ImageGlass",
+      "source": "winget",
+      "displayName": "ImageGlass",
       "version": "",
       "scope": "",
       "interaction": "unknown",

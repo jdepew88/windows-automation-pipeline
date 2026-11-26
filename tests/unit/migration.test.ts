@@ -245,8 +245,9 @@ describe('migration profiles (review -> named profile on top of a base profile)'
     ]);
 
   it('builds an expanded Network Engineer profile; the built-in profile is never changed', () => {
-    const before = structuredClone(builtinProfile('network-engineer'));
-    const p = profile();
+    // Revision 1 (an older deployment): Network Engineer includes General Developer there.
+    const before = structuredClone(builtinProfile('network-engineer', 1));
+    const p = profile((x) => (x.applications.selection.profileRevision = 1));
     const i = inv();
     const items = matchInventory(i);
     const d = defaultDecisions(items);
@@ -264,7 +265,7 @@ describe('migration profiles (review -> named profile on top of a base profile)'
     expect(r.profile.excluded).toEqual(['winget:wiresharkfoundation.wireshark']);
     expect(r.manualAdded).toBe(1);
     expect(p.additionalSoftware.items.at(-1)).toMatchObject({ id: `migration-${byName('Contoso Field Tool').id}`, execution: 'manual', name: 'Contoso Field Tool' });
-    expect(builtinProfile('network-engineer')).toEqual(before);
+    expect(builtinProfile('network-engineer', 1)).toEqual(before);
     const keys = resolveSelection(p.applications.selection).packages.map((x) => x.key);
     expect(keys).toContain('winget:git.git');
     expect(keys).toContain('winget:example.tool');

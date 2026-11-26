@@ -2,9 +2,9 @@ import '../styles.css';
 import './manager.css';
 import { ApplicationsSelectionSchema, NO_DEVICES, type AppProfile, type ApplicationsSelection } from '../engine/schema/applications';
 import { CATALOG, CATALOG_CATEGORIES, catalogRef, entryKey, methodOf, type CatalogCategory, type CatalogEntry, type InstallMethod } from '../engine/applications/catalog';
-import { BUILTIN_PROFILES } from '../engine/applications/builtin';
-import { addPackage, createProfile, deleteProfile, exportAppProfiles, importAppProfiles, removePackage, renameProfile, resetOverrides, saveAsNewProfile, toggleProfile } from '../engine/applications/profiles';
-import { allProfiles, expandProfile, resolveSelection, type SelectionResult } from '../engine/applications/selection';
+import { CURRENT_PROFILE_REVISION, builtinProfiles } from '../engine/applications/builtin';
+import { addPackage, adoptCurrentProfiles, createProfile, deleteProfile, exportAppProfiles, importAppProfiles, removePackage, renameProfile, resetOverrides, saveAsNewProfile, toggleProfile, usesEarlierProfiles } from '../engine/applications/profiles';
+import { allProfiles, expandProfile, resolveSelection, selectionRevision, type SelectionResult } from '../engine/applications/selection';
 import { packageKey } from '../engine/applications/ids';
 import {
   AVAILABILITY_LABELS, MANAGER_NAME, MANAGER_PROFILES_FORMAT, RESULT_LABELS, STATE_LABELS, bulkRemovable, catalogEntryForPackage, commandLine, installPreview, isSuccess,
@@ -40,7 +40,8 @@ const TABS: { id: Tab; label: string }[] = [
 const METHOD_LABELS: Record<InstallMethod, string> = { winget: 'WinGet', msstore: 'Microsoft Store', portable: 'Portable (WinGet)', vendor: 'Publisher installer', manual: 'Manual installer' };
 const ZIP_URL = 'downloads/windows-deployment-app-manager.zip';
 
-const emptySelection = (): ApplicationsSelection => ({ profiles: [], selectedProfiles: [], devices: { ...NO_DEVICES }, added: [], removed: [] });
+// The manager always browses with the current built-in profiles.
+const emptySelection = (): ApplicationsSelection => ({ profiles: [], selectedProfiles: [], devices: { ...NO_DEVICES }, added: [], removed: [], profileRevision: CURRENT_PROFILE_REVISION });
 
 const ui = {
   tab: 'browse' as Tab,
@@ -786,8 +787,16 @@ function profiles(): (HTMLElement | null)[] {
   const overrides = ui.sel.added.length + ui.sel.removed.length;
   return [
     h('p', {}, 'Profiles stack: tick several and each application is selected once, showing every profile that chose it. Built-in profiles never change; your changes are kept as additions and removals, or saved as your own profile. Changing a profile never removes installed software.'),
+    usesEarlierProfiles(ui.sel)
+      ? h(
+          'p',
+          { class: 'mgr-notice', 'data-testid': 'mgr-legacy-profiles' },
+          'This selection was saved before the built-in profiles were rebuilt, so its profiles still select what they did then. ',
+          btn('Use the new profile defaults', { class: 'btn sm', 'data-action': 'mgr-adopt-profiles', onclick: () => { if (confirm('Use the new built-in profile defaults? Your ticked profiles and individual changes stay; installed software is not changed.')) { adoptCurrentProfiles(ui.sel); changed(); } } }),
+        )
+      : null,
     h('h2', {}, 'Built-in profiles'),
-    h('ul', { class: 'mgr-profiles' }, BUILTIN_PROFILES.map((p) => card(p, false))),
+    h('ul', { class: 'mgr-profiles' }, builtinProfiles(selectionRevision(ui.sel)).map((p) => card(p, false))),
     h('h2', {}, 'Your profiles'),
     ui.sel.profiles.length ? h('ul', { class: 'mgr-profiles' }, ui.sel.profiles.map((p) => card(p, true))) : h('p', { class: 'muted' }, 'None yet.'),
     h(
