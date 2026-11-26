@@ -11,7 +11,7 @@ import { HealthSchema } from './health';
  *
  * Bump {@link SCHEMA_VERSION} and add a migration in `migrations.ts` for any breaking change.
  */
-export const SCHEMA_VERSION = 8;
+export const SCHEMA_VERSION = 9;
 
 export const ScriptTypeSchema = z.enum(['ps1', 'cmd', 'reg', 'vbs']);
 export type ScriptType = z.infer<typeof ScriptTypeSchema>;
@@ -51,6 +51,26 @@ export const BloatwareActionSchema = z.enum(['keep', 'remove', 'untouched']);
 export type BloatwareAction = z.infer<typeof BloatwareActionSchema>;
 
 const bool = z.boolean();
+
+/** Schema 9: Office LTSC volume-licensed products this builder can install (or none). */
+export const OFFICE_PRODUCTS = ['none', 'ltsc2021Standard', 'ltsc2021ProPlus', 'ltsc2024Standard', 'ltsc2024ProPlus'] as const;
+export const OfficeProductSchema = z.enum(OFFICE_PRODUCTS);
+export type OfficeProduct = z.infer<typeof OfficeProductSchema>;
+
+/**
+ * Schema 9: what the activation stage does for one product.
+ *   none       nothing (default)
+ *   microsoft  Microsoft licensing: digital license, product key, KMS or Active Directory
+ *   manual     the technician activates by other means and confirms; WDB only checks the result
+ */
+export const ActivationActionSchema = z.enum(['none', 'microsoft', 'manual']);
+export type ActivationAction = z.infer<typeof ActivationActionSchema>;
+
+/** A KMS host name or IPv4 address with an optional port; empty = DNS auto-discovery. */
+export const KmsHostSchema = z
+  .string()
+  .max(253)
+  .regex(/^$|^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?(:[0-9]{1,5})?$/, 'Use a host name or IPv4 address, optionally with :port.');
 
 export const ProfileSchema = z
   .object({
@@ -191,6 +211,35 @@ export const ProfileSchema = z
         enabled: bool,
         lanAccess: bool,
         port: z.number().int(),
+      })
+      .strict(),
+
+    /**
+     * Schema 9: optional Microsoft Office LTSC (volume licensed), installed by its own SYSTEM stage
+     * with the Office Deployment Tool after the WinGet applications. Never part of an application
+     * profile: only this choice installs it.
+     */
+    office: z
+      .object({
+        product: OfficeProductSchema,
+        /** Adds <RemoveMSI /> (removes Windows Installer Office 2016 and earlier). Never implied. */
+        removeMsiOffice: bool,
+      })
+      .strict(),
+
+    /**
+     * Schema 9: activation preferences, independent for Windows and Office, carried out (or handed to
+     * the technician) only at the end of the deployment. No product key is ever stored here: keys
+     * are typed by the technician into the recovery tool when the activation stage asks for them.
+     */
+    activation: z
+      .object({
+        windows: ActivationActionSchema,
+        windowsMethod: z.enum(['digitalLicense', 'productKey', 'kms']),
+        windowsKmsHost: KmsHostSchema,
+        office: ActivationActionSchema,
+        officeMethod: z.enum(['kms', 'mak', 'activeDirectory']),
+        officeKmsHost: KmsHostSchema,
       })
       .strict(),
 

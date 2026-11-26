@@ -8,6 +8,7 @@ import * as privacy from './privacy';
 import * as updates from './updates';
 import * as windowsUpdate from './windows-update';
 import * as applications from './applications';
+import * as office from './office';
 import * as additionalSoftware from './additional-software';
 import * as migration from './migration';
 import * as drivers from './drivers';
@@ -86,6 +87,7 @@ export const ALL_SETTINGS: SettingDef[] = [
   ...updates.settings,
   ...windowsUpdate.settings,
   ...applications.settings,
+  ...office.settings,
   ...additionalSoftware.settings,
   ...migration.settings,
   ...drivers.settings,
@@ -114,6 +116,7 @@ export const VALIDATORS: ((p: Profile, issues: Issue[]) => void)[] = [
   updates.validate,
   windowsUpdate.validate,
   applications.validate,
+  office.validate,
   additionalSoftware.validate,
   migration.validate,
   drivers.validate,
@@ -126,4 +129,4 @@ export const VALIDATORS: ((p: Profile, issues: Issue[]) => void)[] = [
   advancedXml.validate,
 ];
 
-export { setup, accounts, security, privacy, updates, windowsUpdate, applications, additionalSoftware, migration, drivers, health, system, explorer, taskbar, desktop, start, personalization, bloatware, virtualization, wifi, scripts, advancedXml, output };
+export { setup, accounts, security, privacy, updates, windowsUpdate, applications, office, additionalSoftware, migration, drivers, health, system, explorer, taskbar, desktop, start, personalization, bloatware, virtualization, wifi, scripts, advancedXml, output };

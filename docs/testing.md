@@ -101,6 +101,9 @@ Unit test coverage by acceptance criterion:
     after `npx playwright install firefox`).
 
   See [phase-9-deployment-verification-health/testing.md](phase-9-deployment-verification-health/testing.md).
+- **Office LTSC and activation (schema 9)**: `office.test.ts`, `Office.Tests.ps1` (in `npm run test:ps`),
+  `office.spec.ts` and the Office installer in `Acl.Tests.ps1`; see
+  [office-ltsc-and-activation.md](office-ltsc-and-activation.md).
 - **Phase 4.3 (Quick Deployment, update policy timing, Wi-Fi provisioning, catalog layouts)**:
   `quick.test.ts`, `quick.spec.ts`, the new `Deployment.Tests.ps1` scenarios and `Wifi.Tests.ps1`
   (also run by `npm run test:ps`); see

@@ -43,6 +43,7 @@ $targets = @(
     @{ Label = 'Install-UpdateEngine.ps1 Protect-WdbDataRoot'; Path = Join-Path $pkgScripts 'windows-update\Install-UpdateEngine.ps1'; Name = 'Protect-WdbDataRoot' }
     @{ Label = 'Install-ApplicationEngine.ps1 Protect-WdbDataRoot'; Path = Join-Path $pkgScripts 'applications\Install-ApplicationEngine.ps1'; Name = 'Protect-WdbDataRoot' }
     @{ Label = 'Install-DriverEngine.ps1 Protect-WdbDataRoot'; Path = Join-Path $src 'drivers\scripts\Install-DriverEngine.ps1'; Name = 'Protect-WdbDataRoot' }
+    @{ Label = 'Install-OfficeEngine.ps1 Protect-WdbDataRoot'; Path = Join-Path $src 'office\scripts\Install-OfficeEngine.ps1'; Name = 'Protect-WdbDataRoot' }
     @{ Label = 'ApplicationEngine.ps1 Protect-WdaFolder'; Path = Join-Path $pkgScripts 'applications\ApplicationEngine.ps1'; Name = 'Protect-WdaFolder' }
 )
 $i = 0

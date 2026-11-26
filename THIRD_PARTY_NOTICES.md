@@ -34,3 +34,17 @@ SOFTWARE.
 
 Runtime: `zod` (MIT) and `@xmldom/xmldom` (MIT). Development tools are listed in `package.json` and
 are not shipped in the built app, except for the code Vite bundles.
+
+## jdepew88/download_office_ltsc
+
+`src/engine/office/vendor/2024/*` is copied unchanged from <https://github.com/jdepew88/download_office_ltsc>,
+branch `2024`, commit `3e2817194aaef0856c5ce8653763c77e24cb3e72`; `src/engine/office/vendor/2021/*` is adapted
+from branch `2021`, commit `548c49142589a9c7c093a4724b9cee1045c0eb2b` (see `docs/office-ltsc-and-activation.md`).
+
+```
+MIT License
+
+Copyright (c) 2024 Joe Depew
+```
+
+The full MIT license text is the same as above.

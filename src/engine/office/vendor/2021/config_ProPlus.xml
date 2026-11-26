@@ -1,0 +1,23 @@
+<Configuration ID="2121dee6-0d3a-48c2-82c4-e6383e031316">
+  <!--
+    Office LTSC Professional Plus 2021 (volume licensed), 64-bit, for Windows Deployment Builder.
+    From jdepew88/download_office_ltsc, branch 2021, commit 548c49142589a9c7c093a4724b9cee1045c0eb2b
+    (config_ProPlus.xml), with three changes so the file holds no key and installing never activates or removes anything:
+      - removed <Property Name="AUTOACTIVATE" Value="1" />: activation is a separate, optional stage;
+      - no <RemoveMSI />: added at run time only when "remove MSI Office" was chosen explicitly;
+      - no PIDKEY: volume licensed Office installs with Microsoft's Generic Volume License Key (GVLK)
+        by default (learn.microsoft.com/office/volume-license-activation/gvlks), so no key is in this file.
+  -->
+  <Add OfficeClientEdition="64" Channel="PerpetualVL2021">
+    <Product ID="ProPlus2021Volume">
+      <Language ID="en-us" />
+      <Language ID="MatchOS" />
+      <ExcludeApp ID="Lync" />
+    </Product>
+  </Add>
+  <Property Name="SharedComputerLicensing" Value="0" />
+  <Property Name="FORCEAPPSHUTDOWN" Value="FALSE" />
+  <Property Name="DeviceBasedLicensing" Value="0" />
+  <Property Name="SCLCacheOverride" Value="0" />
+  <Updates Enabled="TRUE" />
+</Configuration>

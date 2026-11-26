@@ -5,6 +5,7 @@ import { APP_MARKER, APP_RESULT_FILE, APP_TASK_NAME, applicationsActive } from '
 import { FINAL_STATUSES, MARKER_STATUSES } from './applications/results';
 import { DRIVER_FINAL_STATUSES, DRIVER_MARKER_STATUSES, DRIVER_STAGE } from './drivers/contract';
 import { DRIVER_TASK_NAME, driversActive } from './drivers';
+import { OFFICE_FINAL_STATUSES, OFFICE_STAGE, OFFICE_TASK_NAME, officeActive } from './office';
 
 /**
  * The orchestration contract (orchestration.json): which stages exist, in which order, who runs
@@ -75,6 +76,24 @@ export function orchestrationContract(p: Profile) {
           ? 'Inspection before Windows Update (and network bootstrap from verified offline packages), resolution only after the Windows Update stage is final and restarted. Installing a driver and scheduling a restart both require the install lock.'
           : 'Off for this deployment: no driver is installed or changed.',
       },
+      // Schema 9: only when Office is selected, so other contracts keep their shape.
+      ...(officeActive(p)
+        ? [
+            {
+              id: OFFICE_STAGE.id,
+              order: 4,
+              enabled: true,
+              implemented: true,
+              runsAs: 'SYSTEM',
+              task: `${TASK_PATH}${OFFICE_TASK_NAME}`,
+              result: OFFICE_STAGE.resultFile,
+              marker: OFFICE_STAGE.marker,
+              finalStatuses: [...OFFICE_FINAL_STATUSES],
+              waitsFor: [...(p.windowsUpdate.enabled ? ['windowsUpdate'] : []), ...(applicationsActive(p) ? ['applications'] : [])],
+              note: 'Installs Office LTSC under the install lock after the applications, then verifies it. Never activates it.',
+            },
+          ]
+        : []),
     ],
   };
 }

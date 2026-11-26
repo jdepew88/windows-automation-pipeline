@@ -28,6 +28,8 @@ import { sha256, utf8 } from './sha256';
 import { createZip } from './zip';
 import { mediaBlock } from '../media';
 import { EMBEDDED_HEALTH_FILES, HEALTH_DIR, HEALTH_ENGINE_VERSION, HEALTH_REPORT_DIR, HEALTH_REPORT_FILE, HEALTH_SHORTCUT, HEALTH_TOOL, healthActive, healthAssets } from '../health';
+import { OFFICE_CATALOG, OFFICE_ENGINE_VERSION, OFFICE_FINAL_STATUSES, OFFICE_INSTALLER_FILE, OFFICE_REPOSITORY, OFFICE_SOURCES, OFFICE_STAGE, OFFICE_TASK_NAME, embeddedOfficeFile, officeActive, officeAssets, officeConfiguration, officeProduct } from '../office';
+import { activationActive, activationFiles, activationNeedsTechnician, activationPlan } from '../activation';
 
 /**
  * Phase 4: the USB deployment package and the first-boot orchestrator.
@@ -85,7 +87,7 @@ export const OUTCOME_CODES = {
 export const STATE_SCHEMAS = { deploymentState: 2, applicationState: 2, applicationResult: 2, deploymentReport: 2 } as const;
 
 /** True when the package carries the recovery tool. */
-export const recoveryToolIncluded = (p: Profile) => p.applications.recovery.includeRecoveryTool;
+export const recoveryToolIncluded = (p: Profile) => p.applications.recovery.includeRecoveryTool || activationNeedsTechnician(p);
 
 /** Orchestrator limits (in addition to each engine's own limits, which are unchanged). */
 export const ORCHESTRATOR_LIMITS = {
@@ -125,7 +127,7 @@ const crlf = (s: string): string => s.replace(/\r?\n/g, '\r\n');
 
 /** True when the answer file starts the post-installation deployment. */
 export function deploymentActive(p: Profile): boolean {
-  return p.windowsUpdate.enabled || applicationsActive(p) || driversActive(p);
+  return p.windowsUpdate.enabled || applicationsActive(p) || driversActive(p) || officeActive(p) || activationActive(p);
 }
 
 const ORCHESTRATOR_SCRIPTS: { path: string; source: string; description: string }[] = [
@@ -235,6 +237,18 @@ export function packageFiles(p: Profile): PackageFile[] {
       embedded: embeddedAppFiles(p).includes(a.name) ? `Applications\\${a.name}` : null,
     });
   }
+  // Schema 9: the optional Office LTSC stage (README in the package only) and the activation stage.
+  for (const a of officeAssets(p)) {
+    const path = `scripts/office/${a.name}`;
+    files.push({
+      path,
+      content: a.content,
+      role: a.name.endsWith('.json') || a.name.endsWith('.xml') ? 'configuration' : a.name.endsWith('.txt') ? 'documentation' : 'engine',
+      description: a.description,
+      embedded: embeddedOfficeFile(a.name) ? embeddedDeploymentPath(path) : null,
+    });
+  }
+  for (const f of activationFiles(p)) files.push({ path: f.path, content: f.content, role: 'orchestrator', description: f.description, embedded: embeddedDeploymentPath(f.path) });
   const orch = orchestrationAsset(p);
   files.push({ path: 'config/orchestration.json', content: orch.content, role: 'configuration', description: orch.description, embedded: embeddedDeploymentPath('config/orchestration.json') });
   files.push({ path: 'profiles/windows-settings.json', content: crlf(exportProfile(p)), role: 'profile', description: 'This configuration as a builder profile (passwords removed); re-import it in the website', embedded: null });
@@ -273,7 +287,9 @@ export function deadlineHours(p: Profile): number {
   const apps = applicationsActive(p) ? p.applications.waitForUpdatesHours + p.applications.maxRuntimeHours : 0;
   // Phase 8: the driver stage adds its own resolution time after Windows Update.
   const drivers = driversActive(p) ? driverTiming(p).maxRuntimeHours - driverTiming(p).waitForUpdatesHours : 0;
-  return wu + apps + drivers + ORCHESTRATOR_LIMITS.graceHours;
+  // Schema 9: Office after the applications: two installer runs of at most 4 hours, plus waiting for the network.
+  const office = officeActive(p) ? 2 * 4 + 6 : 0;
+  return wu + apps + drivers + office + ORCHESTRATOR_LIMITS.graceHours;
 }
 
 export function buildManifest(p: Profile) {
@@ -298,7 +314,7 @@ export function buildManifest(p: Profile) {
     packageId,
     /** package: the ZIP's manifest (every file); answerFile: the copy embedded in the answer file (embedded files only). */
     scope: 'package' as 'package' | 'answerFile',
-    generator: { name: 'Windows Deployment Builder', orchestrator: DEPLOYMENT_VERSION, windowsUpdateEngine: ENGINE_VERSION, applicationEngine: APP_ENGINE_VERSION, ...(drv ? { driverEngine: DRIVER_ENGINE_VERSION } : {}), ...(healthActive(p) ? { healthEngine: HEALTH_ENGINE_VERSION } : {}) },
+    generator: { name: 'Windows Deployment Builder', orchestrator: DEPLOYMENT_VERSION, windowsUpdateEngine: ENGINE_VERSION, applicationEngine: APP_ENGINE_VERSION, ...(drv ? { driverEngine: DRIVER_ENGINE_VERSION } : {}), ...(healthActive(p) ? { healthEngine: HEALTH_ENGINE_VERSION } : {}), ...(officeActive(p) ? { officeEngine: OFFICE_ENGINE_VERSION } : {}) },
     dataRoot: DATA_ROOT,
     packageFolder: PACKAGE_DIR,
     /** Orchestrator 1.2.0: the progress window at sign-in and the read-only deployment monitor. */
@@ -406,9 +422,10 @@ export function buildManifest(p: Profile) {
             note: 'Hardware-aware driver provisioning is off for this deployment. Nothing installs or changes drivers.',
             requiresInternet: false,
           },
+      ...(officeActive(p) ? [officeStage(p)] : []),
       {
         id: 'finalization',
-        order: 4,
+        order: officeActive(p) ? 5 : 4,
         name: 'Report and cleanup',
         enabled: deploymentActive(p),
         implemented: true,
@@ -436,6 +453,9 @@ export function buildManifest(p: Profile) {
       removedFromProfiles: sel.removed.map((x) => x.key),
       additionalSoftware: p.additionalSoftware.items.map((i) => ({ name: i.name, execution: i.execution })),
     },
+    // Schema 9: only when Office or activation is part of the deployment, so other manifests keep their shape.
+    ...(officeActive(p) ? { office: officeManifest(p) } : {}),
+    ...(activationActive(p) ? { activation: activationPlan(p) } : {}),
     // Phase 6: only when the deployment migrates applications or restores settings.
     ...(migrationActive(p) ? { migration: migrationManifest(p) } : {}),
     // Phase 4.3: only when the policy is deferred, so other manifests keep their Phase 4 shape.
@@ -451,7 +471,7 @@ export function buildManifest(p: Profile) {
       neverRetriedAutomatically: ['Permanent', 'Integrity', 'Policy', 'User', 'Manual'],
       stateSchemas: STATE_SCHEMAS,
       outcomeCodes: OUTCOME_CODES,
-      actions: recoveryToolIncluded(p) ? ['Status', 'PendingActions', 'RetryFailed', 'Retry', 'Resume', 'ExportDiagnostics'] : [],
+      actions: recoveryToolIncluded(p) ? ['Status', 'PendingActions', 'RetryFailed', 'Retry', 'Resume', 'ExportDiagnostics', ...(activationActive(p) ? ['Activate', 'CheckActivation'] : [])] : [],
     },
     restartPolicy: {
       windowsUpdate: { maxReboots: wu.maxReboots, rebootWarningSeconds: wu.rebootWarningSeconds },
@@ -515,6 +535,52 @@ export function buildManifest(p: Profile) {
 }
 
 export type DeploymentManifest = ReturnType<typeof buildManifest>['manifest'];
+
+/** Schema 9: the Office LTSC stage, after the applications (and Windows Update). */
+function officeStage(p: Profile) {
+  const waits = [...(p.windowsUpdate.enabled ? ['windowsUpdate'] : []), ...(applicationsActive(p) ? ['applications'] : [])];
+  return {
+    id: OFFICE_STAGE.id,
+    order: 4,
+    name: `Microsoft Office (${officeProduct(p)!.displayName})`,
+    enabled: true,
+    implemented: true,
+    context: 'SYSTEM',
+    launcher: `scripts/office/${OFFICE_INSTALLER_FILE}`,
+    task: { path: TASK_PATH, name: OFFICE_TASK_NAME },
+    result: OFFICE_STAGE.resultFile,
+    status: OFFICE_STAGE.statusFile,
+    marker: OFFICE_STAGE.marker,
+    finalStatuses: [...OFFICE_FINAL_STATUSES],
+    waitsFor: waits,
+    note: 'Installs the selected Office LTSC edition with the Office Deployment Tool after Windows Update and the applications, then verifies it. It never activates Office and never removes another Office unless that was chosen.',
+    requiresInternet: true,
+  };
+}
+
+/** Schema 9: what is installed, from which pinned sources; never a key (the 2021 XML holds only Microsoft's public KMS client key). */
+function officeManifest(p: Profile) {
+  const info = officeProduct(p)!;
+  const cfg = officeConfiguration(info);
+  return {
+    enabled: true,
+    product: info.id,
+    version: info.version,
+    edition: info.edition,
+    displayName: info.displayName,
+    productId: info.productId,
+    channel: info.channel,
+    currentLtsc: !OFFICE_CATALOG[info.id].legacy,
+    removeMsiOffice: p.office.removeMsiOffice,
+    activates: false,
+    source: {
+      repository: OFFICE_REPOSITORY,
+      installer: { branch: OFFICE_SOURCES[2024].branch, commit: OFFICE_SOURCES[2024].commit, path: 'Install_Office.ps1' },
+      configuration: { branch: OFFICE_SOURCES[info.version].branch, commit: OFFICE_SOURCES[info.version].commit, path: cfg.upstreamPath, shippedAs: cfg.name, adaptedByWdb: !cfg.unchanged },
+    },
+    result: OFFICE_STAGE.resultFile,
+  };
+}
 
 /**
  * Embeds the orchestrator and the manifest, and makes Initialize-Deployment.ps1 the last

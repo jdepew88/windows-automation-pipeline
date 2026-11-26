@@ -417,7 +417,7 @@ function Read-WddManifest {
         if ($f.textSha256 -and [string] $f.textSha256 -notmatch '^[0-9A-F]{64}$') { throw "Deployment manifest has an invalid text hash for $($f.path)." }
         if ($f.embedded -and -not (Test-WddRelativePath $f.embedded)) { throw "Deployment manifest lists an unsafe embedded path: $($f.embedded)" }
     }
-    $known = 'staging', 'windowsUpdate', 'applications', 'drivers', 'finalization'
+    $known = 'staging', 'windowsUpdate', 'applications', 'drivers', 'office', 'finalization'
     foreach ($s in @($m.stages)) {
         if ($s.id -notin $known) { throw "Deployment manifest lists an unknown stage: $($s.id)" }
         foreach ($k in 'launcher', 'result', 'status') { if ($s.ContainsKey($k) -and $s[$k] -and -not (Test-WddRelativePath $s[$k])) { throw "Stage $($s.id) has an unsafe $k path." } }
@@ -497,7 +497,7 @@ function Exit-WddMutex { param($Mutex) if ($Mutex) { try { $Mutex.ReleaseMutex()
 function Get-WddStage { param([hashtable] $Manifest, [string] $Id) @($Manifest.stages) | Where-Object { $_.id -eq $Id } | Select-Object -First 1 }
 
 # Phase 8: the driver stage is an engine stage when the manifest enables it (older manifests never do).
-function Get-WddEngineStages { param([hashtable] $Manifest) @(@($Manifest.stages) | Where-Object { $_.id -in 'windowsUpdate', 'applications', 'drivers' -and $_.enabled -and ($_.id -ne 'drivers' -or $_['launcher']) } | Sort-Object { [int] $_.order }) }
+function Get-WddEngineStages { param([hashtable] $Manifest) @(@($Manifest.stages) | Where-Object { $_.id -in 'windowsUpdate', 'applications', 'drivers', 'office' -and $_.enabled -and ($_.id -ne 'drivers' -or $_['launcher']) } | Sort-Object { [int] $_.order }) }
 
 <# Phase 8: the driver engine's flag for a computer that is offline because no network adapter has a driver. #>
 function Get-WddNetworkDriverFlag {
@@ -629,6 +629,7 @@ $script:WaitingPhases = @{
     WaitingForRetry     = 'Waiting before the next retry.'
     WaitingForUpdates   = 'Waiting for Windows Update to finish first.'
     WaitingForDrivers   = 'Waiting for the driver stage to finish first.'
+    WaitingForApplications = 'Waiting for the WinGet applications to finish first.'
     WaitingForRestart   = 'Waiting for the scheduled restart.'
     WaitingForReboot    = 'Waiting for a restart.'
     RebootDeferred      = 'A restart is needed; it waits until the current installation has finished.'
@@ -636,7 +637,7 @@ $script:WaitingPhases = @{
     Error               = 'The engine hit an unexpected error and tries again at its next run.'
 }
 # Phases during which Windows Update legitimately works for a long time without a new status.
-$script:LongPhases = @('Downloading', 'Installing', 'WaitingForInstaller', 'Rebooting', 'ResettingComponents')
+$script:LongPhases = @('Downloading', 'Installing', 'WaitingForInstaller', 'Rebooting', 'ResettingComponents', 'PreparingTool')
 
 <#
     Orchestrator 1.2.0: what a stage is doing, in words, from evidence only (the engine's own
@@ -739,12 +740,33 @@ function Get-WddSnapshot {
         monitorLastRunUtc = $(if ($State) { $State['lastMonitorUtc'] } else { $null })
         monitorOverdue  = (Test-WddMonitorOverdue $Manifest $State)
     }
+    # Schema 9: the activation stage (only when the deployment has one).
+    if ($Manifest.ContainsKey('activation') -and $Manifest.activation) { $snap.activation = Get-WddActivationView $Manifest $State }
     if ($snap.monitorOverdue) {
         $snap.needsAttention = @(@($snap.needsAttention) + @("Deployment monitor: it has not run since $(if ($snap.monitorLastRunUtc) { Format-WddAge $snap.monitorLastRunUtc } else { 'the deployment started' }) (it should run every $(Get-WddMonitorInterval $Manifest) minutes as SYSTEM, task \WindowsDeploymentBuilder\Deployment). Nothing is finished or restarted automatically until it runs again; run Resume-Deployment.ps1 as administrator."))
     }
     Set-WddSnapshotOutcome $snap $State
     $snap.condition = Get-WddCondition $snap $State
     return $snap
+}
+
+<#
+    Schema 9: activation per target for the progress window, the LAN monitor and status.json:
+    status and a message, never a key (not even the five characters Windows itself reports).
+    Before the activation step ran: Waiting (requested) or NotRequested.
+#>
+function Get-WddActivationView {
+    param([hashtable] $Manifest, $State)
+    $act = $(if ($State -and $State['activation'] -is [hashtable]) { $State['activation'] } else { $null })
+    $o = [ordered]@{}
+    foreach ($k in 'windows', 'office') {
+        $plan = $Manifest.activation[$k]
+        $e = $(if ($act) { $act[$k] } else { $null })
+        if ($e) { $o[$k] = [ordered]@{ action = [string] $plan['action']; status = [string] $e['status']; verified = [bool] $e['verified']; message = ([string] $e['message'] -replace '\s*\(key ending [^)]*\)', '') } }
+        elseif ([string] $plan['action'] -eq 'none') { $o[$k] = [ordered]@{ action = 'none'; status = 'NotRequested'; verified = $false; message = 'No activation was requested.' } }
+        else { $o[$k] = [ordered]@{ action = [string] $plan['action']; status = 'Waiting'; verified = $false; message = 'Runs at the end of the deployment, after every stage and any restart.' } }
+    }
+    return $o
 }
 
 <# The most recent progress any stage reported (ISO 8601), or $null. #>

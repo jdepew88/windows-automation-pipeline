@@ -16,6 +16,8 @@ import { choicesOf } from './form';
 import { PACKAGE_FILE_NAME } from '../engine/deployment';
 import { currentPackage, downloadPackage } from './deployment';
 import { considerations } from '../engine/quick';
+import { officeProduct } from '../engine/office';
+import { activationActive, activationSummary } from '../engine/activation';
 
 export function labelFor(path: string): string {
   const exact = SETTINGS_BY_PATH.get(path);
@@ -161,6 +163,22 @@ function summaryTiles(p: Profile, result: GenerateResult): Tile[] {
       value: p.additionalSoftware.items.length ? `${p.additionalSoftware.items.length} installer(s), listed for manual follow-up` : 'None',
       badge: [String(p.additionalSoftware.items.length), p.additionalSoftware.items.length ? 'warn' : 'muted'],
     },
+    {
+      key: 'office',
+      label: 'Software: Microsoft Office',
+      icon: 'package',
+      value: officeProduct(p)?.displayName ?? 'Not installed',
+      detail: officeProduct(p) ? `Volume licensed, installed after the applications${p.office.removeMsiOffice ? '; removes MSI Office first' : ''}` : undefined,
+      badge: officeProduct(p) ? [officeProduct(p)!.legacy ? 'Legacy' : 'Current LTSC', officeProduct(p)!.legacy ? 'warn' : 'ok'] : ['None', 'muted'],
+    },
+    {
+      key: 'activation',
+      label: 'Activation',
+      icon: 'shieldCheck',
+      value: activationActive(p) ? `Windows: ${activationSummary(p).windows}` : 'No activation action',
+      detail: activationActive(p) && officeProduct(p) ? `Office: ${activationSummary(p).office}` : undefined,
+      badge: activationActive(p) ? ['At the end', 'info'] : ['None', 'muted'],
+    },
     { key: 'wifi', label: 'Wi-Fi', icon: 'wifi', value: choice('wifi.mode', p.wifi.mode) },
     {
       key: 'bloatware',
@@ -208,6 +226,7 @@ const ASSET_CATEGORIES: { group: DeploymentAsset['group']; title: string; icon: 
   { group: 'windows-update', title: 'Windows Update scripts & configuration', icon: 'cloudDown', empty: 'None. Windows Update automation is off.' },
   { group: 'drivers', title: 'Hardware & driver engine', icon: 'chip', empty: 'None. Hardware-aware driver provisioning is off.' },
   { group: 'applications', title: 'WinGet provisioning scripts & JSON', icon: 'package', empty: 'None. No applications or Additional Software are selected.' },
+  { group: 'office', title: 'Microsoft Office LTSC stage', icon: 'package', empty: 'None. Office is not installed by this deployment.' },
   { group: 'orchestration', title: 'Orchestration contracts', icon: 'layers', empty: 'None. Generated with the engines.' },
 ];
 

@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 8,
+  "schemaVersion": 9,
   "profileName": "Owner default",
   "setup": {
     "languageMode": "unattended",
@@ -162,6 +162,18 @@
     "enabled": true,
     "lanAccess": false,
     "port": 8765
+  },
+  "office": {
+    "product": "none",
+    "removeMsiOffice": false
+  },
+  "activation": {
+    "windows": "none",
+    "windowsMethod": "digitalLicense",
+    "windowsKmsHost": "",
+    "office": "none",
+    "officeMethod": "kms",
+    "officeKmsHost": ""
   },
   "system": {
     "disableFastStartup": true,

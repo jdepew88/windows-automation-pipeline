@@ -11,7 +11,7 @@
           Verifies <dataRoot>\Package, registers the monitor task again and runs it once. Use it
           after a stalled stage was fixed, after the deadline passed, or if the monitor task was
           removed. A finished deployment is reopened (its report is rewritten at the end).
-      Resume-Deployment.ps1 -RestartStage windowsUpdate|applications|drivers
+      Resume-Deployment.ps1 -RestartStage windowsUpdate|applications|drivers|office
           Runs that engine's installer again. The installer archives the previous run and starts
           a new one; work already done is detected (installed updates are not offered again,
           installed applications are reported AlreadyInstalled). If the installer does not
@@ -24,7 +24,7 @@
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('', 'windowsUpdate', 'applications', 'drivers')]
+    [ValidateSet('', 'windowsUpdate', 'applications', 'drivers', 'office')]
     [string] $RestartStage = '',
     [switch] $Status
 )

@@ -8363,7 +8363,7 @@ function Read-WddManifest {
         if ($f.textSha256 -and [string] $f.textSha256 -notmatch '^[0-9A-F]{64}$') { throw "Deployment manifest has an invalid text hash for $($f.path)." }
         if ($f.embedded -and -not (Test-WddRelativePath $f.embedded)) { throw "Deployment manifest lists an unsafe embedded path: $($f.embedded)" }
     }
-    $known = 'staging', 'windowsUpdate', 'applications', 'drivers', 'finalization'
+    $known = 'staging', 'windowsUpdate', 'applications', 'drivers', 'office', 'finalization'
     foreach ($s in @($m.stages)) {
         if ($s.id -notin $known) { throw "Deployment manifest lists an unknown stage: $($s.id)" }
         foreach ($k in 'launcher', 'result', 'status') { if ($s.ContainsKey($k) -and $s[$k] -and -not (Test-WddRelativePath $s[$k])) { throw "Stage $($s.id) has an unsafe $k path." } }
@@ -8443,7 +8443,7 @@ function Exit-WddMutex { param($Mutex) if ($Mutex) { try { $Mutex.ReleaseMutex()
 function Get-WddStage { param([hashtable] $Manifest, [string] $Id) @($Manifest.stages) | Where-Object { $_.id -eq $Id } | Select-Object -First 1 }
 
 # Phase 8: the driver stage is an engine stage when the manifest enables it (older manifests never do).
-function Get-WddEngineStages { param([hashtable] $Manifest) @(@($Manifest.stages) | Where-Object { $_.id -in 'windowsUpdate', 'applications', 'drivers' -and $_.enabled -and ($_.id -ne 'drivers' -or $_['launcher']) } | Sort-Object { [int] $_.order }) }
+function Get-WddEngineStages { param([hashtable] $Manifest) @(@($Manifest.stages) | Where-Object { $_.id -in 'windowsUpdate', 'applications', 'drivers', 'office' -and $_.enabled -and ($_.id -ne 'drivers' -or $_['launcher']) } | Sort-Object { [int] $_.order }) }
 
 &lt;# Phase 8: the driver engine's flag for a computer that is offline because no network adapter has a driver. #&gt;
 function Get-WddNetworkDriverFlag {
@@ -8575,6 +8575,7 @@ $script:WaitingPhases = @{
     WaitingForRetry     = 'Waiting before the next retry.'
     WaitingForUpdates   = 'Waiting for Windows Update to finish first.'
     WaitingForDrivers   = 'Waiting for the driver stage to finish first.'
+    WaitingForApplications = 'Waiting for the WinGet applications to finish first.'
     WaitingForRestart   = 'Waiting for the scheduled restart.'
     WaitingForReboot    = 'Waiting for a restart.'
     RebootDeferred      = 'A restart is needed; it waits until the current installation has finished.'
@@ -8582,7 +8583,7 @@ $script:WaitingPhases = @{
     Error               = 'The engine hit an unexpected error and tries again at its next run.'
 }
 # Phases during which Windows Update legitimately works for a long time without a new status.
-$script:LongPhases = @('Downloading', 'Installing', 'WaitingForInstaller', 'Rebooting', 'ResettingComponents')
+$script:LongPhases = @('Downloading', 'Installing', 'WaitingForInstaller', 'Rebooting', 'ResettingComponents', 'PreparingTool')
 
 &lt;#
     Orchestrator 1.2.0: what a stage is doing, in words, from evidence only (the engine's own
@@ -8685,12 +8686,33 @@ function Get-WddSnapshot {
         monitorLastRunUtc = $(if ($State) { $State['lastMonitorUtc'] } else { $null })
         monitorOverdue  = (Test-WddMonitorOverdue $Manifest $State)
     }
+    # Schema 9: the activation stage (only when the deployment has one).
+    if ($Manifest.ContainsKey('activation') -and $Manifest.activation) { $snap.activation = Get-WddActivationView $Manifest $State }
     if ($snap.monitorOverdue) {
         $snap.needsAttention = @(@($snap.needsAttention) + @("Deployment monitor: it has not run since $(if ($snap.monitorLastRunUtc) { Format-WddAge $snap.monitorLastRunUtc } else { 'the deployment started' }) (it should run every $(Get-WddMonitorInterval $Manifest) minutes as SYSTEM, task \WindowsDeploymentBuilder\Deployment). Nothing is finished or restarted automatically until it runs again; run Resume-Deployment.ps1 as administrator."))
     }
     Set-WddSnapshotOutcome $snap $State
     $snap.condition = Get-WddCondition $snap $State
     return $snap
+}
+
+&lt;#
+    Schema 9: activation per target for the progress window, the LAN monitor and status.json:
+    status and a message, never a key (not even the five characters Windows itself reports).
+    Before the activation step ran: Waiting (requested) or NotRequested.
+#&gt;
+function Get-WddActivationView {
+    param([hashtable] $Manifest, $State)
+    $act = $(if ($State -and $State['activation'] -is [hashtable]) { $State['activation'] } else { $null })
+    $o = [ordered]@{}
+    foreach ($k in 'windows', 'office') {
+        $plan = $Manifest.activation[$k]
+        $e = $(if ($act) { $act[$k] } else { $null })
+        if ($e) { $o[$k] = [ordered]@{ action = [string] $plan['action']; status = [string] $e['status']; verified = [bool] $e['verified']; message = ([string] $e['message'] -replace '\s*\(key ending [^)]*\)', '') } }
+        elseif ([string] $plan['action'] -eq 'none') { $o[$k] = [ordered]@{ action = 'none'; status = 'NotRequested'; verified = $false; message = 'No activation was requested.' } }
+        else { $o[$k] = [ordered]@{ action = [string] $plan['action']; status = 'Waiting'; verified = $false; message = 'Runs at the end of the deployment, after every stage and any restart.' } }
+    }
+    return $o
 }
 
 &lt;# The most recent progress any stage reported (ISO 8601), or $null. #&gt;
@@ -9635,7 +9657,7 @@ function Step-WddStageActivity {
 # ------------------------------------------------------------------------------------------------
 
 # Stage phases during which a restart interrupts nothing (the engine is not working; it continues after the boot).
-$script:RestartSafePhases = @('RebootDeferred', 'WaitingForRestart', 'WaitingForReboot', 'WaitingForLock', 'WaitingForNetwork', 'WaitingForUpdates', 'WaitingForDrivers', 'Error')
+$script:RestartSafePhases = @('RebootDeferred', 'WaitingForRestart', 'WaitingForReboot', 'WaitingForLock', 'WaitingForNetwork', 'WaitingForUpdates', 'WaitingForDrivers', 'WaitingForApplications', 'Error')
 
 function Get-WddOrchestratorLimit {
     param([hashtable] $Manifest, [string] $Name, [int] $Default)
@@ -9947,6 +9969,10 @@ function Invoke-WddMonitor {
                 $hold = -not $since -or ((Get-WddNow) - $since).TotalMinutes -lt (Get-WddOrchestratorLimit $manifest 'restartWaitMinutes' 120)
             }
             if ($hold) { return 'WaitingForRestart' }
+            # Schema 9: the optional activation stage, last, once (never holds the deployment).
+            if (Get-Command Step-WddActivation -ErrorAction SilentlyContinue) {
+                try { [void] (Step-WddActivation $manifest $Paths $state $snapshot $restart); $snapshot.activation = Get-WddActivationView $manifest $state } catch { Write-WddLog "Activation: $($_.Exception.Message)" 'WARN' }
+            }
             return (Invoke-WddFinalize $manifest $Paths $state $snapshot)
         }
         if ($deadlineReached) {
@@ -10063,6 +10089,11 @@ function Format-WddStatus {
         $l.Add("Monitor checks : $(if ($s.monitorLastRunUtc) { "last $(Format-WddAge $s.monitorLastRunUtc)" } else { 'not run yet' }), every $(Get-WddMonitorInterval $Manifest) min$(if ($s.monitorOverdue) { ' - OVERDUE (see NEEDS ATTENTION)' })")
     }
     if ($script:WddTaskVisibility -eq 'Limited') { $l.Add('Task view      : this window runs without administrator rights, so task problems are taken from the deployment monitor.') }
+    # Schema 9: activation, reported apart from the installation results (never a key).
+    if ($s.Contains('activation') -and $s.activation) {
+        $l.Add("Activation     : Windows $($s.activation['windows']['status']); Office $($s.activation['office']['status'])")
+        foreach ($k in 'windows', 'office') { $e = $s.activation[$k]; if ($e -and [string] $e['status'] -notin 'NotRequested', 'Waiting') { $l.Add("  $($k.PadRight(13)): $($e['message'])") } }
+    }
     if ($s.Contains('recovering') -and $s.recovering) { $l.Add('Recovering     : Windows restarted or a stage was recovered; unfinished tasks are being checked.') }
     foreach ($m in Format-WddMonitorLines $Manifest $Paths) { $l.Add($m) }
     $l.Add('')
@@ -10190,7 +10221,7 @@ if ($script:ShowMain) {
           Verifies &lt;dataRoot&gt;\Package, registers the monitor task again and runs it once. Use it
           after a stalled stage was fixed, after the deadline passed, or if the monitor task was
           removed. A finished deployment is reopened (its report is rewritten at the end).
-      Resume-Deployment.ps1 -RestartStage windowsUpdate|applications|drivers
+      Resume-Deployment.ps1 -RestartStage windowsUpdate|applications|drivers|office
           Runs that engine's installer again. The installer archives the previous run and starts
           a new one; work already done is detected (installed updates are not offered again,
           installed applications are reported AlreadyInstalled). If the installer does not
@@ -10203,7 +10234,7 @@ if ($script:ShowMain) {
 #&gt;
 [CmdletBinding()]
 param(
-    [ValidateSet('', 'windowsUpdate', 'applications', 'drivers')]
+    [ValidateSet('', 'windowsUpdate', 'applications', 'drivers', 'office')]
     [string] $RestartStage = '',
     [switch] $Status
 )
@@ -10329,6 +10360,9 @@ $script:CompleteArgs = @{ Preview = [bool] $Preview; Finish = [bool] $Finish }
 # Phase 4.3: present only when the ongoing update policy is applied after the initial updates.
 $script:PolicyScript = Join-Path $PSScriptRoot 'Set-UpdatePolicy.ps1'
 if (Test-Path -LiteralPath $script:PolicyScript) { . $script:PolicyScript }
+# Schema 9: present when the deployment activates Windows or Office (functions only).
+$script:ActivationScript = Join-Path $PSScriptRoot 'Activation.ps1'
+if (Test-Path -LiteralPath $script:ActivationScript) { . $script:ActivationScript }
 # Phase 9: present when the deployment verifies itself (functions only).
 $script:HealthScript = Join-Path $PSScriptRoot '..\health\DeploymentHealth.ps1'
 if (Test-Path -LiteralPath $script:HealthScript) { . $script:HealthScript -Mode Library }
@@ -10595,8 +10629,33 @@ function New-WddReport {
     $recheck = $(if ($State['updateRecheck'] -is [hashtable]) { $State['updateRecheck'] } else { $null })
     if ($recheck -and $recheck['status'] -eq 'Remaining') { foreach ($u in @($recheck['remaining']) | Where-Object { $_ }) { $remaining += "Windows Update: $((@($u['kbs']) -join ', ')) $($u['title']) is still offered after the deployment's last update run." } }
     if ($recheck -and $recheck['status'] -eq 'CheckFailed') { $remaining += "Windows Update: $($recheck['message'])" }
+    # Schema 9: Office LTSC (installation) and activation, reported separately.
+    $officeReport = $null
+    $off = @($Snapshot.stages | Where-Object { $_.id -eq 'office' }) | Select-Object -First 1
+    if ($off) {
+        $r = $off.result
+        $officeReport = [ordered]@{ product = $(if ($Manifest.ContainsKey('office')) { [string] $Manifest.office.displayName } else { $off.name }); state = $off.state; status = $off.status; detail = $off.detail
+                                    verified = [bool] ($r -and $r['verified']); alreadyInstalled = [bool] ($r -and $r['alreadyInstalled']); category = $(if ($r) { [string] $r['category'] } else { '' })
+                                    version = $(if ($r -and $r['installed']) { [string] $r['installed']['version'] } else { '' }); attempts = $(if ($r) { @($r['attempts']).Count } else { 0 })
+                                    source = $(if ($Manifest.ContainsKey('office')) { $Manifest.office.source } else { $null }); activated = $false; log = (Join-Path $Paths.Root 'Office\logs') }
+        if ($off.state -ne 'Final') { $incomplete += "Microsoft Office ($($off.state))" }
+        elseif ($off.status -eq 'Failed') { $errors += "Microsoft Office was not installed: $($off.detail)" }
+        elseif ($off.status -in 'CompletedWithFollowUp', 'Offline') { $remaining += "Microsoft Office: $($off.detail)" }
+    }
+    $activationReport = $null
+    if ($Manifest.ContainsKey('activation') -and $Manifest.activation) {
+        $act = $(if ($State['activation'] -is [hashtable]) { $State.activation } else { @{} })
+        $activationReport = [ordered]@{ windows = $act['windows']; office = $act['office']; plan = $Manifest.activation; log = (Join-Path $Paths.Root 'Activation\activation.log'); containsSecrets = $false }
+        foreach ($k in 'windows', 'office') {
+            $e = $act[$k]
+            if (-not $e) { if ([string] $Manifest.activation[$k]['action'] -ne 'none') { $remaining += "Activation ($k): not attempted; the deployment ended before its activation step." }; continue }
+            # No key characters in the remaining tasks (they also reach the LAN monitor's final view).
+            $note = [string] $e['message'] -replace '\s*\(key ending [A-Za-z0-9]*\)', ''
+            if ([string] $e['status'] -in 'AwaitingTechnician', 'Failed', 'Deferred', 'Blocked', 'Unavailable') { $remaining += "Activation ($k): $($e['status']). $note" }
+        }
+    }
     $outcome = Get-WddDeploymentOutcome @{ status = 'Completed'; overall = $Overall; message = $Reason } $null
-    [ordered]@{
+    $report = [ordered]@{
         format             = 'windows-deployment-builder/deployment-report'
         reportVersion      = 2
         overall            = $Overall
@@ -10630,6 +10689,9 @@ function New-WddReport {
         recoveryCommands   = $(if ($hasTool) { $recoveryCommands } else { $null })
         restoration        = $restorationReport
     }
+    if ($officeReport) { $report.office = $officeReport; $report.logs['office'] = (Join-Path $Paths.Root 'Office\logs\engine.log') }
+    if ($activationReport) { $report.activation = $activationReport; $report.logs['activation'] = $activationReport.log }
+    return $report
 }
 
 function Format-WddReport {
@@ -10717,6 +10779,26 @@ function Format-WddReport {
         foreach ($x in @($Report.restartHistory)) { $l.Add("  $($x.bootUtc)  $(if ($x.planned) { "planned ($($x.by)$(if ($x.reason) { ": $($x.reason)" }))" } else { 'UNEXPECTED (not scheduled by the deployment)' })") }
         $l.Add('')
     }
+    if ($Report.Contains('office') -and $Report.office) {
+        $o = $Report.office
+        $l.Add("Microsoft Office: $($o.product)")
+        $l.Add("  Installation: $($o.status) ($($o.state))$(if ($o.verified) { ', verified' })$(if ($o.alreadyInstalled) { ', was already installed' })$(if ($o.version) { ", version $($o.version)" }). $($o.detail)")
+        if ($o.source) { $l.Add("  Installer: $($o.source.repository) commit $($o.source.installer.commit); configuration from branch $($o.source.configuration.branch) commit $($o.source.configuration.commit)") }
+        $l.Add('  Installing Office does not activate it; see Activation.')
+        $l.Add('')
+    }
+    if ($Report.Contains('activation') -and $Report.activation) {
+        $a = $Report.activation
+        $l.Add('Activation (separate from the installation results)')
+        foreach ($k in 'windows', 'office') {
+            $e = $a[$k]
+            $label = $(if ($k -eq 'windows') { 'Windows' } else { 'Office ' })
+            if ($e) { $l.Add("  ${label}: $($e['status'])$(if ($e['verified']) { ' (verified by the licensing service)' }). $($e['message'])") }
+            elseif ([string] $a.plan[$k]['action'] -ne 'none') { $l.Add("  ${label}: not attempted.") }
+            else { $l.Add("  ${label}: no activation was requested.") }
+        }
+        $l.Add('')
+    }
     if ($Report.Contains('restartCoordination') -and $Report.restartCoordination) {
         $rc = $Report.restartCoordination
         $l.Add('Restart required by Windows (at the end of the deployment)')
@@ -10797,6 +10879,9 @@ function Complete-WddDeployment {
     if ($overall -eq 'Succeeded' -and (@($State.deviceReport.unresolved).Count -or -not $State.deviceReport.checked)) { $overall = 'CompletedWithFollowUp' }
     # A restart Windows still needs, or updates Windows still offers, is a follow-up too.
     if ($overall -eq 'Succeeded' -and ((Test-WddRestartOutstanding $State) -or ($State['updateRecheck'] -is [hashtable] -and [string] $State['updateRecheck']['status'] -in 'Remaining', 'CheckFailed'))) { $overall = 'CompletedWithFollowUp' }
+    # Schema 9: activation that needs a person is a follow-up, never an installation failure.
+    if ($overall -eq 'Succeeded' -and (Get-Command Test-WddActivationAttention -ErrorAction SilentlyContinue) -and (Test-WddActivationAttention $State)) { $overall = 'CompletedWithFollowUp' }
+    if ($overall -eq 'Succeeded' -and $Manifest.ContainsKey('activation') -and $Manifest.activation -and $State['activation'] -isnot [hashtable]) { $overall = 'CompletedWithFollowUp' }
     $reason = if ($DeadlineReached -and -not $Snapshot.allFinal) { "The deployment deadline ($($State.deadlineUtc)) passed before every stage finished." } elseif (@($Snapshot.stages).Count -eq 0) { 'No post-installation stage was enabled.' } else { 'Every enabled stage has a final result.' }
     $report = New-WddReport $Manifest $Paths $State $Snapshot $overall $reason
     Write-WddReport $report $Paths
@@ -11230,6 +11315,24 @@ function Get-WddMonitorStatus {
     } else {
         $m.drivers = [ordered]@{ state = [string] $snap.drivers.state; condition = 'finished'; activity = 'The driver stage is not part of this deployment; Windows Update installs drivers it offers.' }
     }
+    # Schema 9: Office LTSC (product, phase, verified) and activation (status per target, no key).
+    if ($stage.ContainsKey('office')) {
+        $s = $stage['office']
+        $o = ConvertTo-WddStageModel $s
+        $o.product = Protect-WddText $(if ($Manifest.ContainsKey('office') -and $Manifest.office) { [string] $Manifest.office.displayName } else { $s.name }) 80
+        $o.verified = [bool] ($s.state -eq 'Final' -and $s.result -is [hashtable] -and $s.result['verified'])
+        $o.detail = Protect-WddText $s.detail
+        # The Office Deployment Tool does not report bytes: the phase is shown, never a percentage.
+        $o.progress = 'unavailable'
+        $m.office = $o
+    }
+    if ($snap.Contains('activation') -and $snap.activation) {
+        $m.activation = [ordered]@{}
+        foreach ($k in 'windows', 'office') {
+            $e = $snap.activation[$k]
+            if ($e) { $m.activation[$k] = [ordered]@{ action = [string] $e['action']; status = [string] $e['status']; verified = [bool] $e['verified']; message = Protect-WddText $e['message'] } }
+        }
+    }
     # Devices: the final Device Manager check, or the driver stage's own assessment while it runs.
     $devices = @()
     if ($state.ContainsKey('deviceReport') -and $state.deviceReport -is [hashtable]) { $devices = @(@($state.deviceReport['unresolved']) | Where-Object { $_ -is [hashtable] }) }
@@ -11436,6 +11539,8 @@ $script:DashboardHtml = @'
   &lt;section class="card" aria-labelledby="wu-h"&gt;&lt;h2 id="wu-h"&gt;Windows Update&lt;/h2&gt;&lt;div id="wu"&gt;&lt;/div&gt;&lt;/section&gt;
   &lt;section class="card" aria-labelledby="apps-h"&gt;&lt;h2 id="apps-h"&gt;Applications&lt;/h2&gt;&lt;div id="apps"&gt;&lt;/div&gt;&lt;/section&gt;
   &lt;section class="card" aria-labelledby="drv-h"&gt;&lt;h2 id="drv-h"&gt;Drivers and devices&lt;/h2&gt;&lt;div id="drv"&gt;&lt;/div&gt;&lt;/section&gt;
+  &lt;section id="officeCard" class="card" hidden aria-labelledby="off-h"&gt;&lt;h2 id="off-h"&gt;Microsoft Office&lt;/h2&gt;&lt;div id="off"&gt;&lt;/div&gt;&lt;/section&gt;
+  &lt;section id="activationCard" class="card" hidden aria-labelledby="actv-h"&gt;&lt;h2 id="actv-h"&gt;Activation&lt;/h2&gt;&lt;div id="actv"&gt;&lt;/div&gt;&lt;/section&gt;
   &lt;section id="finalCard" class="card wide" hidden aria-labelledby="final-h"&gt;&lt;h2 id="final-h"&gt;Final results&lt;/h2&gt;&lt;div id="final"&gt;&lt;/div&gt;&lt;/section&gt;
   &lt;section class="card wide" aria-labelledby="act-h"&gt;&lt;h2 id="act-h"&gt;Recent activity&lt;/h2&gt;&lt;ol id="activity" class="activity"&gt;&lt;/ol&gt;&lt;/section&gt;
 &lt;/main&gt;
@@ -11528,6 +11633,21 @@ $script:DashboardJs = @'
       kv(ap, [['Selected', a.selected], ['Installed', a.installed], ['Remaining', a.remaining], ['Failed', a.failed], ['Need a person', a.needsPerson]]);
       if (a.lastError) { text(ap, a.lastError, 'error'); }
     } else { text(ap, 'Not part of this deployment.'); }
+
+    var off = $('off'); clear(off); $('officeCard').hidden = !s.office;
+    if (s.office) {
+      var o = s.office;
+      text(off, o.activity);
+      kv(off, [['Edition', o.product], ['Phase', o.phase], ['Verified', o.state === 'Final' ? (o.verified ? 'Yes' : 'No') : ''], ['Download progress', o.phase === 'Downloading' ? 'progress unavailable' : '']]);
+      if (o.state === 'Final' &amp;&amp; o.detail) { text(off, o.detail); }
+      if (o.lastError) { text(off, 'Most recent error: ' + o.lastError, 'error'); }
+    }
+    var av = $('actv'); clear(av); $('activationCard').hidden = !s.activation;
+    if (s.activation) {
+      [['Windows', s.activation.windows], ['Office', s.activation.office]].forEach(function (p) {
+        if (p[1]) { kv(av, [[p[0], p[1].status + (p[1].verified ? ' (verified)' : '')]]); text(av, p[1].message); }
+      });
+    }
 
     var dv = $('drv'); clear(dv);
     if (s.drivers) {
@@ -11673,8 +11793,10 @@ if ($script:MonMain) {
 #&gt;
 [CmdletBinding()]
 param(
-    [ValidateSet('Menu', 'Status', 'PendingActions', 'RetryFailed', 'Retry', 'Resume', 'RestoreSettings', 'AddDrivers', 'ExportDiagnostics', 'Verify')]
+    [ValidateSet('Menu', 'Status', 'PendingActions', 'RetryFailed', 'Retry', 'Resume', 'RestoreSettings', 'AddDrivers', 'ExportDiagnostics', 'Verify', 'Activate', 'CheckActivation')]
     [string] $Action = 'Menu',
+    [ValidateSet('', 'Windows', 'Office')]
+    [string] $Target = '',
     [string] $BackupPath = '',
     [string] $DriverPath = '',
     [string[]] $Operation = @(),
@@ -11687,7 +11809,7 @@ param(
 
 $script:RecoveryMain = $MyInvocation.InvocationName -ne '.'
 # Captured first: the scripts dot-sourced below bind their own parameters in this scope.
-$script:RecoveryArgs = @{ Action = $Action; BackupPath = $BackupPath; DriverPath = $DriverPath; Operation = @($Operation); IncludePermanent = [bool] $IncludePermanent; RetargetUser = [bool] $RetargetUser; Json = [bool] $Json; OutputPath = $OutputPath; Elevate = [bool] $Elevate }
+$script:RecoveryArgs = @{ Action = $Action; Target = $Target; BackupPath = $BackupPath; DriverPath = $DriverPath; Operation = @($Operation); IncludePermanent = [bool] $IncludePermanent; RetargetUser = [bool] $RetargetUser; Json = [bool] $Json; OutputPath = $OutputPath; Elevate = [bool] $Elevate }
 . (Join-Path $PSScriptRoot '..\common\DeploymentCommon.ps1')
 . (Join-Path $PSScriptRoot '..\bootstrap\Initialize-Deployment.ps1')
 . (Join-Path $PSScriptRoot '..\orchestrator\Show-DeploymentStatus.ps1')
@@ -11700,6 +11822,9 @@ if (Test-Path -LiteralPath $script:DriverEngineScript) { . $script:DriverEngineS
 # Phase 9: the health engine (read-only verification), when the deployment verifies itself.
 $script:HealthEngineScript = Join-Path $PSScriptRoot '..\health\DeploymentHealth.ps1'
 if (Test-Path -LiteralPath $script:HealthEngineScript) { . $script:HealthEngineScript -Mode Library }
+# Schema 9: the activation stage's functions, when the deployment activates Windows or Office.
+$script:ActivationScript = Join-Path $PSScriptRoot '..\finalization\Activation.ps1'
+if (Test-Path -LiteralPath $script:ActivationScript) { . $script:ActivationScript }
 Set-StrictMode -Version 2.0
 
 $script:RecoveryExit = @{ Done = 0; Refused = 1; NothingToDo = 1; Busy = 2; IntegrityFailed = 3; NotElevated = 4; NoState = 1; UnknownStage = 1; Partial = 5; Failed = 6 }
@@ -12230,9 +12355,49 @@ function Test-WdrDiagnosticArchive {
 # Console
 # ------------------------------------------------------------------------------------------------
 
+&lt;#
+    Schema 9: activation by the technician (elevated). Activate runs the chosen Microsoft method
+    again and asks for the product key or MAK where the method needs one (never stored or logged);
+    CheckActivation only reads the licensing state. The deployment report's activation block is
+    updated and the change is recorded in the recovery history.
+#&gt;
+function Invoke-WdrActivation {
+    param([hashtable] $Manifest, [hashtable] $Paths, [ValidateSet('Activate', 'CheckActivation')] [string] $Mode, [string] $Target = '', [Security.SecureString] $ProductKey = $null)
+    if (-not (Get-Command Invoke-WddActivationAction -ErrorAction SilentlyContinue) -or -not ($Manifest.ContainsKey('activation') -and $Manifest.activation)) { return @{ Outcome = 'Refused'; Message = 'Activation is not part of this deployment package.'; Activation = $null } }
+    $identity = Get-WddIdentity
+    if (-not $identity.IsAdmin) { return @{ Outcome = 'NotElevated'; Message = 'Activation needs administrator rights.'; Activation = $null } }
+    if ($Mode -eq 'Activate' -and -not $Target) { return @{ Outcome = 'Refused'; Message = 'Choose -Target Windows or -Target Office.'; Activation = $null } }
+    $mutex = Enter-WddMutex 60
+    if (-not $mutex) { return @{ Outcome = 'Busy'; Message = 'Another deployment process is running; try again in a minute.'; Activation = $null } }
+    try {
+        $read = Read-WddDeploymentState $Paths
+        $state = $read.State
+        if (-not $state) { return @{ Outcome = 'NoState'; Message = 'No deployment state was found.'; Activation = $null } }
+        $act = Invoke-WddActivationAction $Manifest $Paths $state $Mode $Target $ProductKey
+        $state.recoveries = @(@($state.recoveries) + @(@{ atUtc = (Get-WddNow).ToString('o'); by = $identity.Name; action = $Mode; target = $Target; result = (@(@('windows', 'office') | Where-Object { $act[$_] } | ForEach-Object { "$_=$($act[$_].status)" }) -join ', ') }))
+        Save-WddState $Paths $state
+        $report = Read-WddJson $Paths.ReportJson
+        if ($report -and $report['activation'] -is [hashtable]) {
+            $report.activation.windows = $act['windows']; $report.activation.office = $act['office']; $report.activation.updatedUtc = (Get-WddNow).ToString('o')
+            Write-WddJson $Paths.ReportJson $report
+            $lines = @('', "Activation update $((Get-WddNow).ToString('o')) by $($identity.Name) ($Mode)") + @(@('windows', 'office') | Where-Object { $act[$_] } | ForEach-Object { "  $($_): $($act[$_].status). $($act[$_].message)" })
+            try { [IO.File]::AppendAllText($Paths.ReportText, ($lines -join "`r`n") + "`r`n", (New-Object System.Text.UTF8Encoding($true))) } catch { }
+        }
+        $requested = @(@('windows', 'office') | Where-Object { $act[$_] -and [string] $act[$_].action -ne 'none' -and (-not $Target -or $_ -eq $Target.ToLowerInvariant()) })
+        $ok = $requested.Count -gt 0 -and @($requested | Where-Object { [string] $act[$_].status -ne 'Activated' }).Count -eq 0
+        $msg = (@($requested | ForEach-Object { "$($_): $($act[$_].status). $($act[$_].message)" }) -join ' ')
+        return @{ Outcome = $(if ($ok) { 'Done' } else { 'Refused' }); Message = $(if ($msg) { $msg } else { 'No activation was requested for this deployment.' }); Activation = $act }
+    } finally { Exit-WddMutex $mutex }
+}
+
 function Invoke-WdrAction {
-    param([hashtable] $Manifest, [hashtable] $Paths, [string] $Action, [string[]] $Operation = @(), [switch] $IncludePermanent, [switch] $Json, [string] $OutputPath = '', [string] $BackupPath = '', [string] $DriverPath = '', [switch] $RetargetUser)
+    param([hashtable] $Manifest, [hashtable] $Paths, [string] $Action, [string[]] $Operation = @(), [switch] $IncludePermanent, [switch] $Json, [string] $OutputPath = '', [string] $BackupPath = '', [string] $DriverPath = '', [switch] $RetargetUser, [string] $Target = '')
     switch ($Action) {
+        { $_ -in 'Activate', 'CheckActivation' } {
+            $r = Invoke-WdrActivation $Manifest $Paths $Action $Target
+            $text = $(if ($Json) { [pscustomobject]@{ Outcome = $r.Outcome; Message = $r.Message } | ConvertTo-Json -Depth 4 } else { "$($Action): $($r.Outcome). $($r.Message)" })
+            return @{ Text = $text; Exit = [int] $script:RecoveryExit[$r.Outcome] }
+        }
         'Verify' {
             $cfg = Read-WddJson (Join-Path $Paths.Package 'scripts\health\health-config.json')
             if (-not (Get-Command Invoke-WdhVerify -ErrorAction SilentlyContinue) -or -not $cfg) { return @{ Text = 'Verification is not part of this deployment package.'; Exit = 1 } }
@@ -12284,6 +12449,7 @@ function Show-WdrMenu {
         Write-Output '  7  Restore application settings from a backup folder'
         Write-Output '  8  Add driver packages from a folder (for example a network driver)'
         Write-Output '  9  Verify the deployment (health report; read-only)'
+        if ($Manifest.ContainsKey('activation') -and $Manifest.activation) { Write-Output '  A  Activation: check the licensing state, or activate Windows or Office' }
         Write-Output '  0  Exit'
         $c = Read-Host 'Choose'
         $r = switch ($c) {
@@ -12300,6 +12466,12 @@ function Show-WdrMenu {
             '7' { Invoke-WdrAction $Manifest $Paths 'RestoreSettings' -BackupPath (Read-Host 'Backup folder or .zip (for example E:\WindowsDeployment\backups\WDB-AppBackup-...)') }
             '8' { Invoke-WdrAction $Manifest $Paths 'AddDrivers' -DriverPath (Read-Host 'Folder with INF driver packages (for example E:\Drivers\Network)') }
             '9' { Invoke-WdrAction $Manifest $Paths 'Verify' }
+            { $_ -ieq 'A' -and $Manifest.ContainsKey('activation') -and $Manifest.activation } {
+                $t = Read-Host 'Activate Windows (W), Office (O), or only check the licensing state (C)?'
+                if ($t -match '^[Ww]') { Invoke-WdrAction $Manifest $Paths 'Activate' -Target 'Windows' }
+                elseif ($t -match '^[Oo]') { Invoke-WdrAction $Manifest $Paths 'Activate' -Target 'Office' }
+                else { Invoke-WdrAction $Manifest $Paths 'CheckActivation' }
+            }
             '0' { return }
             default { @{ Text = 'Choose 0-9.'; Exit = 0 } }
         }
@@ -12315,7 +12487,7 @@ if ($script:RecoveryMain) {
     $id = Get-WddIdentity
     if ($a.Elevate -and -not $id.IsAdmin) {
         $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-        Start-Process -FilePath $ps -Verb RunAs -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"", '-Action', $a.Action)
+        Start-Process -FilePath $ps -Verb RunAs -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"", '-Action', $a.Action) + @(if ($a.Target) { '-Target', $a.Target })
         exit 0
     }
     if ($a.Action -eq 'Menu') {
@@ -12323,7 +12495,7 @@ if ($script:RecoveryMain) {
         Show-WdrMenu $manifest $paths
         exit 0
     }
-    $r = Invoke-WdrAction $manifest $paths $a.Action -Operation $a.Operation -IncludePermanent:$a.IncludePermanent -Json:$a.Json -OutputPath $a.OutputPath -BackupPath $a.BackupPath -DriverPath $a.DriverPath -RetargetUser:$a.RetargetUser
+    $r = Invoke-WdrAction $manifest $paths $a.Action -Operation $a.Operation -IncludePermanent:$a.IncludePermanent -Json:$a.Json -OutputPath $a.OutputPath -BackupPath $a.BackupPath -DriverPath $a.DriverPath -RetargetUser:$a.RetargetUser -Target $a.Target
     Write-Output $r.Text
     exit $r.Exit
 }
@@ -14632,7 +14804,7 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
   "format": "windows-deployment-builder/deployment-manifest",
   "manifestVersion": 1,
   "packageVersion": "1.3.0",
-  "packageId": "5058B8CB2A9FD648",
+  "packageId": "DE7E3A8CA8CC9199",
   "scope": "answerFile",
   "generator": {
     "name": "Windows Deployment Builder",
@@ -15069,9 +15241,9 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
     {
       "path": "scripts/common/DeploymentCommon.ps1",
       "role": "orchestrator",
-      "size": 59927,
-      "sha256": "4FE4E6388307A3025ACC5AECC018E7AAAC258170D5CC4919B3C7AB2591F3062E",
-      "textSha256": "B024FDF24E9855FE1AAD604B2485B80B9FEB88324E0F7BDC6873F56283C5CB31",
+      "size": 61502,
+      "sha256": "DE5F41CF8812D713E87EAB0F288B2395BA02E4C76FEE92FA58C3D680949597EE",
+      "textSha256": "4479027533D411BAF58D61DC2EF0712582B61D507FA5BB7580554917309AD20A",
       "embedded": "Deployment\\scripts\\common\\DeploymentCommon.ps1"
     },
     {
@@ -15093,33 +15265,33 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
     {
       "path": "scripts/orchestrator/DeploymentOrchestrator.ps1",
       "role": "orchestrator",
-      "size": 35847,
-      "sha256": "0C55A3934A20BE665C1E590F2D719D343A2EE69DE72D7D2D95F32CBEF82552DE",
-      "textSha256": "F72D5A3EF9ACA71517636D0A884E2469C6DFB8E87C98F5090679CED0D04AEB53",
+      "size": 36293,
+      "sha256": "FBFCB372950DEE3465C9B161DDC0F61968116ECEC664D5673E804CC0CB30180B",
+      "textSha256": "EBA0F224DBCA8F666A274BA17BC18C38E3A61BBA29C3DF921AEF07C3E4B64BA0",
       "embedded": "Deployment\\scripts\\orchestrator\\DeploymentOrchestrator.ps1"
     },
     {
       "path": "scripts/orchestrator/Show-DeploymentStatus.ps1",
       "role": "orchestrator",
-      "size": 13155,
-      "sha256": "0194A190704016C2DECE32DAA7F07679512386759140245E551A2BB7C4C6C41B",
-      "textSha256": "131BED44306ADA2BC316165C89DD14EB41E2AC62FC9D0FF2995E52BB7F8CFFF6",
+      "size": 13629,
+      "sha256": "1127D496EFAAAED317B385CEF40B666883D636CAAB10C9A4CFE61526F3F39796",
+      "textSha256": "0B213643E20A7757CCC4CD0518FB5F60937CF1ADC66DA86182A9C1E1D75139B0",
       "embedded": "Deployment\\scripts\\orchestrator\\Show-DeploymentStatus.ps1"
     },
     {
       "path": "scripts/orchestrator/Resume-Deployment.ps1",
       "role": "orchestrator",
-      "size": 6449,
-      "sha256": "1B37B82536E1E924E90DA4674597D697FECB86B27F88AE8086D9D4E29650F5EB",
-      "textSha256": "29C0D0D5DCA8F9E7DB5EC23EDD65AD3E9B3C314AEE30F1699723736C129EE768",
+      "size": 6466,
+      "sha256": "B37BFEE2FCA0886FE76AA67E7E9CAA9520122E43E94A7E545F8C7EB43BD7BB95",
+      "textSha256": "5A5CABA00B12CA4B62EB5EBA583D1BDDABE81343E90306970D2A50AD2873B89F",
       "embedded": "Deployment\\scripts\\orchestrator\\Resume-Deployment.ps1"
     },
     {
       "path": "scripts/finalization/Complete-Deployment.ps1",
       "role": "orchestrator",
-      "size": 47268,
-      "sha256": "62877785B18332B45740DC3B13BD308F2F4336C3C83420B19C50A8E4C1138062",
-      "textSha256": "C464D264395D01F9BCFA96B39FFA2B1CC720CF2046B560E541D84C52BB6D3E31",
+      "size": 52079,
+      "sha256": "B504131687D7B7F91AC213DE3FD6FC2862990A4BE57E8BECE234082522F12176",
+      "textSha256": "0B99FF1173FFF761B7071B2A63350E367D863B32DB7B8B22A886AD33E4C1B2E7",
       "embedded": "Deployment\\scripts\\finalization\\Complete-Deployment.ps1"
     },
     {
@@ -15133,17 +15305,17 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
     {
       "path": "scripts/monitor/DeploymentStatusServer.ps1",
       "role": "orchestrator",
-      "size": 40756,
-      "sha256": "9FA509805A4B98AAE005F122BF197233D7FED1B2BBE84F17C50E9533A3EF9FF7",
-      "textSha256": "551D0F3BFD541C5AEFE7769CEF7C63A4B73D81CDD10BE5B61C108CDE09601948",
+      "size": 43002,
+      "sha256": "188D4EA67F14E7A3E0AE11DDA14178F1763BD8C87A02AB84EAE33E874734B5C1",
+      "textSha256": "0321EC752D6B4DA6CD7987F7D505ADE5A676864CEDF6193E959AF70A400F1918",
       "embedded": "Deployment\\scripts\\monitor\\DeploymentStatusServer.ps1"
     },
     {
       "path": "scripts/recovery/DeploymentRecovery.ps1",
       "role": "orchestrator",
-      "size": 53810,
-      "sha256": "DF9EBC8766904F66223F01826715A6BE85DBC0C000D157C8E38CD8E6AA9029E9",
-      "textSha256": "04AA1A1F1DF9A99D38634BFBC09E9F144CB6D336334E69948A35D74BF8B3CC12",
+      "size": 58749,
+      "sha256": "8CDC148B7A9089DEDB7ACCCCB6CB2573D4978EC5FE3BA3071E65723CBC6C17AC",
+      "textSha256": "1ED3816F6619DB8E83AEC63287099173C1E04304FC1A235E0F2E5F26231992D5",
       "embedded": "Deployment\\scripts\\recovery\\DeploymentRecovery.ps1"
     },
     {

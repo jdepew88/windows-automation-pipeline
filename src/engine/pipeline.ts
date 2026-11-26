@@ -10,6 +10,7 @@ import { NS, clone, elements, getAttr, setAttr, walk, type XElement } from './xm
 import * as f from '../features';
 import { updateEngineAssets, type DeploymentAsset } from './windows-update';
 import { applicationAssets } from './applications';
+import { officeAssets } from './office';
 import { orchestrationAsset } from './orchestration';
 import { driverAssets } from './drivers';
 import * as deployment from './deployment';
@@ -146,7 +147,7 @@ function build(profile: Profile): GenContext {
 
 /** Engine assets plus, when any engine is active, the orchestration contract. */
 export function deploymentAssets(profile: Profile): DeploymentAsset[] {
-  const assets = [...updateEngineAssets(profile), ...driverAssets(profile), ...applicationAssets(profile)];
+  const assets = [...updateEngineAssets(profile), ...driverAssets(profile), ...applicationAssets(profile), ...officeAssets(profile)];
   if (assets.length === 0) return assets;
   return [...assets, orchestrationAsset(profile)];
 }

@@ -91,6 +91,11 @@ function Format-WddStatus {
         $l.Add("Monitor checks : $(if ($s.monitorLastRunUtc) { "last $(Format-WddAge $s.monitorLastRunUtc)" } else { 'not run yet' }), every $(Get-WddMonitorInterval $Manifest) min$(if ($s.monitorOverdue) { ' - OVERDUE (see NEEDS ATTENTION)' })")
     }
     if ($script:WddTaskVisibility -eq 'Limited') { $l.Add('Task view      : this window runs without administrator rights, so task problems are taken from the deployment monitor.') }
+    # Schema 9: activation, reported apart from the installation results (never a key).
+    if ($s.Contains('activation') -and $s.activation) {
+        $l.Add("Activation     : Windows $($s.activation['windows']['status']); Office $($s.activation['office']['status'])")
+        foreach ($k in 'windows', 'office') { $e = $s.activation[$k]; if ($e -and [string] $e['status'] -notin 'NotRequested', 'Waiting') { $l.Add("  $($k.PadRight(13)): $($e['message'])") } }
+    }
     if ($s.Contains('recovering') -and $s.recovering) { $l.Add('Recovering     : Windows restarted or a stage was recovered; unfinished tasks are being checked.') }
     foreach ($m in Format-WddMonitorLines $Manifest $Paths) { $l.Add($m) }
     $l.Add('')

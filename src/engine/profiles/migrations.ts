@@ -157,6 +157,16 @@ export const MIGRATIONS: Record<number, Migration> = {
       note: 'The deployment monitor (added in schema version 8) is turned off for this older profile. Turn it on under "Verification & Health" if you want to follow the deployment from another device.',
     };
   },
+
+  // v9 adds optional Office LTSC and the activation preferences. An older profile installs no
+  // Office and activates nothing, so its package is unchanged.
+  8: (input) => ({
+    value: {
+      ...input,
+      office: isObj(input.office) ? input.office : { product: 'none', removeMsiOffice: false },
+      activation: isObj(input.activation) ? input.activation : { windows: 'none', windowsMethod: 'digitalLicense', windowsKmsHost: '', office: 'none', officeMethod: 'kms', officeKmsHost: '' },
+    },
+  }),
 };
 
 /** The six (empty) built-in profiles of schema version 3, for the v2→v3 step. */

@@ -59,8 +59,10 @@
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('Menu', 'Status', 'PendingActions', 'RetryFailed', 'Retry', 'Resume', 'RestoreSettings', 'AddDrivers', 'ExportDiagnostics', 'Verify')]
+    [ValidateSet('Menu', 'Status', 'PendingActions', 'RetryFailed', 'Retry', 'Resume', 'RestoreSettings', 'AddDrivers', 'ExportDiagnostics', 'Verify', 'Activate', 'CheckActivation')]
     [string] $Action = 'Menu',
+    [ValidateSet('', 'Windows', 'Office')]
+    [string] $Target = '',
     [string] $BackupPath = '',
     [string] $DriverPath = '',
     [string[]] $Operation = @(),
@@ -73,7 +75,7 @@ param(
 
 $script:RecoveryMain = $MyInvocation.InvocationName -ne '.'
 # Captured first: the scripts dot-sourced below bind their own parameters in this scope.
-$script:RecoveryArgs = @{ Action = $Action; BackupPath = $BackupPath; DriverPath = $DriverPath; Operation = @($Operation); IncludePermanent = [bool] $IncludePermanent; RetargetUser = [bool] $RetargetUser; Json = [bool] $Json; OutputPath = $OutputPath; Elevate = [bool] $Elevate }
+$script:RecoveryArgs = @{ Action = $Action; Target = $Target; BackupPath = $BackupPath; DriverPath = $DriverPath; Operation = @($Operation); IncludePermanent = [bool] $IncludePermanent; RetargetUser = [bool] $RetargetUser; Json = [bool] $Json; OutputPath = $OutputPath; Elevate = [bool] $Elevate }
 . (Join-Path $PSScriptRoot '..\common\DeploymentCommon.ps1')
 . (Join-Path $PSScriptRoot '..\bootstrap\Initialize-Deployment.ps1')
 . (Join-Path $PSScriptRoot '..\orchestrator\Show-DeploymentStatus.ps1')
@@ -86,6 +88,9 @@ if (Test-Path -LiteralPath $script:DriverEngineScript) { . $script:DriverEngineS
 # Phase 9: the health engine (read-only verification), when the deployment verifies itself.
 $script:HealthEngineScript = Join-Path $PSScriptRoot '..\health\DeploymentHealth.ps1'
 if (Test-Path -LiteralPath $script:HealthEngineScript) { . $script:HealthEngineScript -Mode Library }
+# Schema 9: the activation stage's functions, when the deployment activates Windows or Office.
+$script:ActivationScript = Join-Path $PSScriptRoot '..\finalization\Activation.ps1'
+if (Test-Path -LiteralPath $script:ActivationScript) { . $script:ActivationScript }
 Set-StrictMode -Version 2.0
 
 $script:RecoveryExit = @{ Done = 0; Refused = 1; NothingToDo = 1; Busy = 2; IntegrityFailed = 3; NotElevated = 4; NoState = 1; UnknownStage = 1; Partial = 5; Failed = 6 }
@@ -616,9 +621,49 @@ function Test-WdrDiagnosticArchive {
 # Console
 # ------------------------------------------------------------------------------------------------
 
+<#
+    Schema 9: activation by the technician (elevated). Activate runs the chosen Microsoft method
+    again and asks for the product key or MAK where the method needs one (never stored or logged);
+    CheckActivation only reads the licensing state. The deployment report's activation block is
+    updated and the change is recorded in the recovery history.
+#>
+function Invoke-WdrActivation {
+    param([hashtable] $Manifest, [hashtable] $Paths, [ValidateSet('Activate', 'CheckActivation')] [string] $Mode, [string] $Target = '', [Security.SecureString] $ProductKey = $null)
+    if (-not (Get-Command Invoke-WddActivationAction -ErrorAction SilentlyContinue) -or -not ($Manifest.ContainsKey('activation') -and $Manifest.activation)) { return @{ Outcome = 'Refused'; Message = 'Activation is not part of this deployment package.'; Activation = $null } }
+    $identity = Get-WddIdentity
+    if (-not $identity.IsAdmin) { return @{ Outcome = 'NotElevated'; Message = 'Activation needs administrator rights.'; Activation = $null } }
+    if ($Mode -eq 'Activate' -and -not $Target) { return @{ Outcome = 'Refused'; Message = 'Choose -Target Windows or -Target Office.'; Activation = $null } }
+    $mutex = Enter-WddMutex 60
+    if (-not $mutex) { return @{ Outcome = 'Busy'; Message = 'Another deployment process is running; try again in a minute.'; Activation = $null } }
+    try {
+        $read = Read-WddDeploymentState $Paths
+        $state = $read.State
+        if (-not $state) { return @{ Outcome = 'NoState'; Message = 'No deployment state was found.'; Activation = $null } }
+        $act = Invoke-WddActivationAction $Manifest $Paths $state $Mode $Target $ProductKey
+        $state.recoveries = @(@($state.recoveries) + @(@{ atUtc = (Get-WddNow).ToString('o'); by = $identity.Name; action = $Mode; target = $Target; result = (@(@('windows', 'office') | Where-Object { $act[$_] } | ForEach-Object { "$_=$($act[$_].status)" }) -join ', ') }))
+        Save-WddState $Paths $state
+        $report = Read-WddJson $Paths.ReportJson
+        if ($report -and $report['activation'] -is [hashtable]) {
+            $report.activation.windows = $act['windows']; $report.activation.office = $act['office']; $report.activation.updatedUtc = (Get-WddNow).ToString('o')
+            Write-WddJson $Paths.ReportJson $report
+            $lines = @('', "Activation update $((Get-WddNow).ToString('o')) by $($identity.Name) ($Mode)") + @(@('windows', 'office') | Where-Object { $act[$_] } | ForEach-Object { "  $($_): $($act[$_].status). $($act[$_].message)" })
+            try { [IO.File]::AppendAllText($Paths.ReportText, ($lines -join "`r`n") + "`r`n", (New-Object System.Text.UTF8Encoding($true))) } catch { }
+        }
+        $requested = @(@('windows', 'office') | Where-Object { $act[$_] -and [string] $act[$_].action -ne 'none' -and (-not $Target -or $_ -eq $Target.ToLowerInvariant()) })
+        $ok = $requested.Count -gt 0 -and @($requested | Where-Object { [string] $act[$_].status -ne 'Activated' }).Count -eq 0
+        $msg = (@($requested | ForEach-Object { "$($_): $($act[$_].status). $($act[$_].message)" }) -join ' ')
+        return @{ Outcome = $(if ($ok) { 'Done' } else { 'Refused' }); Message = $(if ($msg) { $msg } else { 'No activation was requested for this deployment.' }); Activation = $act }
+    } finally { Exit-WddMutex $mutex }
+}
+
 function Invoke-WdrAction {
-    param([hashtable] $Manifest, [hashtable] $Paths, [string] $Action, [string[]] $Operation = @(), [switch] $IncludePermanent, [switch] $Json, [string] $OutputPath = '', [string] $BackupPath = '', [string] $DriverPath = '', [switch] $RetargetUser)
+    param([hashtable] $Manifest, [hashtable] $Paths, [string] $Action, [string[]] $Operation = @(), [switch] $IncludePermanent, [switch] $Json, [string] $OutputPath = '', [string] $BackupPath = '', [string] $DriverPath = '', [switch] $RetargetUser, [string] $Target = '')
     switch ($Action) {
+        { $_ -in 'Activate', 'CheckActivation' } {
+            $r = Invoke-WdrActivation $Manifest $Paths $Action $Target
+            $text = $(if ($Json) { [pscustomobject]@{ Outcome = $r.Outcome; Message = $r.Message } | ConvertTo-Json -Depth 4 } else { "$($Action): $($r.Outcome). $($r.Message)" })
+            return @{ Text = $text; Exit = [int] $script:RecoveryExit[$r.Outcome] }
+        }
         'Verify' {
             $cfg = Read-WddJson (Join-Path $Paths.Package 'scripts\health\health-config.json')
             if (-not (Get-Command Invoke-WdhVerify -ErrorAction SilentlyContinue) -or -not $cfg) { return @{ Text = 'Verification is not part of this deployment package.'; Exit = 1 } }
@@ -670,6 +715,7 @@ function Show-WdrMenu {
         Write-Output '  7  Restore application settings from a backup folder'
         Write-Output '  8  Add driver packages from a folder (for example a network driver)'
         Write-Output '  9  Verify the deployment (health report; read-only)'
+        if ($Manifest.ContainsKey('activation') -and $Manifest.activation) { Write-Output '  A  Activation: check the licensing state, or activate Windows or Office' }
         Write-Output '  0  Exit'
         $c = Read-Host 'Choose'
         $r = switch ($c) {
@@ -686,6 +732,12 @@ function Show-WdrMenu {
             '7' { Invoke-WdrAction $Manifest $Paths 'RestoreSettings' -BackupPath (Read-Host 'Backup folder or .zip (for example E:\WindowsDeployment\backups\WDB-AppBackup-...)') }
             '8' { Invoke-WdrAction $Manifest $Paths 'AddDrivers' -DriverPath (Read-Host 'Folder with INF driver packages (for example E:\Drivers\Network)') }
             '9' { Invoke-WdrAction $Manifest $Paths 'Verify' }
+            { $_ -ieq 'A' -and $Manifest.ContainsKey('activation') -and $Manifest.activation } {
+                $t = Read-Host 'Activate Windows (W), Office (O), or only check the licensing state (C)?'
+                if ($t -match '^[Ww]') { Invoke-WdrAction $Manifest $Paths 'Activate' -Target 'Windows' }
+                elseif ($t -match '^[Oo]') { Invoke-WdrAction $Manifest $Paths 'Activate' -Target 'Office' }
+                else { Invoke-WdrAction $Manifest $Paths 'CheckActivation' }
+            }
             '0' { return }
             default { @{ Text = 'Choose 0-9.'; Exit = 0 } }
         }
@@ -701,7 +753,7 @@ if ($script:RecoveryMain) {
     $id = Get-WddIdentity
     if ($a.Elevate -and -not $id.IsAdmin) {
         $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-        Start-Process -FilePath $ps -Verb RunAs -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"", '-Action', $a.Action)
+        Start-Process -FilePath $ps -Verb RunAs -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"", '-Action', $a.Action) + @(if ($a.Target) { '-Target', $a.Target })
         exit 0
     }
     if ($a.Action -eq 'Menu') {
@@ -709,7 +761,7 @@ if ($script:RecoveryMain) {
         Show-WdrMenu $manifest $paths
         exit 0
     }
-    $r = Invoke-WdrAction $manifest $paths $a.Action -Operation $a.Operation -IncludePermanent:$a.IncludePermanent -Json:$a.Json -OutputPath $a.OutputPath -BackupPath $a.BackupPath -DriverPath $a.DriverPath -RetargetUser:$a.RetargetUser
+    $r = Invoke-WdrAction $manifest $paths $a.Action -Operation $a.Operation -IncludePermanent:$a.IncludePermanent -Json:$a.Json -OutputPath $a.OutputPath -BackupPath $a.BackupPath -DriverPath $a.DriverPath -RetargetUser:$a.RetargetUser -Target $a.Target
     Write-Output $r.Text
     exit $r.Exit
 }

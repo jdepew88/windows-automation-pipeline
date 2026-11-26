@@ -49,6 +49,7 @@ export function writeDeploymentFixture(dir: string): { packageId: string; files:
   writeMigrationFixture(join(dir, 'migration'));
   writeDriversFixture(join(dir, 'drivers'));
   writeHealthFixture(join(dir, 'health'));
+  writeOfficeFixture(join(dir, 'office'));
   return { packageId: pkg.manifest.packageId, files: pkg.manifest.files.length };
 }
 
@@ -275,4 +276,42 @@ export function writeDriversFixture(dir: string): { packageId: string; manifestS
   }
   writeFileSync(join(dir, 'package.zip'), pkg.zip);
   return { packageId: pkg.manifest.packageId, manifestSha256: attached.reference!.manifestSha256 };
+}
+
+/**
+ * Schema 9 fixture (<dir>/office): two real packages with the Office LTSC stage and activation.
+ *   p2024  Office LTSC Professional Plus 2024; Windows: Microsoft (digital license); Office: Microsoft (KMS, host kms.example.test:1688)
+ *   p2021  Office LTSC Standard 2021, remove MSI Office; Windows: technician (manual); Office: Microsoft (MAK, typed by the technician)
+ */
+export function writeOfficeFixture(dir: string): void {
+  rmSync(dir, { recursive: true, force: true });
+  const variants: [string, (p: ReturnType<typeof ownerDefaults>) => void][] = [
+    ['p2024', (p) => {
+      p.office.product = 'ltsc2024ProPlus';
+      p.activation.windows = 'microsoft';
+      p.activation.windowsMethod = 'digitalLicense';
+      p.activation.office = 'microsoft';
+      p.activation.officeMethod = 'kms';
+      p.activation.officeKmsHost = 'kms.example.test:1688';
+    }],
+    ['p2021', (p) => {
+      p.office.product = 'ltsc2021Standard';
+      p.office.removeMsiOffice = true;
+      p.activation.windows = 'manual';
+      p.activation.office = 'microsoft';
+      p.activation.officeMethod = 'mak';
+    }],
+  ];
+  for (const [name, apply] of variants) {
+    const p = ownerDefaults();
+    apply(p);
+    const r = generate(p);
+    if (!r.ok) throw new Error(`office fixture ${name} is invalid: ${JSON.stringify(r.issues)}`);
+    const pkg = buildDeploymentPackage(p, r);
+    for (const e of readZip(pkg.zip)) {
+      const target = join(dir, name, ...e.path.split('/'));
+      mkdirSync(dirname(target), { recursive: true });
+      writeFileSync(target, e.data);
+    }
+  }
 }

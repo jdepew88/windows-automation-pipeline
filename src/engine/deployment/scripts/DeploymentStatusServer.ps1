@@ -245,6 +245,24 @@ function Get-WddMonitorStatus {
     } else {
         $m.drivers = [ordered]@{ state = [string] $snap.drivers.state; condition = 'finished'; activity = 'The driver stage is not part of this deployment; Windows Update installs drivers it offers.' }
     }
+    # Schema 9: Office LTSC (product, phase, verified) and activation (status per target, no key).
+    if ($stage.ContainsKey('office')) {
+        $s = $stage['office']
+        $o = ConvertTo-WddStageModel $s
+        $o.product = Protect-WddText $(if ($Manifest.ContainsKey('office') -and $Manifest.office) { [string] $Manifest.office.displayName } else { $s.name }) 80
+        $o.verified = [bool] ($s.state -eq 'Final' -and $s.result -is [hashtable] -and $s.result['verified'])
+        $o.detail = Protect-WddText $s.detail
+        # The Office Deployment Tool does not report bytes: the phase is shown, never a percentage.
+        $o.progress = 'unavailable'
+        $m.office = $o
+    }
+    if ($snap.Contains('activation') -and $snap.activation) {
+        $m.activation = [ordered]@{}
+        foreach ($k in 'windows', 'office') {
+            $e = $snap.activation[$k]
+            if ($e) { $m.activation[$k] = [ordered]@{ action = [string] $e['action']; status = [string] $e['status']; verified = [bool] $e['verified']; message = Protect-WddText $e['message'] } }
+        }
+    }
     # Devices: the final Device Manager check, or the driver stage's own assessment while it runs.
     $devices = @()
     if ($state.ContainsKey('deviceReport') -and $state.deviceReport -is [hashtable]) { $devices = @(@($state.deviceReport['unresolved']) | Where-Object { $_ -is [hashtable] }) }
@@ -451,6 +469,8 @@ $script:DashboardHtml = @'
   <section class="card" aria-labelledby="wu-h"><h2 id="wu-h">Windows Update</h2><div id="wu"></div></section>
   <section class="card" aria-labelledby="apps-h"><h2 id="apps-h">Applications</h2><div id="apps"></div></section>
   <section class="card" aria-labelledby="drv-h"><h2 id="drv-h">Drivers and devices</h2><div id="drv"></div></section>
+  <section id="officeCard" class="card" hidden aria-labelledby="off-h"><h2 id="off-h">Microsoft Office</h2><div id="off"></div></section>
+  <section id="activationCard" class="card" hidden aria-labelledby="actv-h"><h2 id="actv-h">Activation</h2><div id="actv"></div></section>
   <section id="finalCard" class="card wide" hidden aria-labelledby="final-h"><h2 id="final-h">Final results</h2><div id="final"></div></section>
   <section class="card wide" aria-labelledby="act-h"><h2 id="act-h">Recent activity</h2><ol id="activity" class="activity"></ol></section>
 </main>
@@ -543,6 +563,21 @@ $script:DashboardJs = @'
       kv(ap, [['Selected', a.selected], ['Installed', a.installed], ['Remaining', a.remaining], ['Failed', a.failed], ['Need a person', a.needsPerson]]);
       if (a.lastError) { text(ap, a.lastError, 'error'); }
     } else { text(ap, 'Not part of this deployment.'); }
+
+    var off = $('off'); clear(off); $('officeCard').hidden = !s.office;
+    if (s.office) {
+      var o = s.office;
+      text(off, o.activity);
+      kv(off, [['Edition', o.product], ['Phase', o.phase], ['Verified', o.state === 'Final' ? (o.verified ? 'Yes' : 'No') : ''], ['Download progress', o.phase === 'Downloading' ? 'progress unavailable' : '']]);
+      if (o.state === 'Final' && o.detail) { text(off, o.detail); }
+      if (o.lastError) { text(off, 'Most recent error: ' + o.lastError, 'error'); }
+    }
+    var av = $('actv'); clear(av); $('activationCard').hidden = !s.activation;
+    if (s.activation) {
+      [['Windows', s.activation.windows], ['Office', s.activation.office]].forEach(function (p) {
+        if (p[1]) { kv(av, [[p[0], p[1].status + (p[1].verified ? ' (verified)' : '')]]); text(av, p[1].message); }
+      });
+    }
 
     var dv = $('drv'); clear(dv);
     if (s.drivers) {

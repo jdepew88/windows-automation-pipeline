@@ -43,6 +43,9 @@ $script:CompleteArgs = @{ Preview = [bool] $Preview; Finish = [bool] $Finish }
 # Phase 4.3: present only when the ongoing update policy is applied after the initial updates.
 $script:PolicyScript = Join-Path $PSScriptRoot 'Set-UpdatePolicy.ps1'
 if (Test-Path -LiteralPath $script:PolicyScript) { . $script:PolicyScript }
+# Schema 9: present when the deployment activates Windows or Office (functions only).
+$script:ActivationScript = Join-Path $PSScriptRoot 'Activation.ps1'
+if (Test-Path -LiteralPath $script:ActivationScript) { . $script:ActivationScript }
 # Phase 9: present when the deployment verifies itself (functions only).
 $script:HealthScript = Join-Path $PSScriptRoot '..\health\DeploymentHealth.ps1'
 if (Test-Path -LiteralPath $script:HealthScript) { . $script:HealthScript -Mode Library }
@@ -309,8 +312,33 @@ function New-WddReport {
     $recheck = $(if ($State['updateRecheck'] -is [hashtable]) { $State['updateRecheck'] } else { $null })
     if ($recheck -and $recheck['status'] -eq 'Remaining') { foreach ($u in @($recheck['remaining']) | Where-Object { $_ }) { $remaining += "Windows Update: $((@($u['kbs']) -join ', ')) $($u['title']) is still offered after the deployment's last update run." } }
     if ($recheck -and $recheck['status'] -eq 'CheckFailed') { $remaining += "Windows Update: $($recheck['message'])" }
+    # Schema 9: Office LTSC (installation) and activation, reported separately.
+    $officeReport = $null
+    $off = @($Snapshot.stages | Where-Object { $_.id -eq 'office' }) | Select-Object -First 1
+    if ($off) {
+        $r = $off.result
+        $officeReport = [ordered]@{ product = $(if ($Manifest.ContainsKey('office')) { [string] $Manifest.office.displayName } else { $off.name }); state = $off.state; status = $off.status; detail = $off.detail
+                                    verified = [bool] ($r -and $r['verified']); alreadyInstalled = [bool] ($r -and $r['alreadyInstalled']); category = $(if ($r) { [string] $r['category'] } else { '' })
+                                    version = $(if ($r -and $r['installed']) { [string] $r['installed']['version'] } else { '' }); attempts = $(if ($r) { @($r['attempts']).Count } else { 0 })
+                                    source = $(if ($Manifest.ContainsKey('office')) { $Manifest.office.source } else { $null }); activated = $false; log = (Join-Path $Paths.Root 'Office\logs') }
+        if ($off.state -ne 'Final') { $incomplete += "Microsoft Office ($($off.state))" }
+        elseif ($off.status -eq 'Failed') { $errors += "Microsoft Office was not installed: $($off.detail)" }
+        elseif ($off.status -in 'CompletedWithFollowUp', 'Offline') { $remaining += "Microsoft Office: $($off.detail)" }
+    }
+    $activationReport = $null
+    if ($Manifest.ContainsKey('activation') -and $Manifest.activation) {
+        $act = $(if ($State['activation'] -is [hashtable]) { $State.activation } else { @{} })
+        $activationReport = [ordered]@{ windows = $act['windows']; office = $act['office']; plan = $Manifest.activation; log = (Join-Path $Paths.Root 'Activation\activation.log'); containsSecrets = $false }
+        foreach ($k in 'windows', 'office') {
+            $e = $act[$k]
+            if (-not $e) { if ([string] $Manifest.activation[$k]['action'] -ne 'none') { $remaining += "Activation ($k): not attempted; the deployment ended before its activation step." }; continue }
+            # No key characters in the remaining tasks (they also reach the LAN monitor's final view).
+            $note = [string] $e['message'] -replace '\s*\(key ending [A-Za-z0-9]*\)', ''
+            if ([string] $e['status'] -in 'AwaitingTechnician', 'Failed', 'Deferred', 'Blocked', 'Unavailable') { $remaining += "Activation ($k): $($e['status']). $note" }
+        }
+    }
     $outcome = Get-WddDeploymentOutcome @{ status = 'Completed'; overall = $Overall; message = $Reason } $null
-    [ordered]@{
+    $report = [ordered]@{
         format             = 'windows-deployment-builder/deployment-report'
         reportVersion      = 2
         overall            = $Overall
@@ -344,6 +372,9 @@ function New-WddReport {
         recoveryCommands   = $(if ($hasTool) { $recoveryCommands } else { $null })
         restoration        = $restorationReport
     }
+    if ($officeReport) { $report.office = $officeReport; $report.logs['office'] = (Join-Path $Paths.Root 'Office\logs\engine.log') }
+    if ($activationReport) { $report.activation = $activationReport; $report.logs['activation'] = $activationReport.log }
+    return $report
 }
 
 function Format-WddReport {
@@ -431,6 +462,26 @@ function Format-WddReport {
         foreach ($x in @($Report.restartHistory)) { $l.Add("  $($x.bootUtc)  $(if ($x.planned) { "planned ($($x.by)$(if ($x.reason) { ": $($x.reason)" }))" } else { 'UNEXPECTED (not scheduled by the deployment)' })") }
         $l.Add('')
     }
+    if ($Report.Contains('office') -and $Report.office) {
+        $o = $Report.office
+        $l.Add("Microsoft Office: $($o.product)")
+        $l.Add("  Installation: $($o.status) ($($o.state))$(if ($o.verified) { ', verified' })$(if ($o.alreadyInstalled) { ', was already installed' })$(if ($o.version) { ", version $($o.version)" }). $($o.detail)")
+        if ($o.source) { $l.Add("  Installer: $($o.source.repository) commit $($o.source.installer.commit); configuration from branch $($o.source.configuration.branch) commit $($o.source.configuration.commit)") }
+        $l.Add('  Installing Office does not activate it; see Activation.')
+        $l.Add('')
+    }
+    if ($Report.Contains('activation') -and $Report.activation) {
+        $a = $Report.activation
+        $l.Add('Activation (separate from the installation results)')
+        foreach ($k in 'windows', 'office') {
+            $e = $a[$k]
+            $label = $(if ($k -eq 'windows') { 'Windows' } else { 'Office ' })
+            if ($e) { $l.Add("  ${label}: $($e['status'])$(if ($e['verified']) { ' (verified by the licensing service)' }). $($e['message'])") }
+            elseif ([string] $a.plan[$k]['action'] -ne 'none') { $l.Add("  ${label}: not attempted.") }
+            else { $l.Add("  ${label}: no activation was requested.") }
+        }
+        $l.Add('')
+    }
     if ($Report.Contains('restartCoordination') -and $Report.restartCoordination) {
         $rc = $Report.restartCoordination
         $l.Add('Restart required by Windows (at the end of the deployment)')
@@ -511,6 +562,9 @@ function Complete-WddDeployment {
     if ($overall -eq 'Succeeded' -and (@($State.deviceReport.unresolved).Count -or -not $State.deviceReport.checked)) { $overall = 'CompletedWithFollowUp' }
     # A restart Windows still needs, or updates Windows still offers, is a follow-up too.
     if ($overall -eq 'Succeeded' -and ((Test-WddRestartOutstanding $State) -or ($State['updateRecheck'] -is [hashtable] -and [string] $State['updateRecheck']['status'] -in 'Remaining', 'CheckFailed'))) { $overall = 'CompletedWithFollowUp' }
+    # Schema 9: activation that needs a person is a follow-up, never an installation failure.
+    if ($overall -eq 'Succeeded' -and (Get-Command Test-WddActivationAttention -ErrorAction SilentlyContinue) -and (Test-WddActivationAttention $State)) { $overall = 'CompletedWithFollowUp' }
+    if ($overall -eq 'Succeeded' -and $Manifest.ContainsKey('activation') -and $Manifest.activation -and $State['activation'] -isnot [hashtable]) { $overall = 'CompletedWithFollowUp' }
     $reason = if ($DeadlineReached -and -not $Snapshot.allFinal) { "The deployment deadline ($($State.deadlineUtc)) passed before every stage finished." } elseif (@($Snapshot.stages).Count -eq 0) { 'No post-installation stage was enabled.' } else { 'Every enabled stage has a final result.' }
     $report = New-WddReport $Manifest $Paths $State $Snapshot $overall $reason
     Write-WddReport $report $Paths

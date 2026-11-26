@@ -1,0 +1,23 @@
+<Configuration ID="31633a5a-5caa-40d2-9ac8-fa73e835f89c">
+  <!--
+    Office LTSC Standard 2021 (volume licensed), 64-bit, for Windows Deployment Builder.
+    From jdepew88/download_office_ltsc, branch 2021, commit 548c49142589a9c7c093a4724b9cee1045c0eb2b
+    (config_standard.xml), with three changes so the file holds no key and installing never activates or removes anything:
+      - removed <Property Name="AUTOACTIVATE" Value="1" />: activation is a separate, optional stage;
+      - no <RemoveMSI />: added at run time only when "remove MSI Office" was chosen explicitly;
+      - no PIDKEY: volume licensed Office installs with Microsoft's Generic Volume License Key (GVLK)
+        by default (learn.microsoft.com/office/volume-license-activation/gvlks), so no key is in this file.
+  -->
+  <Add OfficeClientEdition="64" Channel="PerpetualVL2021">
+    <Product ID="Standard2021Volume">
+      <Language ID="en-us" />
+      <Language ID="MatchOS" />
+      <ExcludeApp ID="Lync" />
+    </Product>
+  </Add>
+  <Property Name="SharedComputerLicensing" Value="0" />
+  <Property Name="FORCEAPPSHUTDOWN" Value="FALSE" />
+  <Property Name="DeviceBasedLicensing" Value="0" />
+  <Property Name="SCLCacheOverride" Value="0" />
+  <Updates Enabled="TRUE" />
+</Configuration>

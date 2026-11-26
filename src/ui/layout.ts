@@ -157,6 +157,16 @@ export const FIELD_GROUPS: Partial<Record<SectionId, FieldGroup[]>> = {
     { title: 'Provisioning', paths: ['applications.enabled'] },
     { title: '', paths: ['applications.selection'] },
     {
+      title: 'Microsoft Office LTSC',
+      description: 'Optional, volume licensed. Installed after the applications and verified; it is never part of an application profile.',
+      paths: ['office.product', 'office.removeMsiOffice'],
+    },
+    {
+      title: 'Activation',
+      description: 'Optional, at the very end of the deployment. Windows and Office are independent; nothing is activated unless chosen here.',
+      paths: ['activation.windows', 'activation.windowsMethod', 'activation.windowsKmsHost', 'activation.office', 'activation.officeMethod', 'activation.officeKmsHost'],
+    },
+    {
       title: 'Coordination & restarts',
       description: 'Applications install after Windows Update has finished, one at a time, as the signed-in user.',
       paths: ['applications.coordination', 'applications.waitForUpdatesHours', 'applications.restartPolicy', 'applications.maxReboots', 'applications.rebootWarningSeconds'],

@@ -188,7 +188,7 @@ function Step-WddStageActivity {
 # ------------------------------------------------------------------------------------------------
 
 # Stage phases during which a restart interrupts nothing (the engine is not working; it continues after the boot).
-$script:RestartSafePhases = @('RebootDeferred', 'WaitingForRestart', 'WaitingForReboot', 'WaitingForLock', 'WaitingForNetwork', 'WaitingForUpdates', 'WaitingForDrivers', 'Error')
+$script:RestartSafePhases = @('RebootDeferred', 'WaitingForRestart', 'WaitingForReboot', 'WaitingForLock', 'WaitingForNetwork', 'WaitingForUpdates', 'WaitingForDrivers', 'WaitingForApplications', 'Error')
 
 function Get-WddOrchestratorLimit {
     param([hashtable] $Manifest, [string] $Name, [int] $Default)
@@ -500,6 +500,10 @@ function Invoke-WddMonitor {
                 $hold = -not $since -or ((Get-WddNow) - $since).TotalMinutes -lt (Get-WddOrchestratorLimit $manifest 'restartWaitMinutes' 120)
             }
             if ($hold) { return 'WaitingForRestart' }
+            # Schema 9: the optional activation stage, last, once (never holds the deployment).
+            if (Get-Command Step-WddActivation -ErrorAction SilentlyContinue) {
+                try { [void] (Step-WddActivation $manifest $Paths $state $snapshot $restart); $snapshot.activation = Get-WddActivationView $manifest $state } catch { Write-WddLog "Activation: $($_.Exception.Message)" 'WARN' }
+            }
             return (Invoke-WddFinalize $manifest $Paths $state $snapshot)
         }
         if ($deadlineReached) {

@@ -76,7 +76,7 @@ export interface DeploymentAsset {
   mime: string;
   description: string;
   /** Folder/group in the downloads panel and the future deployment ZIP. */
-  group: 'windows-update' | 'drivers' | 'applications' | 'orchestration';
+  group: 'windows-update' | 'drivers' | 'applications' | 'orchestration' | 'office';
 }
 
 /** Splits a free-text KB list. Accepts "KB5034441", "5034441", commas, spaces or new lines. */
