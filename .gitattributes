@@ -2,3 +2,4 @@
 *.png binary
 tests/unit/fixtures/*.xml -text
 docs/samples/** -text
+*.ico binary
