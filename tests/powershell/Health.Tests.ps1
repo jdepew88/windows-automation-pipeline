@@ -40,6 +40,48 @@ $manifestPath = Join-Path $pkgRoot 'deployment-manifest.json'
 if ($Out -and -not (Test-Path -LiteralPath $Out)) { New-Item -ItemType Directory -Path $Out -Force | Out-Null }
 
 # ------------------------------------------------------------------------------------------------
+# Health engine 1.1.0 probes, simulated like the others: display adapters, processors, chassis, the
+# Windows Update history and the orchestrator's last scan. Nothing on this computer is read.
+# ------------------------------------------------------------------------------------------------
+
+# (defined in HealthSim.ps1, shared with the Deployment and Monitor suites)
+
+$script:OfficeKey = 'HKLM\SOFTWARE\Microsoft\Office\ClickToRun\Configuration'
+
+<# An update engine 2.1.0 result.json (every new field present; tests remove what older engines lack). #>
+function New-WuResult {
+    param([string] $State = 'UpToDate', [string] $Status = 'Succeeded', [object[]] $Installed = @(@{ id = 'u1'; title = '2026-10 Cumulative Update for Windows 11 (KB5068861)'; kbs = @('5068861'); class = 'Quality'; preview = $false; result = 'Succeeded'; atUtc = '2026-10-20T07:40:00.0000000Z' }),
+          [object[]] $Failed = @(), [bool] $Previews = $false, [hashtable] $Summary = @{}, [hashtable] $Refresh = $null, [object[]] $Devices = @(), [string] $Finished = '')
+    $sum = @{ installed = @($Installed).Count; superseded = 0; notApplicable = 0; excluded = 0; previewsExcluded = 0; downloadFailed = 0; installFailed = @($Failed).Count; awaitingRestart = 0; remaining = 0; notAttempted = 0 }
+    foreach ($k in $Summary.Keys) { $sum[$k] = $Summary[$k] }
+    @{ status = $Status; reason = "sim $Status"; engineVersion = '2.1.0'; reboots = 1; startedUtc = $script:SimNow.AddHours(-2).ToString('o'); finishedUtc = $(if ($Finished) { $Finished } else { $script:SimNow.ToString('o') })
+       installed = @($Installed); failed = @($Failed); skipped = @(); updateState = $State; updateStateText = "Simulated: $State"
+       policy = @{ optionalUpdates = 'install'; previewUpdates = $Previews; drivers = 'include'; featureUpdates = 'skip'; maxAttemptsPerUpdate = 3 }
+       summary = $sum
+       settingsRefresh = $(if ($Refresh) { $Refresh } else { @{ available = $true; requested = $true; completed = $true; attempt = 1; requestedUtc = '2026-10-20T07:58:00.0000000Z'; completedUtc = '2026-10-20T07:59:30.0000000Z'; lastSuccessfulScanBefore = '2026-10-20T07:10:00.0000000Z'; lastSuccessfulScanAfter = '2026-10-20T07:59:20.0000000Z'; settingsDisplayVerified = $false; message = 'Settings scan completed.' } })
+       verification = @{ remainingOffered = 0; noLongerOffered = @(); devicesWithProblems = @($Devices); rebootPending = ($State -eq 'RestartRequired') }
+       drivers = @(@{ title = 'Realtek Semiconductor Corp. - Extension - 6.0.9600.1'; device = @{ model = 'Realtek High Definition Audio'; hardwareID = 'HDAUDIO\FUNC_01&VEN_10EC&DEV_0897' }; result = 'Succeeded' }) }
+}
+function Set-WuResult { param([hashtable] $Result) Write-WddJson (Join-Path $script:Paths.Root 'Updates\result.json') $Result }
+
+<# A Retry Windows Update run folder: config.json (selection), state.json (final once finished), result.json. #>
+function Add-RetryRun {
+    param([string] $RunId, [string] $Selection = 'normal', [string] $Final = '', $Result = $null)
+    $d = Join-Path $script:Paths.Root "UpdateRetry\$RunId"
+    New-Item -ItemType Directory -Path $d -Force | Out-Null
+    Write-WddJson (Join-Path $d 'config.json') @{ selection = $Selection; workFolder = "UpdateRetry\$RunId" }
+    Write-WddJson (Join-Path $d 'state.json') $(if ($Final) { @{ final = $Final; starts = 1 } } else { @{ starts = 1 } })
+    if ($Result) { Write-WddJson (Join-Path $d 'result.json') $Result }
+}
+
+function Invoke-VerifyWith {
+    param([scriptblock] $Change = {}, [switch] $ScanUpdates)
+    $cfg = Get-HealthConfig
+    & $Change $cfg
+    (Invoke-WdhVerify $script:Manifest $script:Paths $cfg 'Technician' -ScanUpdates:$ScanUpdates).Report
+}
+
+# ------------------------------------------------------------------------------------------------
 # The Phase 9 package and its driver stage (simulated output; the real driver engine has its own suite)
 # ------------------------------------------------------------------------------------------------
 
@@ -713,6 +755,296 @@ Test-HealthScenario 'recovery tool: Verify action (menu 9) runs the same read-on
     Assert-Equal $a.Exit 0 "exit code: $($a.Text)"
     Assert-True ($a.Text -match 'Deployment health: Ready') $a.Text
     Assert-Equal (Get-HealthReport).trigger 'Recovery' 'trigger'
+}
+
+# ------------------------------------------------------------------------------------------------
+# Health engine 1.1.0: post-deployment audit (Windows Update 2.1.0 state, retries, devices, Office,
+# application verification, manufacturer software). All simulated; nothing here is installed.
+# ------------------------------------------------------------------------------------------------
+
+Test-HealthScenario 'W1. clean current system: update engine 2.1.0 says UpToDate -> Pass from updateState (not from "installed"); Settings refresh completed but its display NOT verified; orchestrator check; text report' {
+    Invoke-SimDeployment | Out-Null
+    Set-WuResult (New-WuResult 'UpToDate' -Summary @{ previewsExcluded = 1 })
+    $r = Invoke-VerifyWith
+    Assert-Status $r 'Ready' 'overall'
+    $s = Get-Finding $r 'updates.state'
+    Assert-True ($s.status -eq 'Pass' -and $s.observed -match '^UpToDate: Simulated: UpToDate' -and $s.observed -match 'engine 2\.1\.0') "state: $($s.observed)"
+    Assert-True ($s.method -match 'never concluded from') 'method says installation alone is not proof'
+    Assert-Equal (Get-Finding $r 'updates.stage').status 'Info' 'stage completion is context, not the verdict'
+    $sr = Get-Finding $r 'updates.settingsRefresh'
+    Assert-True ($sr.status -eq 'Info' -and $sr.observed -match 'requested .* and completed' -and $sr.observed -match 'NOT verified') "refresh: $($sr.observed)"
+    Assert-Equal $r.windowsUpdate.settingsRefresh.settingsDisplayVerified $false 'display never claimed verified'
+    $lc = Get-Finding $r 'updates.settingsLastCheck'
+    Assert-True ($lc.title -eq 'Windows Update (Settings) last successful check' -and $lc.observed -match '2026-10-20T09:41') "last check: $($lc.observed)"
+    Assert-Equal "$($r.windowsUpdate.current.updateState) $($r.windowsUpdate.current.engineVersion) $($r.windowsUpdate.original.source)" 'UpToDate 2.1.0 original' 'structured section'
+    Assert-True ((Get-Finding $r 'updates.scope').observed -match 'preview updates are intentionally excluded by policy' -and (Get-Finding $r 'updates.scope').observed -match 'feature updates') 'policy-accurate scope text'
+    Assert-True ((Get-Finding $r 'updates.scope').observed -notmatch 'optional updates are excluded') 'optional updates are not called excluded when the policy installs them'
+    Assert-True ((Get-Finding $r 'updates.previews').observed -match 'Intentionally excluded by policy: 1 preview') 'previews intentionally excluded'
+    Assert-True ((Get-Finding $r 'updates.drivers').observed -match 'Realtek') 'drivers from Windows Update listed'
+    $h = Read-WddJson (Join-Path $script:Paths.Root 'reports\health\customer-handoff.json')
+    Assert-Equal $h.updates 'Windows was updated during setup.' 'customer wording'
+    $txt = [IO.File]::ReadAllText((Join-Path $script:Paths.Root 'reports\health\technician-report.txt'))
+    foreach ($w in 'Windows Update \(checked', 'state UpToDate', 'Final Settings refresh', 'NOT verified', 'Manufacturer software', 'Applications \(10\)') { Assert-True ($txt -match $w) "text report has $w" }
+    Assert-Equal $script:M.HistoryQueries 0 'no history query without an original failure'
+}
+
+Test-HealthScenario 'W2. historical failures repaired later: the original stays failed (historical, file unchanged); a retry run and the Windows Update history show "installed later"; unmatched failures stay failures' {
+    Invoke-SimDeployment | Out-Null
+    $failed = @(
+        @{ title = '2026-10 Cumulative Update for Windows 11 (KB5070001)'; kbs = @('5070001'); category = 'InstallFailed'; class = 'Quality'; attempts = 3; lastHResult = '0x800f0922' }
+        @{ title = '2026-10 Cumulative Update for .NET Framework (KB5070002)'; kbs = @('KB5070002'); category = 'DownloadFailed'; class = 'Quality'; attempts = 3; lastHResult = '0x80240022' }
+        @{ title = 'Contoso - Firmware - 1.2.3'; kbs = @(); category = 'InstallFailed'; class = 'Driver'; attempts = 3; lastHResult = '0x80070103' }
+    )
+    Set-WuResult (New-WuResult 'CompletedWithFailures' 'CompletedWithFailures' -Failed $failed)
+    $origHash = Get-WddRawHash (Join-Path $script:Paths.Root 'Updates\result.json')
+    Add-RetryRun '20261021-100000' 'normal' 'Succeeded' (New-WuResult 'UpToDate' -Installed @(@{ title = '2026-10 Cumulative Update for Windows 11 (KB5070001)'; kbs = @('5070001'); result = 'Succeeded'; atUtc = '2026-10-21T10:20:00.0000000Z' }) -Finished '2026-10-21T10:30:00.0000000Z')
+    $script:M.updateHistory = @(
+        @{ title = '2026-10 Cumulative Update for .NET Framework (KB5070002)'; dateUtc = '2026-10-22T03:00:00.0000000Z'; resultCode = 2; operation = 1 }
+        @{ title = 'Contoso - Firmware - 1.2.3'; dateUtc = '2026-10-19T03:00:00.0000000Z'; resultCode = 2; operation = 1 }
+        @{ title = 'Contoso - Firmware - 1.2.3'; dateUtc = '2026-10-23T03:00:00.0000000Z'; resultCode = 4; operation = 1 }
+    )
+    $r = Invoke-VerifyWith
+    $k1 = Get-Finding $r 'updates.kb.5070001'
+    Assert-True ($k1.status -eq 'Info' -and $k1.observed -match '^Originally failed \(historical record, unchanged\)' -and $k1.observed -match 'installed later on 2026-10-21T10:20' -and $k1.observed -match 'by Retry Windows Update run 20261021-100000') "KB5070001: $($k1.observed)"
+    $k2 = Get-Finding $r 'updates.kb.KB5070002'
+    Assert-True ($k2.status -eq 'Info' -and $k2.observed -match 'by Windows Update \(its installation history\)' -and $k2.observed -match '2026-10-22') "KB5070002: $($k2.observed)"
+    $fw = @($r.findings | Where-Object { $_.id -like 'updates.update.*' })[0]
+    Assert-True ($fw.status -eq 'Fail' -and $fw.observed -match 'InstallFailed, Driver') "unmatched (an earlier success and a later failure do not count): $($fw.status) $($fw.observed)"
+    $st = Get-Finding $r 'updates.stage'
+    Assert-True ($st.status -eq 'Info' -and $st.observed -match 'historical') "original stage: $($st.observed)"
+    Assert-True ((Get-Finding $r 'updates.state').status -eq 'Pass' -and (Get-Finding $r 'updates.state').observed -match 'Retry Windows Update run 20261021-100000') 'current state from the retry'
+    Assert-True ((Get-Finding $r 'updates.originalState').observed -match '^CompletedWithFailures / CompletedWithFailures') 'original state kept as history'
+    Assert-Equal $r.windowsUpdate.original.updateState 'CompletedWithFailures' 'original section unchanged'
+    Assert-Equal (@($r.windowsUpdate.originalFailures | Where-Object { $_.laterInstalled }).Count) 2 'two installed later'
+    Assert-Equal (Get-WddRawHash (Join-Path $script:Paths.Root 'Updates\result.json')) $origHash 'the original result file is never rewritten'
+    Assert-Status $r 'NeedsAttention' 'the unmatched failure remains'
+    # Without the unmatched failure every original failure is accounted for.
+    Set-WuResult (New-WuResult 'CompletedWithFailures' 'CompletedWithFailures' -Failed @($failed[0], $failed[1]))
+    $r = Invoke-VerifyWith
+    Assert-Status $r 'Ready' 'repaired later'
+    Assert-True (@($r.comparison.resolved) -contains 'updates.kb.5070001' -or (Get-Finding $r 'updates.kb.5070001').status -eq 'Info') 'comparison'
+    Assert-True ($script:M.HistoryQueries -ge 1) 'history read (read-only) because of original failures'
+}
+
+Test-HealthScenario 'W3. restart required, updates remaining, installation incomplete, verification unavailable: never "Pass"; a live read-only scan can confirm nothing is required' {
+    Invoke-SimDeployment | Out-Null
+    Set-WuResult (New-WuResult 'RestartRequired')
+    $r = Invoke-VerifyWith
+    Assert-Equal (Get-Finding $r 'updates.state').status 'Warning' 'restart required'
+    Assert-Status $r 'ReadyWithWarnings' 'overall'
+    Assert-Equal (Read-WddJson (Join-Path $script:Paths.Root 'reports\health\customer-handoff.json')).updates 'Restart the computer once to finish installing updates.' 'customer told to restart'
+    Set-WuResult (New-WuResult 'InstallationIncomplete' 'Failed')
+    $r = Invoke-VerifyWith
+    Assert-True ((Get-Finding $r 'updates.state').status -eq 'Fail' -and (Get-Finding $r 'updates.state').recoveryAction -eq 'RetryFailed') 'incomplete installation fails'
+    Assert-Status $r 'NeedsAttention' 'overall'
+    Set-WuResult (New-WuResult 'VerificationUnavailable')
+    $r = Invoke-VerifyWith
+    Assert-Equal (Get-Finding $r 'updates.state').status 'Unverifiable' 'verification unavailable'
+    Assert-Status $r 'Unverifiable' 'overall'
+    $script:M.updateScan = @{ required = 0; optional = 0; drivers = 0; feature = 0; titles = @() }
+    $r = Invoke-VerifyWith -ScanUpdates
+    Assert-True ((Get-Finding $r 'updates.state').status -eq 'Info' -and (Get-Finding $r 'updates.state').observed -match 'live read-only scan now finds no required update') 'live scan confirms'
+    Assert-Equal "$($r.windowsUpdate.liveScan.performed) $($r.windowsUpdate.liveScan.required)" 'True 0' 'live scan section'
+}
+
+Test-HealthScenario 'W4. previews: remaining while the policy includes them (Warning) vs intentionally excluded by policy (Info, Ready)' {
+    Invoke-SimDeployment | Out-Null
+    Set-WuResult (New-WuResult 'PreviewUpdatesExcluded' -Previews $false -Summary @{ previewsExcluded = 2 })
+    $r = Invoke-VerifyWith
+    Assert-Equal (Get-Finding $r 'updates.state').status 'Pass' 'previews excluded is up to date'
+    Assert-True ((Get-Finding $r 'updates.previews').observed -match '^Intentionally excluded by policy: 2 preview update\(s\) were offered and not installed') (Get-Finding $r 'updates.previews').observed
+    Assert-Status $r 'Ready' 'overall'
+    Set-WuResult (New-WuResult 'UpdatesRemaining' -Previews $true -Summary @{ remaining = 2 })
+    $r = Invoke-VerifyWith
+    Assert-Equal (Get-Finding $r 'updates.state').status 'Warning' 'previews remaining while included'
+    Assert-True ((Get-Finding $r 'updates.previews').observed -match '^Included by policy') 'included'
+    Assert-True ((Get-Finding $r 'updates.state').observed -match 'remaining 2') 'summary in the evidence'
+    Assert-Status $r 'ReadyWithWarnings' 'overall'
+}
+
+Test-HealthScenario 'W5. Retry Windows Update history: finished (Info), running with its task (Pending), stopped without a task (Warning); verification changes nothing' {
+    Invoke-SimDeployment | Out-Null
+    Add-RetryRun '20261021-090000' 'normal' 'Succeeded' (New-WuResult 'UpToDate' -Finished '2026-10-21T09:30:00.0000000Z')
+    Add-RetryRun '20261021-110000' 'drivers' ''
+    Add-RetryRun '20261021-120000' 'configured' ''
+    $script:SimTasks['\WindowsDeploymentBuilder\WindowsUpdateRetry'] = 'SYSTEM'
+    $before = Get-TreeState
+    $r = Invoke-VerifyWith
+    $a = Get-Finding $r 'updates.retry.20261021-090000'; $b = Get-Finding $r 'updates.retry.20261021-110000'; $c = Get-Finding $r 'updates.retry.20261021-120000'
+    Assert-True ($a.status -eq 'Info' -and $a.observed -match 'Finished \(Succeeded\), selection normal; installed 1, failed 0, engine 2\.1\.0, state UpToDate') "finished: $($a.observed)"
+    Assert-True ($b.status -eq 'Warning' -and $b.observed -match '^Stopped before finishing') "older unfinished run: $($b.observed)"
+    Assert-True ($c.status -eq 'Pending' -and $c.observed -match '^Running or awaiting a restart' -and $c.observed -match 'selection configured') "newest unfinished run with the task: $($c.observed)"
+    Assert-Status $r 'Incomplete' 'a running retry'
+    Assert-Equal ((@($r.windowsUpdate.retries) | ForEach-Object { $_.state }) -join ',') 'Finished,StoppedBeforeFinishing,RunningOrAwaitingRestart' 'structured list'
+    Assert-Equal (Get-Finding $r 'updates.state').observed.Contains('Retry Windows Update run 20261021-090000') $true 'current state from the finished retry'
+    $after = Get-TreeState
+    foreach ($k in $before.Keys) { Assert-Equal $after[$k] $before[$k] "$k unchanged" }
+    Assert-True $script:SimTasks.ContainsKey('\WindowsDeploymentBuilder\WindowsUpdateRetry') 'the retry task is never touched'
+    [void] $script:SimTasks.Remove('\WindowsDeploymentBuilder\WindowsUpdateRetry')
+    $r = Invoke-VerifyWith
+    Assert-Equal (Get-Finding $r 'updates.retry.20261021-120000').status 'Warning' 'no task: stopped before finishing'
+    Assert-Status $r 'ReadyWithWarnings' 'overall'
+}
+
+Test-HealthScenario 'W6. devices: a device the deployment reported is healthy now (Info); another still lacks its driver (Fail, hardware ID and code); one is gone; zero problems is not proof of every optional driver' {
+    Invoke-SimDeployment | Out-Null
+    $audio = 'HDAUDIO\FUNC_01&VEN_10EC&DEV_0897&SUBSYS_1462D817&REV_1001'
+    Set-WuResult (New-WuResult 'UpToDate' -Devices @(
+        @{ name = 'High Definition Audio Device'; deviceId = 'HDAUDIO\FUNC_01&VEN_10EC&DEV_0897\5&1'; problemCode = 28; hardwareIds = @($audio, 'HDAUDIO\FUNC_01&VEN_10EC&DEV_0897') }
+        @{ name = 'PCI Simple Communications Controller'; deviceId = 'PCI\VEN_8086&DEV_7AE8\3&11583659&0&B0'; problemCode = 28; hardwareIds = @('PCI\VEN_8086&DEV_7AE8') }))
+    $rep = Read-WddJson $script:Paths.ReportJson
+    $rep['windowsUpdate'] = @{ verification = @{ devicesWithProblems = @(@{ name = 'USB Serial Device'; problemCode = 43; hardwareIds = @('USB\VID_1A86&PID_7523') }) } }
+    Write-WddJson $script:Paths.ReportJson $rep
+    $script:M.devices += @{ name = 'PCI Simple Communications Controller'; class = 'System'; service = ''; problemCode = 28; hardwareId = 'PCI\VEN_8086&DEV_7AE8' }
+    $r = Invoke-VerifyWith
+    $cmp = @($r.deviceComparison)
+    Assert-Equal (($cmp | ForEach-Object { "$($_.state):$($_.previousProblemCode)" } | Sort-Object) -join ',') 'NotPresent:43,NowHealthy:28,StillHasProblem:28' 'comparison'
+    $healthy = Get-Finding $r (@($cmp | Where-Object { $_.state -eq 'NowHealthy' })[0].findingId)
+    Assert-True ($healthy.status -eq 'Info' -and $healthy.title -match 'previously reported, now healthy' -and $healthy.observed -match 'code 28' -and $healthy.observed -match [regex]::Escape($audio)) "now healthy: $($healthy.observed)"
+    $still = @($r.findings | Where-Object { $_.category -eq 'drivers' -and $_.title -eq 'PCI Simple Communications Controller' })[0]
+    Assert-True ($still.status -eq 'Fail' -and $still.observed -match 'already reported by the deployment \(code 28' -and $still.observed -match 'hardware ID PCI\\VEN_8086&DEV_7AE8') "still: $($still.observed)"
+    Assert-True ((Get-Finding $r (@($cmp | Where-Object { $_.state -eq 'NotPresent' })[0].findingId)).observed -match 'Not present now') 'gone'
+    Assert-Status $r 'NeedsAttention' 'a system device without a driver'
+    $script:M.devices = @($script:M.devices | Where-Object { $_.hardwareId -ne 'PCI\VEN_8086&DEV_7AE8' })
+    $r = Invoke-VerifyWith
+    Assert-True ((Get-Finding $r 'drivers.devices').observed -match 'hardware-health result, not proof that every optional driver was installed') 'zero problems wording'
+}
+
+Test-HealthScenario 'W7. applications: installed and verified, installer succeeded but unverified, failed, missing; never "installed" from the exit code' {
+    $script:AppSim.Behaviour['Git.Git'] = 'fail'
+    Invoke-SimDeployment | Out-Null
+    $script:M.missing = @('7zip.7zip')
+    $r = Invoke-VerifyWith
+    $v = @{}; foreach ($a in @($r.applications)) { $v[$a.key] = $a.verification }
+    Assert-Equal $v['winget:7zip.7zip'] 'InstallerSucceededUnverified' 'exit code 0 but not found'
+    Assert-Equal (Get-Finding $r 'app.winget:7zip.7zip').status 'Warning' 'not a pass'
+    Assert-Equal $v['winget:git.git'] 'Failed' 'failed'
+    Assert-Equal $v['winget:google.chrome'] 'InstalledAndVerified' 'verified in Windows'
+    $app = Join-Path $script:Paths.Root 'Applications'
+    $res = Read-WddJson (Join-Path $app 'result.json'); $res.packages = @(@($res.packages) | Where-Object { $_.key -ne 'winget:git.git' }); Write-WddJson (Join-Path $app 'result.json') $res
+    $st = Read-WddJson (Join-Path $app 'state.json'); [void] $st.packages.Remove('winget:git.git'); Write-WddJson (Join-Path $app 'state.json') $st
+    $r = Invoke-VerifyWith
+    Assert-Equal (@($r.applications | Where-Object { $_.key -eq 'winget:git.git' })[0]).verification 'Missing' 'no record, not found'
+}
+
+Test-HealthScenario 'W8. Office LTSC selected: verified in the Click-to-Run registry with its activation as recorded (no key, no KMS host); not found despite a successful installer -> Fail' {
+    Invoke-SimDeployment | Out-Null
+    $office = { param($c) $c['office'] = @{ product = 'ltsc2024ProPlus'; displayName = 'Office LTSC Professional Plus 2024'; productReleaseId = 'ProPlus2024Volume' }; $c['activation'] = @{ windows = 'none'; office = 'microsoft' } }
+    Write-WddJson (Join-Path $script:Paths.Root 'Office\result.json') @{ status = 'Succeeded'; verified = $true; installed = @{ version = '16.0.17932.20328' }; finishedUtc = $script:SimNow.ToString('o') }
+    Write-WddJson (Join-Path $script:Paths.Root 'Activation\result.json') @{ schemaVersion = 1; office = @{ status = 'Activated'; verified = $true; message = 'Activated and verified by KMS host kms.contoso.example:1688 (key ending 6F4BT)' }; containsSecrets = $false }
+    $script:M.reg["$script:OfficeKey\ProductReleaseIds"] = 'ProPlus2024Volume'
+    $script:M.reg["$script:OfficeKey\VersionToReport"] = '16.0.17932.20328'
+    $script:M.reg["$script:OfficeKey\Platform"] = 'x64'
+    $r = Invoke-VerifyWith $office
+    $i = Get-Finding $r 'office.install'
+    Assert-True ($i.status -eq 'Pass' -and $i.observed -match 'ProPlus2024Volume, version 16\.0\.17932\.20328, x64') "office: $($i.observed)"
+    $a = Get-Finding $r 'office.activation'
+    Assert-Equal $a.status 'Pass' 'activation as recorded'
+    $json = [IO.File]::ReadAllText((Join-Path $script:Paths.Root 'reports\health\deployment-health.json'))
+    foreach ($bad in '6F4BT', 'kms.contoso.example') { Assert-True ($json.IndexOf($bad) -lt 0) "no $bad in the report" }
+    Assert-Equal "$($r.office.result) $($r.office.activation.status) $($r.office.activation.source)" 'InstalledAndVerified Activated Activation\result.json' 'office section'
+    Assert-Equal (@($r.checklist | Where-Object { $_.id -eq 'office' })[0]).state 'done' 'checklist'
+    foreach ($k in 'ProductReleaseIds', 'VersionToReport', 'Platform') { [void] $script:M.reg.Remove("$script:OfficeKey\$k") }
+    $r = Invoke-VerifyWith $office
+    $i = Get-Finding $r 'office.install'
+    Assert-True ($i.status -eq 'Fail' -and $i.observed -match 'reported Succeeded, but Windows has no Office Click-to-Run configuration') "not found: $($i.observed)"
+    Assert-Equal $r.office.result 'InstallerSucceededUnverified' 'never installed from the installer result alone'
+    $script:M.fail = @('officeClickToRun')
+    function Get-WdhOfficeClickToRun { Assert-SimProbe 'officeClickToRun'; $null }
+    Assert-Equal (Get-Finding (Invoke-VerifyWith $office) 'office.install').status 'Unverifiable' 'registry unreadable'
+    Assert-Equal (Get-Finding (Invoke-VerifyWith) 'office.install') $null 'Office not selected: nothing checked'
+}
+
+Test-HealthScenario 'W9. manufacturer software: RTX 4080 -> NVIDIA App; RX 6700 XT -> Adrenalin; AMD CPU + NVIDIA GPU -> no Adrenalin; Ryzen desktop -> Ryzen Master; Ryzen laptop -> none; installed detection; never required' {
+    Invoke-SimDeployment | Out-Null
+    $ids = { param($r) (@($r.hardwareSoftware) | ForEach-Object { $_.id }) -join ',' }
+    $script:M.videoControllers = @(@{ name = 'NVIDIA GeForce RTX 4080'; pnpDeviceId = 'PCI\VEN_10DE&DEV_2704&SUBSYS_167A10DE&REV_A1\4&1' })
+    $r = Invoke-VerifyWith
+    Assert-Equal (& $ids $r) 'nvidiaApp' 'RTX 4080'
+    $n = @($r.hardwareSoftware)[0]
+    Assert-Equal "$($n.installed) $($n.automaticInstall) $($n.url)" 'False False https://www.nvidia.com/en-us/software/nvidia-app/' 'not installed, manual only'
+    Assert-True ($n.automaticInstallReason -match 'No verified WinGet package \(checked microsoft/winget-pkgs\)' -and $n.signIn -match 'No NVIDIA account is required for driver updates') 'reason and sign-in'
+    $f = Get-Finding $r 'vendor.nvidiaApp'
+    Assert-Equal "$($f.status) $($f.required) $($f.category)" 'Info False hardwareSoftware' 'information only'
+    Assert-Status $r 'Ready' 'recommendations never change the outcome'
+    Assert-Equal (Get-Category $r 'hardwareSoftware').status 'Verified' 'category'
+    $script:M.extraUninstall = @(@{ scope = 'machine'; keyName = '{NVIDIA-APP}'; displayName = 'NVIDIA App'; displayVersion = '11.0.1.163'; publisher = 'NVIDIA Corporation' })
+    $n = @((Invoke-VerifyWith).hardwareSoftware)[0]
+    Assert-Equal "$($n.installed) $($n.installedVersion)" 'True 11.0.1.163' 'installed detection'
+    $script:M.extraUninstall = @()
+    $script:M.videoControllers = @(@{ name = 'AMD Radeon RX 6700 XT'; pnpDeviceId = 'PCI\VEN_1002&DEV_73DF&SUBSYS_23111458&REV_C1\6&1' })
+    Assert-Equal (& $ids (Invoke-VerifyWith)) 'amdAdrenalin' 'RX 6700 XT'
+    $script:M.videoControllers = @(@{ name = 'NVIDIA GeForce RTX 4080'; pnpDeviceId = 'PCI\VEN_10DE&DEV_2704\4&1' })
+    $script:M.processors = @(@{ name = 'AMD Ryzen 7 7800X3D 8-Core Processor'; manufacturer = 'AuthenticAMD' })
+    $r = Invoke-VerifyWith
+    Assert-Equal (& $ids $r) 'nvidiaApp,amdRyzenMaster' 'AMD CPU with NVIDIA GPU: no Adrenalin; desktop Ryzen: Ryzen Master'
+    $rm = @($r.hardwareSoftware | Where-Object { $_.id -eq 'amdRyzenMaster' })[0]
+    Assert-True ($rm.compatibility -match 'not a chipset driver' -and $rm.notes -match 'never applies tuning, overclocking, undervolting, voltage, BIOS or profile changes' -and $rm.url -eq 'https://www.amd.com/en/products/software/ryzen-master.html') 'Ryzen Master wording'
+    Assert-True ((Get-Finding $r 'vendor.summary').observed -match 'Adrenalin Edition is not recommended: no Radeon graphics') 'why no Adrenalin'
+    $script:M.processors = @(@{ name = 'AMD Ryzen 7 7840HS w/ Radeon 780M Graphics'; manufacturer = 'AuthenticAMD' })
+    $script:M.videoControllers = @(@{ name = 'AMD Radeon 780M Graphics'; pnpDeviceId = 'PCI\VEN_1002&DEV_15BF\3&1' })
+    $script:M.chassis = @{ chassisTypes = @(10); battery = $true }
+    $r = Invoke-VerifyWith
+    Assert-Equal (& $ids $r) 'amdAdrenalin' 'Ryzen laptop: integrated Radeon only, no Ryzen Master'
+    Assert-True ((Get-Finding $r 'vendor.summary').observed -match 'Ryzen Master is not recommended: portable computer') 'why no Ryzen Master'
+    $script:M.fail = @('videoControllers', 'processors', 'chassis')
+    $r = Invoke-VerifyWith
+    Assert-Equal "$((Get-Finding $r 'vendor.summary').status) $(@($r.hardwareSoftware).Count)" 'Info 0' 'probes unavailable: information only'
+    Assert-Status $r 'Ready' 'still ready'
+}
+
+Test-HealthScenario 'W10. orchestrator API unavailable (before Windows 11 24H2) or unreadable: reported as information, never a failure' {
+    Invoke-SimDeployment | Out-Null
+    $script:M.orchestrator = $null
+    $r = Invoke-VerifyWith
+    $f = Get-Finding $r 'updates.settingsLastCheck'
+    Assert-True ($f.status -eq 'Info' -and $f.observed -match '^Not available') "unavailable: $($f.observed)"
+    Assert-Equal $r.windowsUpdate.orchestrator.available $false 'section'
+    $script:M.fail = @('orchestrator')
+    $r = Invoke-VerifyWith
+    Assert-Equal (Get-Finding $r 'updates.settingsLastCheck').status 'Info' 'probe failure'
+    Assert-True (@($r.limitations | Where-Object { $_ -match 'orchestratorScan' }).Count -eq 1) 'limitation recorded'
+    Assert-Status $r 'Ready' 'overall'
+}
+
+Test-HealthScenario 'W11. compatibility: update engine 1.x and 2.0.0 results (no updateState, policy.previewUpdates, summary, settingsRefresh) and an older health-config.json without office, activation or previewUpdates' {
+    Invoke-SimDeployment | Out-Null
+    Set-WuResult @{ status = 'Succeeded'; reason = ''; engineVersion = '1.2.0'; reboots = 1; finishedUtc = $script:SimNow.ToString('o'); installed = @(@{ title = 'Update (KB5068861)'; kbs = @('KB5068861') }); failed = @(); skipped = @() }
+    $old = { param($c) foreach ($k in 'office', 'activation') { [void] $c.Remove($k) }; [void] $c['windowsUpdate'].Remove('previewUpdates'); $c['windowsUpdate']['optionalUpdates'] = 'skip' }
+    $r = Invoke-VerifyWith $old
+    Assert-Status $r 'Ready' '1.x result'
+    Assert-Equal (Get-Finding $r 'updates.state') $null 'no state without updateState'
+    Assert-Equal (Get-Finding $r 'updates.stage').status 'Pass' 'legacy stage verdict unchanged'
+    Assert-Equal "$($r.windowsUpdate.policy.previewSource) $($r.windowsUpdate.policy.previewUpdates)" 'optionalUpdates False' 'previews followed optionalUpdates before 2.1.0'
+    Assert-True ((Get-Finding $r 'updates.scope').observed -match 'optional updates are excluded by policy; preview updates are intentionally excluded by policy \(this engine had no separate preview setting') (Get-Finding $r 'updates.scope').observed
+    Assert-Equal @($r.findings | Where-Object { $_.id -like '*.checkError' }).Count 0 'no check stopped'
+    Set-WuResult @{ status = 'CompletedWithFailures'; reason = ''; engineVersion = '2.0.0'; reboots = 1; finishedUtc = $script:SimNow.ToString('o'); installed = @(); skipped = @()
+                    failed = @(@{ title = 'Security Update (KB5071234)'; kbs = @('KB5071234'); attempts = 3; lastHResult = '0x80070005'; category = 'AccessDenied' })
+                    policy = @{ optionalUpdates = 'install'; drivers = 'include'; featureUpdates = 'skip'; maxAttemptsPerUpdate = 3 }; verification = @{ remainingOffered = 1; noLongerOffered = @(); devicesWithProblems = @(); rebootPending = $false } }
+    $r = Invoke-VerifyWith $old
+    Assert-Equal (Get-Finding $r 'updates.kb.KB5071234').status 'Fail' '2.0.0 failure as before'
+    Assert-Equal "$($r.windowsUpdate.policy.previewSource) $($r.windowsUpdate.policy.previewUpdates)" 'optionalUpdates True' '2.0.0 policy without previewUpdates'
+    Assert-Status $r 'NeedsAttention' 'overall'
+    Assert-Equal @($r.findings | Where-Object { $_.id -like '*.checkError' }).Count 0 'no check stopped'
+}
+
+Test-HealthScenario 'W12. the full audit in one report (schema-validated by the TypeScript tests): repaired update, retry, Office, recommendations, device comparison -> Ready' {
+    Invoke-SimDeployment | Out-Null
+    $failed = @(@{ title = '2026-10 Cumulative Update for Windows 11 (KB5070001)'; kbs = @('5070001'); category = 'InstallFailed'; class = 'Quality'; attempts = 3; lastHResult = '0x800f0922' })
+    Set-WuResult (New-WuResult 'CompletedWithFailures' 'CompletedWithFailures' -Failed $failed -Devices @(@{ name = 'High Definition Audio Device'; problemCode = 28; hardwareIds = @('HDAUDIO\FUNC_01&VEN_10EC&DEV_0897&SUBSYS_1462D817&REV_1001') }))
+    Add-RetryRun '20261021-100000' 'normal' 'Succeeded' (New-WuResult 'UpToDate' -Installed @(@{ title = '2026-10 Cumulative Update for Windows 11 (KB5070001)'; kbs = @('5070001'); result = 'Succeeded'; atUtc = '2026-10-21T10:20:00.0000000Z' }) -Finished '2026-10-21T10:30:00.0000000Z')
+    Write-WddJson (Join-Path $script:Paths.Root 'Office\result.json') @{ status = 'Succeeded'; verified = $true; finishedUtc = $script:SimNow.ToString('o') }
+    $script:M.reg["$script:OfficeKey\ProductReleaseIds"] = 'Standard2024Volume'
+    $script:M.reg["$script:OfficeKey\VersionToReport"] = '16.0.17932.20328'
+    $script:M.processors = @(@{ name = 'AMD Ryzen 7 7800X3D 8-Core Processor'; manufacturer = 'AuthenticAMD' })
+    $cfg = Get-HealthConfig
+    $cfg['office'] = @{ product = 'ltsc2024Standard'; displayName = 'Office LTSC Standard 2024'; productReleaseId = 'Standard2024Volume' }
+    $cfg['activation'] = @{ windows = 'none'; office = 'none' }
+    $r = (Invoke-WdhVerify $script:Manifest $script:Paths $cfg 'Technician').Report
+    Assert-Status $r 'Ready' 'overall'
+    Assert-True (@($r.windowsUpdate.retries).Count -eq 1 -and @($r.deviceComparison).Count -eq 1 -and $r.office -and @($r.hardwareSoftware).Count -eq 2) 'every section present'
+    Assert-Equal (Get-Finding $r 'office.activation').status 'Info' 'no Office activation requested'
+    Save-Out 'W'
 }
 
 Write-Output ''

@@ -22,6 +22,8 @@ import {
   HEALTH_TEMPLATE,
   HealthReportSchema,
   PHASE5_OUTCOME_MAP,
+  UPDATE_STATE_FINDING,
+  UPDATE_STATES,
   customizationAdapters,
   healthActive,
   healthConfig,
@@ -89,6 +91,58 @@ describe('verification plan (health-config.json)', () => {
   });
 });
 
+describe('health engine 1.1.0: post-deployment audit plan', () => {
+  it('carries the Office product and the activation requests (never a key or KMS host); both stay optional for older plans', () => {
+    const none = healthConfig(ownerDefaults());
+    expect(none.office).toEqual({ product: 'none', displayName: '', productReleaseId: '' });
+    const p = profile((q) => {
+      q.office.product = 'ltsc2024ProPlus';
+      q.activation.office = 'microsoft';
+      q.activation.officeMethod = 'kms';
+      q.activation.officeKmsHost = 'kms.contoso.example';
+    });
+    const c = healthConfig(p);
+    expect(c.office).toEqual({ product: 'ltsc2024ProPlus', displayName: 'Office LTSC Professional Plus 2024', productReleaseId: 'ProPlus2024Volume' });
+    expect(c.activation).toEqual({ windows: p.activation.windows, office: 'microsoft' });
+    expect(JSON.stringify(c)).not.toContain('kms.contoso.example');
+    expect(c.windowsUpdate.previewUpdates).toBe(p.windowsUpdate.previewUpdates);
+    // The engine reads every new section with defaults (packages before 1.1.0 lack them).
+    expect(engineSource).toContain("Get-WdhKey $C.Config 'office'");
+    expect(engineSource).toContain("Get-WdhKey (Get-WdhKey $C.Config 'activation') 'office'");
+  });
+
+  it('maps every updateState of update engine 2.1.0 exactly as documented; installation finishing is never a pass by itself', () => {
+    const block = /\$script:WdhUpdateStates = @\{([\s\S]*?)\r?\n\}/.exec(engineSource)![1]!;
+    const fromPs = Object.fromEntries([...block.matchAll(/(\w+)\s+= @\('(\w+)'/g)].map((m) => [m[1], m[2]]));
+    expect(fromPs).toEqual(UPDATE_STATE_FINDING);
+    expect(Object.keys(fromPs).sort()).toEqual([...UPDATE_STATES].sort());
+  });
+
+  const body = (name: string) => {
+    const i = engineSource.indexOf(`function ${name} {`);
+    const j = engineSource.indexOf('\nfunction ', i + 10);
+    return engineSource.slice(i, j < 0 ? undefined : j);
+  };
+
+  it('manufacturer software is information only, with the official pages and no automatic installation', () => {
+    for (const url of ['https://www.nvidia.com/en-us/software/nvidia-app/', 'https://www.amd.com/en/products/software/adrenalin.html', 'https://www.amd.com/en/products/software/ryzen-master.html']) expect(engineSource).toContain(url);
+    const fn = body('Test-WdhManufacturerSoftware');
+    const adds = [...fn.matchAll(/Add-WdhFinding [^\n]*/g)].map((m) => m[0]);
+    expect(adds.length).toBe(2);
+    expect(adds.every((a) => a.includes("'Info' 'Informational'") && a.includes('-Required $false'))).toBe(true);
+    expect(fn).toContain('automaticInstall = $false');
+    expect(fn).not.toMatch(/Start-Process|Invoke-WebRequest|winget/i);
+  });
+
+  it('the orchestrator probe only reads; Windows Update history is read with QueryHistory, never a search outside -ScanUpdates', () => {
+    expect(body('Get-WdhOrchestratorScan')).not.toMatch(/StartScan|\.Start|Install|Download/);
+    expect(body('Get-WdhUpdateHistory')).toMatch(/QueryHistory/);
+    expect(body('Get-WdhUpdateHistory')).not.toMatch(/\.Search\(/);
+    expect([...engineSource.matchAll(/\.Search\(/g)].length).toBe(1);
+    expect(body('Get-WdhOfficeClickToRun')).not.toMatch(/ProductKey|DigitalProductId|OSPP/);
+  });
+});
+
 describe('Windows Update drivers during provisioning (audit correction)', () => {
   it('new deployments let Windows Update offer compatible drivers; the driver stage receives the same policy', () => {
     const p = ownerDefaults();
@@ -143,7 +197,7 @@ describe('profiles and packages', () => {
     ]);
     const m = buildManifest(p);
     expect(m.manifest.files.filter((f) => f.embedded && f.path.startsWith('scripts/health/')).every((f) => f.textSha256)).toBe(true);
-    expect(m.manifest).toMatchObject({ verification: { enabled: true, readOnly: true, tool: 'scripts/health/DeploymentHealth.ps1' }, paths: { healthTool: 'C:\\ProgramData\\WindowsDeploymentBuilder\\Package\\scripts\\health\\DeploymentHealth.ps1' }, generator: { healthEngine: '1.0.0' } });
+    expect(m.manifest).toMatchObject({ verification: { enabled: true, readOnly: true, tool: 'scripts/health/DeploymentHealth.ps1' }, paths: { healthTool: 'C:\\ProgramData\\WindowsDeploymentBuilder\\Package\\scripts\\health\\DeploymentHealth.ps1' }, generator: { healthEngine: '1.1.0' } });
     const pkg = buildDeploymentPackage(p, generateOk(p));
     expect(pkg.entries.some((e) => e.path === 'WindowsDeployment/scripts/health/DeploymentHealth.ps1')).toBe(true);
     expect(generateOk(p).xml).toContain('DeploymentHealth.ps1');

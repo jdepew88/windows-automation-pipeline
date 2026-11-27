@@ -232,8 +232,9 @@ describe.skipIf(!onWindows)('PowerShell (Windows only)', () => {
       }
       expect(text).toMatch(/\b\d+ passed, 0 failed/);
       const files = readdirSync(out);
-      // Scenarios A (Ready), B (ReadyWithWarnings), E (Incomplete), F (NeedsAttention, restoration) and K (after recovery).
-      expect(files.filter((f) => f.endsWith('-deployment-health.json')).sort()).toEqual(['A-deployment-health.json', 'B-deployment-health.json', 'E-deployment-health.json', 'F-deployment-health.json', 'K-deployment-health.json']);
+      // Scenarios A (Ready), B (ReadyWithWarnings), E (Incomplete), F (NeedsAttention, restoration), K (after recovery) and
+      // W (health engine 1.1.0: Windows Update state and retry history, device comparison, Office, manufacturer software).
+      expect(files.filter((f) => f.endsWith('-deployment-health.json')).sort()).toEqual(['A-deployment-health.json', 'B-deployment-health.json', 'E-deployment-health.json', 'F-deployment-health.json', 'K-deployment-health.json', 'W-deployment-health.json']);
       const seen = new Set<string>();
       for (const f of files.filter((x) => x.endsWith('-deployment-health.json'))) {
         const parsed = HealthReportSchema.safeParse(JSON.parse(stripBom(readFileSync(join(out, f), 'utf8'))));

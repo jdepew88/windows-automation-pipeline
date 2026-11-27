@@ -14,8 +14,21 @@
     setting. It writes only its own reports below <dataRoot>\reports\health:
         deployment-health.json   every finding with expected and observed state, evidence, next action
         technician-report.html   the dashboard (offline; print or save as PDF)
+        technician-report.txt    the same findings as plain text (Windows Update, devices, Office,
+                                 manufacturer software recommendations, applications)
         customer-handoff.html    plain summary for the person receiving the computer
         history\                 earlier reports (the record of a failed deployment is never lost)
+
+    Health engine 1.1.0 also audits, read-only: the Windows Update state the update engine (2.1.0)
+    recorded, its policy and final Settings refresh, every Retry Windows Update run, which original
+    update failures were installed later (retry results or Windows Update history), devices the
+    deployment reported with problems compared with Device Manager now, Microsoft Office
+    (Click-to-Run registry, activation as the activation stage recorded it) and optional
+    manufacturer utilities (recommendations only; nothing is ever installed by this check).
+
+    It can run at any time later, without replaying the deployment:
+        powershell.exe -ExecutionPolicy Bypass -File C:\ProgramData\WindowsDeploymentBuilder\Package\scripts\health\DeploymentHealth.ps1 -Mode Verify
+        ... -Mode Dashboard   (verifies, then opens the technician report)
 
       -Mode Verify            (default) verify and write the reports; exit code = overall state
       -Mode Dashboard         verify, then open the technician report
@@ -49,14 +62,14 @@ $script:WdhArgs = @{ Mode = $Mode; Trigger = $Trigger; ScanUpdates = [bool] $Sca
 if (-not (Get-Command Read-WddManifest -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot '..\common\DeploymentCommon.ps1') }
 Set-StrictMode -Version 2.0
 
-$script:WdhVersion = '1.0.0'
+$script:WdhVersion = '1.1.0'
 $script:WdhScriptRoot = $PSScriptRoot
 $script:WdhStates = @('Ready', 'ReadyWithWarnings', 'NeedsAttention', 'Incomplete', 'Unverifiable', 'Failed')
 $script:WdhExitCodes = @{ Ready = 0; ReadyWithWarnings = 10; NeedsAttention = 20; Incomplete = 30; Unverifiable = 50; Failed = 60 }
 $script:WdhCategoryRank = @{ Verified = 0; Warning = 1; NeedsAttention = 2; Incomplete = 3; Unverifiable = 4; Failed = 5 }
 $script:WdhCategoryNames = [ordered]@{
     windows = 'Windows'; accounts = 'Accounts and identity'; updates = 'Windows Update'; drivers = 'Hardware and drivers'; applications = 'Applications'
-    restoration = 'Restored settings'; security = 'Security'; network = 'Network'; storage = 'Storage'; customizations = 'Windows settings'; recovery = 'Recovery and outstanding work'
+    restoration = 'Restored settings'; security = 'Security'; network = 'Network'; storage = 'Storage'; customizations = 'Windows settings'; hardwareSoftware = 'Manufacturer software'; recovery = 'Recovery and outstanding work'
 }
 # Windows' own documented device problem codes (CM_PROB_*), in words.
 $script:WdhProblemCodes = @{
@@ -258,11 +271,86 @@ function Get-WdhUpdateScan {
     return $o
 }
 
-<# Present Plug and Play devices: name, class, service, problem code and the first hardware ID. #>
+<#
+    Windows Update history (read-only): what Windows itself recorded as installed, with the date.
+    IUpdateSearcher.QueryHistory only reads the history; it never searches, downloads or installs.
+    resultCode 2 = succeeded, 3 = succeeded with errors; operation 1 = installation, 2 = removal.
+#>
+function Get-WdhUpdateHistory {
+    param([int] $Max = 1000)
+    $session = New-Object -ComObject 'Microsoft.Update.Session'
+    $searcher = $session.CreateUpdateSearcher()
+    $count = [int] $searcher.GetTotalHistoryCount()
+    if ($count -le 0) { return @() }
+    $out = @()
+    foreach ($h in @($searcher.QueryHistory(0, [Math]::Min($count, $Max)))) {
+        # The Windows Update Agent records history dates in UTC.
+        $d = $(if ($h.Date) { [DateTime]::SpecifyKind([DateTime] $h.Date, [DateTimeKind]::Utc).ToString('o') } else { '' })
+        $out += , @{ title = [string] $h.Title; dateUtc = $d; resultCode = [int] $h.ResultCode; operation = [int] $h.Operation }
+    }
+    return $out
+}
+
+<#
+    The Windows Update orchestrator's view (what Settings > Windows Update shows as "Last checked"),
+    Windows 11 24H2 and later. Reads ONLY LastSuccessfulScanTimestamp, IsScanning and IsWorking; it
+    never starts a scan. $null when the API does not exist on this Windows.
+#>
+function Get-WdhOrchestratorScan {
+    try { $null = [Windows.Management.Update.WindowsUpdateManager, Windows.Management.Update, ContentType = WindowsRuntime] } catch { return $null }
+    $m = New-Object Windows.Management.Update.WindowsUpdateManager 'WindowsDeploymentBuilder'
+    $ts = $m.LastSuccessfulScanTimestamp
+    $utc = $(if ($ts -is [DateTimeOffset]) { $ts.UtcDateTime.ToString('o') } elseif ($ts -is [DateTime]) { $ts.ToUniversalTime().ToString('o') } elseif ($ts) { [string] $ts } else { '' })
+    @{ lastSuccessfulScanUtc = $utc; isScanning = [bool] $m.IsScanning; isWorking = [bool] $m.IsWorking }
+}
+
+<# Display adapters: name and PnP device id (vendor and device ids), for the manufacturer software recommendations. #>
+function Get-WdhVideoControllers { @(Get-CimInstance -ClassName Win32_VideoController -Property Name, PNPDeviceID -ErrorAction Stop | ForEach-Object { @{ name = ([string] $_.Name).Trim(); pnpDeviceId = [string] $_.PNPDeviceID } }) }
+
+<# Processors: name and manufacturer only. #>
+function Get-WdhProcessors { @(Get-CimInstance -ClassName Win32_Processor -Property Name, Manufacturer -ErrorAction Stop | ForEach-Object { @{ name = ([string] $_.Name).Trim(); manufacturer = [string] $_.Manufacturer } }) }
+
+<# Chassis types (SMBIOS) and whether a battery exists: desktop or portable. #>
+function Get-WdhChassis {
+    $types = @()
+    foreach ($e in @(Get-CimInstance -ClassName Win32_SystemEnclosure -Property ChassisTypes -ErrorAction Stop)) { $types += @(@($e.ChassisTypes) | Where-Object { $null -ne $_ } | ForEach-Object { [int] $_ }) }
+    $battery = @(Get-CimInstance -ClassName Win32_Battery -ErrorAction SilentlyContinue).Count -gt 0
+    @{ chassisTypes = $types; battery = $battery }
+}
+
+<#
+    Microsoft Office Click-to-Run configuration (HKLM\SOFTWARE\Microsoft\Office\ClickToRun\Configuration):
+    product release ids, version and platform only. Keys and licences are never read here.
+#>
+function Get-WdhOfficeClickToRun {
+    $k = 'SOFTWARE\Microsoft\Office\ClickToRun\Configuration'
+    $ids = Get-WdhRegValue 'HKLM' $k 'ProductReleaseIds'
+    $ver = Get-WdhRegValue 'HKLM' $k 'VersionToReport'
+    $plat = Get-WdhRegValue 'HKLM' $k 'Platform'
+    if ($null -eq $ids -and $null -eq $ver) { return @{ present = $false; productReleaseIds = @(); version = ''; platform = '' } }
+    @{ present = $true; productReleaseIds = @(([string] $ids) -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }); version = [string] $ver; platform = [string] $plat }
+}
+
+<# True while the one Retry Windows Update task exists (the engine removes it when its run is final). #>
+function Test-WdhRetryTask { [bool] (Get-WddTask '\WindowsDeploymentBuilder\' 'WindowsUpdateRetry') }
+
+<# Retry Windows Update runs (<dataRoot>\UpdateRetry\<runId>\ config.json, state.json, result.json), oldest first. #>
+function Get-WdhRetryRuns {
+    param([string] $Root)
+    $dir = Join-Path $Root 'UpdateRetry'
+    if (-not (Test-Path -LiteralPath $dir)) { return @() }
+    $out = @()
+    foreach ($d in @(Get-ChildItem -LiteralPath $dir -Directory -ErrorAction SilentlyContinue | Sort-Object Name)) {
+        $out += , @{ runId = $d.Name; config = (Read-WddJson (Join-Path $d.FullName 'config.json')); state = (Read-WddJson (Join-Path $d.FullName 'state.json')); result = (Read-WddJson (Join-Path $d.FullName 'result.json')) }
+    }
+    return $out
+}
+
+<# Present Plug and Play devices: name, class, service, problem code, the first hardware ID and the device instance id. #>
 function Get-WdhPnpDevices {
     @(Get-CimInstance -ClassName Win32_PnPEntity -ErrorAction Stop | Where-Object { $_.Present -ne $false } | ForEach-Object {
         @{ name = [string] $_.Name; class = [string] $_.PNPClass; service = [string] $_.Service; problemCode = [int] $_.ConfigManagerErrorCode
-           hardwareId = $(if ($_.HardwareID) { [string] @($_.HardwareID)[0] } else { '' }) }
+           hardwareId = $(if ($_.HardwareID) { [string] @($_.HardwareID)[0] } else { '' }); deviceId = [string] $_.PNPDeviceID }
     })
 }
 
@@ -451,6 +539,32 @@ function ConvertTo-WdhList { param($Value) if ($null -eq $Value) { return @() } 
 
 function Format-WdhBytes { param([double] $Bytes) if ($Bytes -ge 1GB) { '{0:N0} GB' -f ($Bytes / 1GB) } elseif ($Bytes -ge 1MB) { '{0:N0} MB' -f ($Bytes / 1MB) } else { '{0:N0} KB' -f ($Bytes / 1KB) } }
 
+<# A value read from JSON, or $Default when the key is absent or null (results of older engines lack newer fields). #>
+function Get-WdhKey {
+    param($Table, [string] $Key, $Default = $null)
+    if ($Table -is [System.Collections.IDictionary] -and $Table.Contains($Key) -and $null -ne $Table[$Key]) { return $Table[$Key] }
+    return $Default
+}
+
+<# The KB numbers of an update: its kbs list, or those in its title. #>
+function Get-WdhKbs {
+    param($Item)
+    $k = @(@(ConvertTo-WdhList (Get-WdhKey $Item 'kbs')) | ForEach-Object { $x = ([string] $_).Trim().ToUpperInvariant(); if ($x -match '^\d+$') { "KB$x" } else { $x } } | Where-Object { $_ })
+    if ($k.Count) { return $k }
+    @([regex]::Matches([string] (Get-WdhKey $Item 'title' ''), '(?i)KB\d{6,8}') | ForEach-Object { $_.Value.ToUpperInvariant() })
+}
+
+<# Text from an engine's record without key characters or KMS hosts (activation messages may mention them). #>
+function ConvertTo-WdhSafeText {
+    param([string] $Text)
+    $t = $Text -replace '\s*\(key ending [^)]*\)', ''
+    $t = $t -replace '(?i)\b[A-Z0-9]{5}(-[A-Z0-9]{5}){4}\b', '<key removed>'
+    $t = $t -replace '(?i)(KMS\s+(host|server)\s*[:=]?\s*)[A-Za-z0-9.\-]+(:\d+)?', '$1<host removed>'
+    return $t
+}
+
+function Get-WdhShortHash { param([string] $Text) (Get-WddSha256 ([Text.Encoding]::UTF8.GetBytes($Text))).Substring(0, 12).ToLowerInvariant() }
+
 # ------------------------------------------------------------------------------------------------
 # Deployment state, integrity and the Phase 5 outcome (category "recovery")
 # ------------------------------------------------------------------------------------------------
@@ -628,9 +742,112 @@ function Test-WdhAccounts {
 # Windows Update
 # ------------------------------------------------------------------------------------------------
 
+<# What each updateState of the update engine (2.1.0) means here. Never "Pass" because an installation finished. #>
+$script:WdhUpdateStates = @{
+    UpToDate                = @('Pass', 'Up to date: Windows Update offered nothing more that this deployment''s policy installs')
+    UpToDateUnderPolicy     = @('Pass', 'Up to date under this deployment''s policy (updates the policy excludes may still be offered)')
+    PreviewUpdatesExcluded  = @('Pass', 'Up to date; preview updates are still offered and were intentionally excluded by policy')
+    RestartRequired         = @('Warning', 'Updates were installed and need a restart to finish')
+    UpdatesRemaining        = @('Warning', 'Windows Update still offers updates that the policy installs')
+    InstallationIncomplete  = @('Fail', 'The update installation did not finish')
+    CompletedWithFailures   = @('Fail', 'Finished, but some updates failed')
+    VerificationUnavailable = @('Unverifiable', 'The final state could not be verified (the engine''s last Windows Update check failed)')
+}
+
+<# One engine result.json (the deployment's or a retry run's) in report form. Fields of engine 2.1.0 are optional. #>
+function Get-WdhUpdateResultView {
+    param($Data, [string] $Source, [string] $Label)
+    if ($Data -isnot [System.Collections.IDictionary]) { return $null }
+    $sum = Get-WdhKey $Data 'summary'
+    $ver = Get-WdhKey $Data 'verification'
+    $summary = $null
+    if ($sum -is [System.Collections.IDictionary]) {
+        $summary = [ordered]@{}
+        foreach ($k in 'installed', 'superseded', 'notApplicable', 'excluded', 'previewsExcluded', 'downloadFailed', 'installFailed', 'awaitingRestart', 'remaining', 'notAttempted') { if ($null -ne (Get-WdhKey $sum $k)) { $summary[$k] = [int] $sum[$k] } }
+    }
+    $verification = $null
+    if ($ver -is [System.Collections.IDictionary]) {
+        $verification = [ordered]@{
+            remainingOffered = $(if ($null -ne (Get-WdhKey $ver 'remainingOffered')) { [int] $ver['remainingOffered'] } else { $null })
+            noLongerOffered = @(ConvertTo-WdhList (Get-WdhKey $ver 'noLongerOffered')).Count
+            devicesWithProblems = @(ConvertTo-WdhList (Get-WdhKey $ver 'devicesWithProblems')).Count
+            rebootPending = $(if ($null -ne (Get-WdhKey $ver 'rebootPending')) { [bool] $ver['rebootPending'] } else { $null })
+        }
+    }
+    [ordered]@{
+        source = $Source; label = $Label
+        engineVersion = [string] (Get-WdhKey $Data 'engineVersion' ''); status = [string] (Get-WdhKey $Data 'status' '')
+        updateState = [string] (Get-WdhKey $Data 'updateState' ''); updateStateText = [string] (Get-WdhKey $Data 'updateStateText' '')
+        startedUtc = [string] (Get-WdhKey $Data 'startedUtc' ''); finishedUtc = [string] (Get-WdhKey $Data 'finishedUtc' '')
+        installed = @(ConvertTo-WdhList (Get-WdhKey $Data 'installed')).Count; failed = @(ConvertTo-WdhList (Get-WdhKey $Data 'failed')).Count
+        summary = $summary; verification = $verification
+    }
+}
+
+<#
+    The update policy in force: the engine result's own policy (engine 2.1.0 records previewUpdates),
+    else the deployment configuration. Before previewUpdates existed, previews followed optionalUpdates.
+#>
+function Get-WdhUpdatePolicy {
+    param($Data, $Config)
+    $p = Get-WdhKey $Data 'policy'
+    $has = $p -is [System.Collections.IDictionary]
+    $o = [ordered]@{ source = $(if ($has) { 'engine result' } else { 'deployment configuration' }); featureUpdates = ''; optionalUpdates = ''; drivers = ''; previewUpdates = $null; previewSource = 'unknown'; maxAttemptsPerUpdate = $null }
+    foreach ($k in 'featureUpdates', 'optionalUpdates', 'drivers') { $o[$k] = $(if ($has -and $null -ne (Get-WdhKey $p $k)) { [string] $p[$k] } else { [string] (Get-WdhKey $Config $k '') }) }
+    if ($has -and $null -ne (Get-WdhKey $p 'previewUpdates')) { $o.previewUpdates = [bool] $p['previewUpdates']; $o.previewSource = 'policy' }
+    elseif ($null -ne (Get-WdhKey $Config 'previewUpdates')) { $o.previewUpdates = [bool] $Config['previewUpdates']; $o.previewSource = 'configuration' }
+    elseif ($o.optionalUpdates) { $o.previewUpdates = ($o.optionalUpdates -ne 'skip'); $o.previewSource = 'optionalUpdates' }
+    if ($has -and $null -ne (Get-WdhKey $p 'maxAttemptsPerUpdate')) { $o.maxAttemptsPerUpdate = [int] $p['maxAttemptsPerUpdate'] }
+    return $o
+}
+
+<#
+    Retry Windows Update runs. One task (\WindowsDeploymentBuilder\WindowsUpdateRetry) serves every run
+    and the engine removes it when its run is final: an unfinished run is running (or waiting for a
+    restart) only while that task exists, and only the newest unfinished run can be the one it serves.
+#>
+function Get-WdhRetryView {
+    param($C)
+    $runs = @(ConvertTo-WdhList (Invoke-WdhProbe $C 'retryRuns' { Get-WdhRetryRuns $C.Paths.Root }))
+    if (-not $runs.Count) { return @() }
+    $task = [bool] (Invoke-WdhProbe $C 'retryTask' { Test-WdhRetryTask })
+    $open = @($runs | Where-Object { -not [string] (Get-WdhKey $_['state'] 'final' '') })
+    $newestOpen = $(if ($open.Count) { [string] $open[-1]['runId'] } else { '' })
+    $out = @()
+    foreach ($r in $runs) {
+        $final = [string] (Get-WdhKey $r['state'] 'final' '')
+        $state = $(if ($final) { 'Finished' } elseif ($task -and [string] $r['runId'] -eq $newestOpen) { 'RunningOrAwaitingRestart' } else { 'StoppedBeforeFinishing' })
+        $out += , @{ runId = [string] $r['runId']; selection = [string] (Get-WdhKey $r['config'] 'selection' ''); final = $final; state = $state; taskPresent = $task; result = $r['result']
+                     view = (Get-WdhUpdateResultView $r['result'] "retry:$($r['runId'])" "Retry Windows Update run $($r['runId'])") }
+    }
+    return $out
+}
+
+<#
+    An original failure installed later: in a Retry Windows Update run's installed[] (same KB or exact
+    title), or as a successful installation in Windows Update's own history after the failure.
+#>
+function Find-WdhLaterInstall {
+    param($Failure, [object[]] $RetryInstalls, [object[]] $History, $After)
+    $kbs = @(Get-WdhKbs $Failure)
+    $title = [string] (Get-WdhKey $Failure 'title' '')
+    foreach ($i in @($RetryInstalls | Where-Object { $_ })) {
+        if (@($kbs | Where-Object { $_ -in @($i['kbs']) }).Count -or ($title -and $title -ieq [string] $i['title'])) { return $i }
+    }
+    foreach ($h in @($History | Where-Object { $_ })) {
+        if ([int] (Get-WdhKey $h 'operation' 0) -ne 1 -or [int] (Get-WdhKey $h 'resultCode' 0) -notin 2, 3) { continue }
+        $d = ConvertTo-WddDate (Get-WdhKey $h 'dateUtc' '')
+        if ($After -and $d -and $d -lt $After) { continue }
+        $hk = @(Get-WdhKbs $h)
+        if (@($kbs | Where-Object { $_ -in $hk }).Count -or ($title -and $title -ieq [string] $h['title'])) { return @{ title = [string] $h['title']; kbs = $hk; atUtc = [string] $h['dateUtc']; by = 'Windows Update (its installation history)' } }
+    }
+    return $null
+}
+
 function Test-WdhUpdates {
     param($C)
     $wu = $C.Config['windowsUpdate']
+    if ($wu -isnot [System.Collections.IDictionary]) { $wu = @{ enabled = $false } }
     $svc = Invoke-WdhProbe $C 'services' { Get-WdhServices }
     $agent = Invoke-WdhProbe $C 'updateAgent' { Get-WdhUpdateAgent }
     if ($svc -and $svc['wuauserv']) {
@@ -638,12 +855,34 @@ function Test-WdhUpdates {
         if ($s.startMode -eq 'Disabled') { Add-WdhFinding $C 'updates.service' 'updates' 'Windows Update service' 'Fail' 'Error' 'Available (not disabled)' 'Disabled' 'Win32_Service wuauserv' 'Services' 'Something disabled Windows Update; set the service back to Manual (not changed by this check).' | Out-Null }
         else { Add-WdhFinding $C 'updates.service' 'updates' 'Windows Update service' 'Pass' 'Error' 'Available (not disabled)' "$($s.startMode), $($s.state)" 'Win32_Service wuauserv' 'Services' | Out-Null }
     } else { Add-WdhFinding $C 'updates.service' 'updates' 'Windows Update service' 'Unverifiable' 'Error' 'Available' 'Could not be read' 'Win32_Service wuauserv' 'Services' | Out-Null }
-    if (-not $wu['enabled']) {
-        Add-WdhFinding $C 'updates.stage' 'updates' 'Initial Windows Update' 'NotApplicable' 'Informational' 'Not part of this deployment' "Windows updates itself on its own schedule$(if ($agent -and $agent.lastSearchUtc) { "; last successful search $($agent.lastSearchUtc)" })" 'Deployment configuration' 'health-config.json' -Required $false | Out-Null
-    } else {
+    $sec = [ordered]@{ partOfDeployment = [bool] $wu['enabled']; checkedUtc = (Get-WdhTime).ToString('o'); original = $null; current = $null; policy = $null; settingsRefresh = $null; orchestrator = $null
+                       retries = @(); originalFailures = @(); drivers = @(); liveScan = $null }
+    $C.WindowsUpdate = $sec
+    # Retry Windows Update runs decide the current state; the deployment's own result stays its historical record.
+    $runs = @(Get-WdhRetryView $C)
+    $cur = $null
+    foreach ($x in @($runs | Where-Object { $_.state -eq 'Finished' -and $_.view })) {
+        if (-not $cur) { $cur = $x; continue }
+        $a = ConvertTo-WddDate $x.view.finishedUtc; $b = ConvertTo-WddDate $cur.view.finishedUtc
+        if (-not $a -or -not $b -or $a -ge $b) { $cur = $x }
+    }
+    $data = $null; $origFinal = $false; $snap = $null; $r = $null
+    if ($wu['enabled']) {
         $r = Read-WdhSource $C 'windowsUpdate' 'Updates\result.json'
         $snap = @($C.Snapshot.stages | Where-Object { $_.id -eq 'windowsUpdate' }) | Select-Object -First 1
         $data = $r.Data
+        $C.UpdateResult = $data
+        $origFinal = [bool] ($data -and $snap -and $snap.state -eq 'Final')
+        if ($data) { $sec.original = Get-WdhUpdateResultView $data 'original' 'Initial Windows Update (deployment)' }
+    }
+    $curView = $(if ($cur) { $cur.view } elseif ($origFinal) { $sec.original } else { $null })
+    $curData = $(if ($cur) { $cur.result } elseif ($origFinal) { $data } else { $null })
+    $curFile = $(if ($cur) { "UpdateRetry\$($cur.runId)\result.json" } else { 'Updates\result.json' })
+    $sec.current = $curView
+    $stateKnown = [bool] ($curView -and $curView.updateState)
+    if (-not $wu['enabled']) {
+        Add-WdhFinding $C 'updates.stage' 'updates' 'Initial Windows Update' 'NotApplicable' 'Informational' 'Not part of this deployment' "Windows updates itself on its own schedule$(if ($agent -and $agent.lastSearchUtc) { "; last successful search $($agent.lastSearchUtc)" })" 'Deployment configuration' 'health-config.json' -Required $false | Out-Null
+    } else {
         if ($r.Source.state -eq 'corrupt') { Add-WdhFinding $C 'updates.stage' 'updates' 'Initial Windows Update' 'Unverifiable' 'Error' 'Every applicable update installed' 'The update result is damaged' 'Updates\result.json' 'Updates\result.json' 'Run "Deployment recovery" > Retry failed operations to run the update stage again (installed updates are never offered again).' -RecoveryAction 'RetryFailed' | Out-Null }
         elseif (-not $data -or -not $snap -or $snap.state -ne 'Final') {
             $stateText = $(if ($snap) { "$($snap.state)$(if ($snap.status) { "/$($snap.status)" })" } else { 'not started' })
@@ -653,29 +892,148 @@ function Test-WdhUpdates {
         } else {
             $failed = @(ConvertTo-WdhList $data['failed'])
             $installed = @(ConvertTo-WdhList $data['installed']).Count
+            $ev = [string] (Get-WdhKey $data 'engineVersion' '')
+            $engineText = $(if ($ev) { " (engine $ev, finished $($data['finishedUtc']))" } else { '' })
+            $st = ''; $obs = ''; $next = ''; $rec = ''; $method = 'Updates\result.json'
             switch ([string] $data['status']) {
-                'Succeeded' { Add-WdhFinding $C 'updates.stage' 'updates' 'Initial Windows Update' 'Pass' 'Error' 'Every applicable update installed' "Succeeded: $installed installed, $([int] $data['reboots']) restart(s)$(if ($agent -and $agent.lastSearchUtc) { "; Windows Update's last successful search $($agent.lastSearchUtc)" })" 'Updates\result.json and the Windows Update Agent' 'Updates\result.json' | Out-Null }
-                'Offline' { Add-WdhFinding $C 'updates.stage' 'updates' 'Initial Windows Update' 'Fail' 'Error' 'Every applicable update installed' 'Not done: there was no network before the stage''s time limit' 'Updates\result.json' 'Updates\result.json' 'Connect the network, then "Deployment recovery" > Retry failed operations.' -RecoveryAction 'RetryFailed' | Out-Null }
-                'Failed' { Add-WdhFinding $C 'updates.stage' 'updates' 'Initial Windows Update' 'Fail' 'Error' 'Every applicable update installed' "Failed: $($data['reason'])" 'Updates\result.json' 'Updates\result.json' 'See Updates\logs\engine.log, fix the cause, then "Deployment recovery" > Retry failed operations.' -RecoveryAction 'RetryFailed' | Out-Null }
-                default { Add-WdhFinding $C 'updates.stage' 'updates' 'Initial Windows Update' $(if ($failed.Count) { 'Info' } else { 'Pass' }) 'Error' 'Every applicable update installed' "$($data['status']): $installed installed, $($failed.Count) failed" 'Updates\result.json' 'Updates\result.json' | Out-Null }
+                'Succeeded' { $st = $(if ($stateKnown) { 'Info' } else { 'Pass' }); $method = 'Updates\result.json and the Windows Update Agent'; $obs = "Succeeded: $installed installed, $([int] $data['reboots']) restart(s)$engineText$(if ($agent -and $agent.lastSearchUtc) { "; Windows Update's last successful search $($agent.lastSearchUtc)" })" }
+                'Offline' { $st = 'Fail'; $obs = 'Not done: there was no network before the stage''s time limit'; $next = 'Connect the network, then "Deployment recovery" > Retry failed operations.'; $rec = 'RetryFailed' }
+                'Failed' { $st = 'Fail'; $obs = "Failed: $($data['reason'])$engineText"; $next = 'See Updates\logs\engine.log, fix the cause, then "Deployment recovery" > Retry failed operations.'; $rec = 'RetryFailed' }
+                default { $st = $(if ($failed.Count -or $stateKnown) { 'Info' } else { 'Pass' }); $obs = "$($data['status']): $installed installed, $($failed.Count) failed$engineText" }
             }
+            if ($stateKnown -and $st -eq 'Info') { $obs += '. Whether Windows is up to date is the separate "Windows Update state" check' }
+            # A later retry run decides the current state; this result stays the deployment's own (historical) record.
+            if ($cur) { $st = $(if ($st -eq 'Pass') { 'Pass' } else { 'Info' }); $obs = "Original deployment (historical record, unchanged): $obs. A later Retry Windows Update run ($($cur.runId)) finished $($cur.final); it decides the current state"; $next = ''; $rec = '' }
+            Add-WdhFinding $C 'updates.stage' 'updates' 'Initial Windows Update' $st 'Error' 'Every applicable update installed' $obs $method 'Updates\result.json' $next -RecoveryAction $rec | Out-Null
+            # Original failures: historical facts. Each is compared with later installations (retry runs, Windows Update history).
+            $retryInstalls = @()
+            foreach ($x in $runs) {
+                foreach ($i in @(ConvertTo-WdhList (Get-WdhKey $x.result 'installed'))) {
+                    if ($i -isnot [System.Collections.IDictionary]) { continue }
+                    $retryInstalls += , @{ title = [string] (Get-WdhKey $i 'title' ''); kbs = @(Get-WdhKbs $i); atUtc = [string] (Get-WdhKey $i 'atUtc' (Get-WdhKey $x.result 'finishedUtc' '')); by = "Retry Windows Update run $($x.runId)" }
+                }
+            }
+            $history = @()
+            if ($failed.Count) { $history = @(ConvertTo-WdhList (Invoke-WdhProbe $C 'updateHistory' { Get-WdhUpdateHistory })) }
+            $after = ConvertTo-WddDate (Get-WdhKey $data 'finishedUtc' '')
             foreach ($f in $failed) {
-                $kb = @(ConvertTo-WdhList $f['kbs']) | Select-Object -First 1
-                $fid = $(if ($kb) { "updates.kb.$kb" } else { "updates.update.$((Get-WddSha256 ([Text.Encoding]::UTF8.GetBytes([string] $f['title']))).Substring(0, 12))" })
-                Add-WdhFinding $C $fid 'updates' "Update $(if ($kb) { "$kb " })failed" 'Fail' 'Error' 'Installed' "$($f['title']): failed after $($f['attempts']) attempt(s) ($($f['lastHResult']))" 'Updates\result.json failed[]' 'Updates\result.json' 'Retry the update stage ("Deployment recovery" > Retry failed operations), or install it from Settings > Windows Update.' -RecoveryAction 'RetryFailed' | Out-Null
+                $kbs = @(Get-WdhKbs $f)
+                $kb = @(@(ConvertTo-WdhList (Get-WdhKey $f 'kbs')) + $kbs) | Select-Object -First 1
+                $title = [string] (Get-WdhKey $f 'title' '')
+                $fid = $(if ($kb) { "updates.kb.$kb" } else { "updates.update.$(Get-WdhShortHash $title)" })
+                $cls = @(@([string] (Get-WdhKey $f 'category' ''), [string] (Get-WdhKey $f 'class' '')) | Where-Object { $_ }) -join ', '
+                $what = "$($title): failed after $(Get-WdhKey $f 'attempts' '?') attempt(s) ($(Get-WdhKey $f 'lastHResult' 'no code')$(if ($cls) { ", $cls" }))"
+                $m = Find-WdhLaterInstall $f $retryInstalls $history $after
+                if ($m) { Add-WdhFinding $C $fid 'updates' "Update $(if ($kb) { "$kb " })failed originally, installed later" 'Info' 'Informational' 'Installed' "Originally failed (historical record, unchanged): $what. Installed later on $($m['atUtc']) by $($m['by'])." 'Updates\result.json failed[] compared with Retry Windows Update results and the Windows Update history (read-only)' 'Updates\result.json, UpdateRetry\<run>\result.json, Windows Update history' -Required $false -TechnicianRequired $false | Out-Null }
+                else { Add-WdhFinding $C $fid 'updates' "Update $(if ($kb) { "$kb " })failed" 'Fail' 'Error' 'Installed' $what 'Updates\result.json failed[]; no later installation found in retry results or the Windows Update history' 'Updates\result.json' 'Retry the update stage ("Deployment recovery" > Retry failed operations), run Retry Windows Update, or install it from Settings > Windows Update.' -RecoveryAction 'RetryFailed' | Out-Null }
+                $sec.originalFailures += , [ordered]@{ title = $title; kbs = @($kbs); category = [string] (Get-WdhKey $f 'category' ''); class = [string] (Get-WdhKey $f 'class' ''); lastHResult = [string] (Get-WdhKey $f 'lastHResult' '')
+                                                     laterInstalled = [bool] $m; installedUtc = $(if ($m) { [string] $m['atUtc'] } else { '' }); installedBy = $(if ($m) { [string] $m['by'] } else { '' }); findingId = $fid }
             }
         }
-        $skipped = @()
-        if ([string] $wu['featureUpdates'] -eq 'skip') { $skipped += 'feature updates' }
-        if ([string] $wu['optionalUpdates'] -eq 'skip') { $skipped += 'optional updates' }
-        if ($skipped.Count) { Add-WdhFinding $C 'updates.scope' 'updates' 'Updates not installed by design' 'Info' 'Informational' "$($skipped -join ' and ') are not installed by the deployment" 'Every other applicable update was in scope; this report does not claim that optional or deferred updates are installed' 'Deployment configuration' 'health-config.json' -Required $false | Out-Null }
     }
+    # Retry Windows Update runs (each one listed; running, finished or stopped).
+    foreach ($x in $runs) {
+        $fid = "updates.retry.$($x.runId -replace '[^A-Za-z0-9_:+\-]', '-')"
+        $v = $x.view
+        $counts = $(if ($v) { "installed $($v.installed), failed $($v.failed)$(if ($v.engineVersion) { ", engine $($v.engineVersion)" })$(if ($v.updateState) { ", state $($v.updateState)" })$(if ($v.finishedUtc) { ", finished $($v.finishedUtc)" })" } else { 'no result yet' })
+        $sel = $(if ($x.selection) { "selection $($x.selection)" } else { 'selection not recorded' })
+        $title = "Retry Windows Update run $($x.runId)"
+        $ev = "UpdateRetry\$($x.runId)\ (config.json, state.json, result.json)"
+        switch ($x.state) {
+            'Finished' { Add-WdhFinding $C $fid 'updates' $title 'Info' 'Informational' 'Finished' "Finished ($($x.final)), $sel; $counts" 'state.json final and result.json of the run' $ev -Required $false -TechnicianRequired $false | Out-Null }
+            'RunningOrAwaitingRestart' { Add-WdhFinding $C $fid 'updates' $title 'Pending' 'Warning' 'Finished' "Running or awaiting a restart (not final yet; the WindowsUpdateRetry task exists), $sel; $counts" 'state.json (no final status) and the \WindowsDeploymentBuilder\WindowsUpdateRetry task' $ev 'Wait; the retry continues by itself, also after a restart. Verify again when it has finished.' -Required $false -AutomaticRecovery $true -TechnicianRequired $false | Out-Null }
+            default { Add-WdhFinding $C $fid 'updates' $title 'Warning' 'Warning' 'Finished' "Stopped before finishing: no final status and no WindowsUpdateRetry task remains, $sel; $counts" 'state.json (no final status) and the scheduled task list' $ev 'Start Retry Windows Update again (Deployment recovery, or Invoke-WindowsUpdateRetry.ps1 -Mode RetryUpdates); installed updates are never offered again.' -Required $false | Out-Null }
+        }
+        $sec.retries += , [ordered]@{ runId = $x.runId; selection = $x.selection; final = $x.final; state = $x.state; taskPresent = [bool] $x.taskPresent
+                                      engineVersion = $(if ($v) { [string] $v.engineVersion } else { '' }); status = $(if ($v) { [string] $v.status } else { '' }); updateState = $(if ($v) { [string] $v.updateState } else { '' })
+                                      installed = $(if ($v) { [int] $v.installed } else { 0 }); failed = $(if ($v) { [int] $v.failed } else { 0 }); finishedUtc = $(if ($v) { [string] $v.finishedUtc } else { '' }); findingId = $fid }
+    }
+    # The current Windows Update state (engine 2.1.0 updateState), from the most recent finished result.
+    $scan = $null
+    if ($C.ScanUpdates) { $scan = Invoke-WdhProbe $C 'updateScan' { Get-WdhUpdateScan } }
+    if ($stateKnown) {
+        $us = [string] $curView.updateState
+        $m = $(if ($script:WdhUpdateStates.ContainsKey($us)) { $script:WdhUpdateStates[$us] } else { @('Unverifiable', "Unknown state (written by a newer engine)") })
+        $st = $m[0]
+        $text = $(if ($curView.updateStateText) { [string] $curView.updateStateText } else { $m[1] })
+        $from = $(if ($cur) { "Retry Windows Update run $($cur.runId)" } else { 'the deployment''s update stage' })
+        $parts = @()
+        if ($curView.summary) { $parts += 'summary: ' + (@($curView.summary.Keys | ForEach-Object { "$_ $($curView.summary[$_])" }) -join ', ') }
+        if ($curView.verification) {
+            $vv = $curView.verification
+            $parts += "final check: $(if ($null -ne $vv.remainingOffered) { "$($vv.remainingOffered) still offered" } else { 'offered count not recorded' }), $($vv.noLongerOffered) no longer offered, $($vv.devicesWithProblems) device(s) with problems, restart pending $(if ($null -ne $vv.rebootPending) { $vv.rebootPending } else { 'not recorded' })"
+        }
+        $obs = "$($us): $text. Recorded by $from (engine $(if ($curView.engineVersion) { $curView.engineVersion } else { 'unknown' }), finished $($curView.finishedUtc))$(if ($parts.Count) { '; ' + ($parts -join '; ') })"
+        if ($us -eq 'VerificationUnavailable' -and $scan -and [int] $scan.required -eq 0) { $st = 'Info'; $obs += '. A live read-only scan now finds no required update' }
+        $next = switch ($us) {
+            'RestartRequired' { 'Restart the computer, then verify again (with -ScanUpdates to ask Windows Update what is still offered).' }
+            'UpdatesRemaining' { 'Install them from Settings > Windows Update, or run Retry Windows Update; then verify again.' }
+            { $_ -in 'InstallationIncomplete', 'CompletedWithFailures' } { 'See the failed updates in this report; run Retry Windows Update (Deployment recovery) or install them from Settings > Windows Update.' }
+            'VerificationUnavailable' { 'Verify again with -ScanUpdates when online, or check Settings > Windows Update.' }
+            default { '' }
+        }
+        if ($st -eq 'Info') { $next = '' }
+        Add-WdhFinding $C 'updates.state' 'updates' 'Windows Update state' $st $(if ($st -eq 'Warning') { 'Warning' } else { 'Error' }) 'Up to date under this deployment''s policy' $obs 'updateState of the engine''s result.json (update engine 2.1.0 or later); never concluded from "the installation finished"' $curFile $next -RecoveryAction $(if ($st -eq 'Fail') { 'RetryFailed' } else { '' }) | Out-Null
+    }
+    if ($cur -and $sec.original) {
+        $o = $sec.original
+        Add-WdhFinding $C 'updates.originalState' 'updates' 'Windows Update at the end of the deployment' 'Info' 'Informational' 'Historical record' "$($o.status)$(if ($o.updateState) { " / $($o.updateState)" }): $($o.installed) installed, $($o.failed) failed (finished $($o.finishedUtc)). Kept unchanged as the deployment's record; the current state comes from the later Retry Windows Update run $($cur.runId)." 'Updates\result.json' 'Updates\result.json' -Required $false -TechnicianRequired $false | Out-Null
+    }
+    # Policy: what the deployment installs by design, and what it intentionally leaves out.
+    if ($wu['enabled'] -or $cur) {
+        $pol = Get-WdhUpdatePolicy $(if ($curData) { $curData } else { $data }) $wu
+        $sec.policy = $pol
+        $in = @('security and quality updates'); $out = @()
+        if ($pol.featureUpdates -eq 'install') { $in += 'feature updates' } else { $out += 'feature updates (a new Windows version) are skipped' }
+        if ($pol.optionalUpdates -eq 'skip') { $out += 'optional updates are excluded by policy' } elseif ($pol.optionalUpdates) { $in += 'optional updates' }
+        if ($pol.drivers -eq 'exclude') { $out += 'drivers from Windows Update are excluded by policy' } elseif ($pol.drivers) { $in += 'drivers that Windows Update offers' }
+        $pv = $(if ($pol.previewSource -eq 'optionalUpdates') { ' (this engine had no separate preview setting: previews followed the optional-update policy)' } else { '' })
+        if ($pol.previewUpdates -eq $false) { $out += "preview updates are intentionally excluded by policy$pv" } elseif ($pol.previewUpdates -eq $true) { $in += "preview updates$pv" }
+        Add-WdhFinding $C 'updates.scope' 'updates' 'Update policy' 'Info' 'Informational' "Installed by policy: $($in -join ', ')" $(if ($out.Count) { "Not installed by design: $($out -join '; '). This report does not claim that excluded updates are installed" } else { 'Nothing is excluded by policy' }) "Policy of the engine's result.json, else the deployment configuration (here: $($pol.source))" $(if ($curData) { $curFile } else { 'health-config.json' }) -Required $false | Out-Null
+        $pe = $(if ($curView -and $curView.summary -and $curView.summary.Contains('previewsExcluded')) { [int] $curView.summary['previewsExcluded'] } else { $null })
+        if ($pol.previewUpdates -eq $false) { Add-WdhFinding $C 'updates.previews' 'updates' 'Preview updates' 'Info' 'Informational' 'Not installed (policy)' "Intentionally excluded by policy$pv$(if ($pe) { ": $pe preview update(s) were offered and not installed" } else { '' })" 'policy.previewUpdates and summary.previewsExcluded of the engine''s result.json' $(if ($curData) { $curFile } else { 'health-config.json' }) -Required $false -TechnicianRequired $false | Out-Null }
+        elseif ($pol.previewUpdates -eq $true) { Add-WdhFinding $C 'updates.previews' 'updates' 'Preview updates' 'Info' 'Informational' 'Installed (policy)' "Included by policy$pv; remaining previews count as remaining updates in the Windows Update state" 'policy.previewUpdates of the engine''s result.json' $(if ($curData) { $curFile } else { 'health-config.json' }) -Required $false -TechnicianRequired $false | Out-Null }
+    }
+    # The final Settings refresh the engine requested (2.1.0): requested, completed, and what is NOT verified.
+    $srcData = $(if (Get-WdhKey $curData 'settingsRefresh') { $curData } elseif (Get-WdhKey $data 'settingsRefresh') { $data } else { $null })
+    if ($srcData -and $srcData['settingsRefresh'] -is [System.Collections.IDictionary]) {
+        $sr = $srcData['settingsRefresh']
+        $g = { param([string] $k) [string] (Get-WdhKey $sr $k '') }
+        $view = [ordered]@{ from = $(if ($srcData -eq $curData) { $curFile } else { 'Updates\result.json' }); available = [bool] (Get-WdhKey $sr 'available' $false); requested = [bool] (Get-WdhKey $sr 'requested' $false); completed = [bool] (Get-WdhKey $sr 'completed' $false)
+                            attempt = (& $g 'attempt'); requestedUtc = (& $g 'requestedUtc'); completedUtc = (& $g 'completedUtc'); lastSuccessfulScanBefore = (& $g 'lastSuccessfulScanBefore'); lastSuccessfulScanAfter = (& $g 'lastSuccessfulScanAfter')
+                            settingsDisplayVerified = $false; message = (ConvertTo-WdhSafeText (& $g 'message')) }
+        $sec.settingsRefresh = $view
+        $nr = { param([string] $t) if ($t) { $t } else { 'not recorded' } }
+        $obs = $(if (-not $view.available) { 'Not available on this Windows (the Windows Update orchestrator API needs Windows 11 24H2 or later); no scan was requested' }
+                 elseif (-not $view.requested) { 'Not requested by the engine' }
+                 elseif ($view.completed) { "Scan requested ($(& $nr $view.requestedUtc)) and completed: the last successful scan timestamp advanced from $(& $nr $view.lastSuccessfulScanBefore) to $(& $nr $view.lastSuccessfulScanAfter)" }
+                 else { "Scan requested ($(& $nr $view.requestedUtc)); completion not confirmed: the last successful scan timestamp did not advance (before $(& $nr $view.lastSuccessfulScanBefore), after $(& $nr $view.lastSuccessfulScanAfter))" })
+        $obs += '. The Settings page display itself is NOT verified by the engine (settingsDisplayVerified = false)'
+        if ($view.message) { $obs += ". Engine: $($view.message)" }
+        Add-WdhFinding $C 'updates.settingsRefresh' 'updates' 'Final Settings refresh (Windows Update page)' 'Info' 'Informational' 'A final scan, so Settings shows the current state' $obs 'settingsRefresh of the engine''s result.json' $view.from 'Open Settings > Windows Update to see what it shows; this report cannot see that page.' -Required $false -TechnicianRequired $false | Out-Null
+    }
+    # What Settings shows as "Last checked" (read-only orchestrator properties; no scan is started).
+    $orc = Invoke-WdhProbe $C 'orchestratorScan' { Get-WdhOrchestratorScan }
+    $sec.orchestrator = [ordered]@{ available = [bool] $orc; lastSuccessfulScanUtc = $(if ($orc) { [string] $orc.lastSuccessfulScanUtc } else { '' }); isScanning = $(if ($orc) { [bool] $orc.isScanning } else { $null }); isWorking = $(if ($orc) { [bool] $orc.isWorking } else { $null }) }
+    $orcObs = $(if ($orc) { "Last successful check: $(if ($orc.lastSuccessfulScanUtc) { $orc.lastSuccessfulScanUtc } else { 'none recorded' })$(if ($orc.isScanning) { '; a check is running now' })$(if ($orc.isWorking) { '; Windows Update is working now' })" } else { 'Not available: the Windows Update orchestrator API (Windows 11 24H2 and later) does not exist on this Windows or could not be read' })
+    Add-WdhFinding $C 'updates.settingsLastCheck' 'updates' 'Windows Update (Settings) last successful check' 'Info' 'Informational' 'Reported' $orcObs 'Windows.Management.Update.WindowsUpdateManager: LastSuccessfulScanTimestamp, IsScanning, IsWorking (read-only; no scan is started)' 'Windows Update orchestrator' -Required $false -TechnicianRequired $false | Out-Null
+    # Drivers that Windows Update installed (deployment and retry runs).
+    $drv = @()
+    foreach ($src in @(@(@{ d = $data; by = 'deployment' }) + @($runs | ForEach-Object { @{ d = $_.result; by = "retry $($_.runId)" } }))) {
+        foreach ($d in @(ConvertTo-WdhList (Get-WdhKey $src.d 'drivers'))) {
+            if ($d -isnot [System.Collections.IDictionary]) { continue }
+            $dev = Get-WdhKey $d 'device'
+            $drv += , [ordered]@{ title = [string] (Get-WdhKey $d 'title' ''); model = [string] (Get-WdhKey $dev 'model' ''); hardwareId = [string] (Get-WdhKey $dev 'hardwareID' (Get-WdhKey $dev 'hardwareId' '')); result = [string] (Get-WdhKey $d 'result' ''); installedBy = $src.by }
+        }
+    }
+    $sec.drivers = $drv
+    if ($drv.Count) { Add-WdhFinding $C 'updates.drivers' 'updates' 'Drivers installed through Windows Update' 'Info' 'Informational' 'Reported' "$($drv.Count) driver(s): $((@($drv | Select-Object -First 5) | ForEach-Object { "$($_.title)$(if ($_.model) { " ($($_.model))" }) [$($_.result)]" }) -join '; ')$(if ($drv.Count -gt 5) { '; ...' })" 'drivers[] of the engine''s result.json' 'Updates\result.json, UpdateRetry\<run>\result.json' -Required $false -TechnicianRequired $false | Out-Null }
     if ($C.ScanUpdates) {
-        $scan = Invoke-WdhProbe $C 'updateScan' { Get-WdhUpdateScan }
+        $sec.liveScan = [ordered]@{ performed = [bool] $scan; required = $(if ($scan) { [int] $scan.required } else { 0 }); optional = $(if ($scan) { [int] $scan.optional } else { 0 }); drivers = $(if ($scan) { [int] $scan.drivers } else { 0 }); feature = $(if ($scan) { [int] $scan.feature } else { 0 }) }
         if ($null -eq $scan) { Add-WdhFinding $C 'updates.scan' 'updates' 'Windows Update scan' 'Unverifiable' 'Warning' 'Scan completed' 'The scan was not possible (no network, or the service is busy)' 'Microsoft.Update.Session search (read-only)' 'Windows Update Agent' 'Try again when online.' -Required $false | Out-Null }
         elseif ($scan.required) { Add-WdhFinding $C 'updates.scan' 'updates' 'Updates still available' 'Warning' 'Warning' 'No required update outstanding' "$($scan.required) update(s) available now: $($scan.titles -join '; ')$(if ($scan.optional -or $scan.drivers -or $scan.feature) { ". Also $($scan.optional) optional, $($scan.drivers) driver, $($scan.feature) feature update(s)" })" 'Microsoft.Update.Session search (read-only)' 'Windows Update Agent' 'Install them from Settings > Windows Update, or retry the update stage.' -Required $false | Out-Null }
         else { Add-WdhFinding $C 'updates.scan' 'updates' 'Windows Update scan' 'Pass' 'Warning' 'No required update outstanding' "None required now ($($scan.optional) optional, $($scan.drivers) driver, $($scan.feature) feature update(s) not counted)" 'Microsoft.Update.Session search (read-only)' 'Windows Update Agent' -Required $false | Out-Null }
-    } else { $C.Limitations.Add('No live Windows Update scan was made (run with -ScanUpdates to ask Windows Update what is still available). The update result above is the deployment''s own evidence.') }
+    } else { $C.Limitations.Add('No live Windows Update scan was made (run with -ScanUpdates to ask Windows Update what is still available). The update results above are the engines'' own evidence.') }
     # Ongoing policy (Phase 4.3), and whether Windows Update may offer drivers (Phase 8 driver stage).
     if ($wu['ongoingPolicy']) {
         $pol = $(if ($C.StateRead.State -and $C.StateRead.State.ContainsKey('updatePolicy')) { $C.StateRead.State['updatePolicy'] } else { $null })
@@ -718,6 +1076,68 @@ function Find-WdhInstalled {
     }
     if ($Item['shortcut'] -and $Shortcuts -contains [string] $Item['shortcut']) { return @{ found = $true; scope = 'machine'; version = ''; how = 'portable tool shortcut' } }
     return @{ found = $false; scope = ''; version = ''; how = '' }
+}
+
+<#
+    The verdict for one selected application: what Windows shows (Find-WdhInstalled) weighed against
+    the engine's own record. Kept apart from detection so a later catalog can extend either one. An
+    installer exit code alone never makes an application "installed": only a match in Windows does.
+    Returns @{ Status; Result; Observed; Next; Severity; Recovery; Verification }.
+#>
+function Resolve-WdhAppVerdict {
+    param($Item, $Engine, $Hit, [hashtable] $X)
+    $it = $Item; $e = $Engine; $hit = $Hit
+    $eng = [string] $X.eng; $det = [string] $X.det; $msg = [string] $X.msg; $attempts = [int] $X.attempts; $stageFinal = [bool] $X.stageFinal; $snap = $X.snap
+    $indep = [string] $X.indep; $where = [string] $X.where; $name = [string] $X.name; $recovery = [string] $X.recovery; $sev = [string] $X.sev; $user = [string] $X.user
+    $v = $null
+    if ([string] $it['kind'] -eq 'manual') {
+        if ($hit.found) { $v = @('Pass', 'InstalledManually', "Installed by hand: $where", '') }
+        elseif ($indep -eq 'Deferred') { $v = @('Warning', 'ManualInstallationRequired', "Manual follow-up; not found machine-wide ($($user)'s own applications could not be checked)", [string] $it['instructions']) }
+        else { $v = @('Warning', 'ManualInstallationRequired', 'Not installed: this application has no unattended installation', $(if ($it['instructions']) { [string] $it['instructions'] } else { "Install $name by hand." })) }
+        $sev = 'Warning'
+    } elseif ($eng -in 'Pending', 'Installing' -and -not $stageFinal) { $v = @('Pending', 'Pending', "Not installed yet (the application stage is $(if ($snap) { $snap.state } else { 'not started' }))", 'Wait; the stage continues by itself.') }
+    elseif (-not $e -and -not $stageFinal -and -not $hit.found) { $v = @('Pending', 'Pending', 'Not installed yet (the application stage has not reached it)', 'Wait; the stage continues by itself.') }
+    elseif ($eng -eq 'RequiresRestart') { $v = @('Pending', 'WaitingForReboot', 'Installed; needs a restart to finish', 'Restart the computer.') }
+    elseif ($eng -eq 'SkippedByUser') { $v = @('NotApplicable', 'SkippedByUser', 'Deselected for this deployment', '') }
+    elseif ($hit.found) {
+        if ($eng -in 'Succeeded', 'AlreadyInstalled', '' -or ($eng -eq 'RequiresInteraction')) {
+            $want = [string] $it['version']
+            if ($want -and $hit.version -and $hit.version -ne $want) { $v = @('Warning', 'InstalledVersionDiffers', "Installed, version $($hit.version) instead of $want ($where)", 'Check whether the pinned version is still required.') }
+            else { $v = @('Pass', $(if ($eng -eq 'AlreadyInstalled') { 'AlreadyInstalledVerified' } else { 'InstalledVerified' }), "Installed: $where$(if (-not $e) { '; the engine has no record of it' })", '') }
+        } else { $v = @('Warning', 'InstalledVerificationUncertain', "Present ($where), although the installation reported $eng. $msg", 'Open it once to confirm it works; retry it with "Deployment recovery" if it does not.') }
+    } elseif ($indep -eq 'Deferred' -and $eng -in 'Succeeded', 'AlreadyInstalled') {
+        $v = @('Deferred', 'WaitingForUserContext', "The engine reported $eng in $($user)'s account; not found machine-wide, and $($user)'s own applications cannot be checked while that user is signed out", "Sign in as $($user) and open the Health Report again.")
+    } elseif ($eng -in 'Succeeded', 'AlreadyInstalled') {
+        $v = @('Warning', 'InstalledVerificationUncertain', "The engine reported $eng$(if ($det -eq 'Unconfirmed') { ', but WinGet could not confirm it afterwards' } elseif ($det) { " (WinGet detection: $det)" }); no uninstall record or Store package matched its name", 'Open it once to confirm it is installed; uninstall records do not exist for every installer.')
+    } elseif ($eng -eq 'Skipped') { $v = @('Fail', 'BlockedByDependency', "Not installed: a dependency failed. $msg", 'Run "Deployment recovery" > Retry failed operations (it retries the dependency too).') }
+    elseif ($eng -eq 'RequiresInteraction') { $v = @('Warning', 'ManualInstallationRequired', "Needs a person: $msg", "Install or finish $name by hand.") }
+    elseif ($eng -in 'Failed', 'Unavailable') { $v = @('Fail', 'Failed', "Missing: the installation failed$(if ($e['failureClass']) { " ($($e['failureClass']))" }) after $attempts attempt(s). $msg", $(if ($recovery -eq 'RetryFailed') { 'Run "Deployment recovery" > Retry failed operations.' } else { 'Correct the cause (see the message), then "Deployment recovery" > Retry one application with -IncludePermanent.' })) }
+    elseif (-not $e -and $indep -eq 'Deferred') { $v = @('Deferred', 'WaitingForUserContext', "No engine record, and $($user)'s own applications cannot be checked now", "Sign in as $($user) and open the Health Report again.") }
+    else { $v = @('Fail', 'Missing', "Not installed$(if (-not $e) { '; the application stage has no record of it (inconsistent results)' } else { " (engine: $eng)" })", 'Run "Deployment recovery" > Resume.') ; if (-not $recovery) { $recovery = 'Resume' } }
+    @{ Status = $v[0]; Result = $v[1]; Observed = $v[2]; Next = $v[3]; Severity = $sev; Recovery = $recovery; Verification = (Get-WdhAppVerification $v[1] ([bool] $hit.found)) }
+}
+
+<#
+    The verification status reported for an application:
+      InstalledAndVerified          Windows lists it (uninstall record, Store package or portable shortcut)
+      InstallerSucceededUnverified  the installer reported success, but Windows lists nothing that matches
+      Missing / Failed              not found; the installation failed, or there is no result at all
+      ManualActionRequired          no unattended installation, or the installer needs a person
+      NotSelected                   deselected for this deployment (not listed)
+      Pending / Deferred            still running or waiting for a restart / the user's own profile is not available
+#>
+function Get-WdhAppVerification {
+    param([string] $Result, [bool] $Found)
+    switch ($Result) {
+        { $_ -in 'InstalledVerified', 'AlreadyInstalledVerified', 'InstalledManually', 'InstalledVersionDiffers' } { return 'InstalledAndVerified' }
+        'InstalledVerificationUncertain' { if ($Found) { return 'InstalledAndVerified' } return 'InstallerSucceededUnverified' }
+        'Failed' { return 'Failed' }
+        { $_ -in 'Missing', 'BlockedByDependency' } { return 'Missing' }
+        'ManualInstallationRequired' { return 'ManualActionRequired' }
+        'SkippedByUser' { return 'NotSelected' }
+        'WaitingForUserContext' { return 'Deferred' }
+        default { return 'Pending' }
+    }
 }
 
 function Test-WdhApplications {
@@ -776,41 +1196,80 @@ function Test-WdhApplications {
         $method = 'Uninstall records (machine and the deployment user), Store packages, portable shortcut; the engine''s result as evidence'
         $evidence = $(if ($e) { "engine: $eng$(if ($det) { ", detection $det" })$(if ($attempts) { ", $attempts attempt(s)" })" } else { 'no engine record' })
         $recovery = $(if ($e -and $e.ContainsKey('retryable') -and [bool] $e['retryable']) { 'RetryFailed' } elseif ($eng -in 'Failed', 'Unavailable') { 'Retry -IncludePermanent' } else { '' })
-        $v = $null
-        if ([string] $it['kind'] -eq 'manual') {
-            if ($hit.found) { $v = @('Pass', 'InstalledManually', "Installed by hand: $where", '') }
-            elseif ($indep -eq 'Deferred') { $v = @('Warning', 'ManualInstallationRequired', "Manual follow-up; not found machine-wide ($($C.DeploymentUser)'s own applications could not be checked)", [string] $it['instructions']) }
-            else { $v = @('Warning', 'ManualInstallationRequired', 'Not installed: this application has no unattended installation', $(if ($it['instructions']) { [string] $it['instructions'] } else { "Install $name by hand." })) }
-            $sev = 'Warning'
-        } elseif ($eng -in 'Pending', 'Installing' -and -not $stageFinal) { $v = @('Pending', 'Pending', "Not installed yet (the application stage is $(if ($snap) { $snap.state } else { 'not started' }))", 'Wait; the stage continues by itself.') }
-        elseif (-not $e -and -not $stageFinal -and -not $hit.found) { $v = @('Pending', 'Pending', 'Not installed yet (the application stage has not reached it)', 'Wait; the stage continues by itself.') }
-        elseif ($eng -eq 'RequiresRestart') { $v = @('Pending', 'WaitingForReboot', 'Installed; needs a restart to finish', 'Restart the computer.') }
-        elseif ($eng -eq 'SkippedByUser') { $v = @('NotApplicable', 'SkippedByUser', 'Deselected for this deployment', '') }
-        elseif ($hit.found) {
-            if ($eng -in 'Succeeded', 'AlreadyInstalled', '' -or ($eng -eq 'RequiresInteraction')) {
-                $want = [string] $it['version']
-                if ($want -and $hit.version -and $hit.version -ne $want) { $v = @('Warning', 'InstalledVersionDiffers', "Installed, version $($hit.version) instead of $want ($where)", 'Check whether the pinned version is still required.') }
-                else { $v = @('Pass', $(if ($eng -eq 'AlreadyInstalled') { 'AlreadyInstalledVerified' } else { 'InstalledVerified' }), "Installed: $where$(if (-not $e) { '; the engine has no record of it' })", '') }
-            } else { $v = @('Warning', 'InstalledVerificationUncertain', "Present ($where), although the installation reported $eng. $msg", 'Open it once to confirm it works; retry it with "Deployment recovery" if it does not.') }
-        } elseif ($indep -eq 'Deferred' -and $eng -in 'Succeeded', 'AlreadyInstalled') {
-            $v = @('Deferred', 'WaitingForUserContext', "The engine reported $eng in $($C.DeploymentUser)'s account; not found machine-wide, and $($C.DeploymentUser)'s own applications cannot be checked while that user is signed out", "Sign in as $($C.DeploymentUser) and open the Health Report again.")
-        } elseif ($eng -in 'Succeeded', 'AlreadyInstalled') {
-            $v = @('Warning', 'InstalledVerificationUncertain', "The engine reported $eng$(if ($det -eq 'Unconfirmed') { ', but WinGet could not confirm it afterwards' } elseif ($det) { " (WinGet detection: $det)" }); no uninstall record or Store package matched its name", 'Open it once to confirm it is installed; uninstall records do not exist for every installer.')
-        } elseif ($eng -eq 'Skipped') { $v = @('Fail', 'BlockedByDependency', "Not installed: a dependency failed. $msg", 'Run "Deployment recovery" > Retry failed operations (it retries the dependency too).') }
-        elseif ($eng -eq 'RequiresInteraction') { $v = @('Warning', 'ManualInstallationRequired', "Needs a person: $msg", "Install or finish $name by hand.") }
-        elseif ($eng -in 'Failed', 'Unavailable') { $v = @('Fail', 'Failed', "Missing: the installation failed$(if ($e['failureClass']) { " ($($e['failureClass']))" }) after $attempts attempt(s). $msg", $(if ($recovery -eq 'RetryFailed') { 'Run "Deployment recovery" > Retry failed operations.' } else { 'Correct the cause (see the message), then "Deployment recovery" > Retry one application with -IncludePermanent.' })) }
-        elseif (-not $e -and $indep -eq 'Deferred') { $v = @('Deferred', 'WaitingForUserContext', "No engine record, and $($C.DeploymentUser)'s own applications cannot be checked now", "Sign in as $($C.DeploymentUser) and open the Health Report again.") }
-        else { $v = @('Fail', 'Missing', "Not installed$(if (-not $e) { '; the application stage has no record of it (inconsistent results)' } else { " (engine: $eng)" })", 'Run "Deployment recovery" > Resume.') ; if (-not $recovery) { $recovery = 'Resume' } }
+        $verdict = Resolve-WdhAppVerdict $it $e $hit @{ eng = $eng; det = $det; msg = $msg; attempts = $attempts; stageFinal = $stageFinal; snap = $snap; indep = $indep; where = $where; name = $name; recovery = $recovery; sev = $sev; user = $C.DeploymentUser }
+        $v = @($verdict.Status, $verdict.Result, $verdict.Observed, $verdict.Next)
+        $sev = $verdict.Severity; $recovery = $verdict.Recovery
         $status = $v[0]
         if ($status -eq 'Fail' -and -not $required) { $sev = 'Warning' }
         Add-WdhFinding $C $fid 'applications' $name $status $sev $(if ([string] $it['kind'] -eq 'manual') { 'Installed (manual follow-up)' } elseif ($it['version']) { "Installed, version $($it['version'])" } else { 'Installed' }) $v[2] $method $evidence $v[3] -Required ($required -and [string] $it['kind'] -ne 'manual') -AutomaticRecovery ($status -eq 'Pending') -TechnicianRequired ($status -in 'Fail', 'Warning', 'Deferred') -RecoveryAction $(if ($status -eq 'Fail') { $recovery } else { '' }) | Out-Null
+        # Deselected for this deployment: not listed with the applications (its finding says so).
+        if ($verdict.Verification -eq 'NotSelected') { continue }
         $C.Apps.Add([ordered]@{ key = $key; name = $name; source = [string] $it['source']; packageIdentifier = [string] $it['packageIdentifier']; method = [string] $it['method']; kind = [string] $it['kind']; required = $required
-                                scope = $scope; engineStatus = $eng; lifecycle = $life; attempts = $attempts; detection = $det; independent = $indep; foundIn = $(if ($hit.found) { [string] $hit.scope } else { '' }); version = [string] $hit.version; result = $v[1]; findingId = $fid })
+                                scope = $scope; engineStatus = $eng; lifecycle = $life; attempts = $attempts; detection = $det; independent = $indep; foundIn = $(if ($hit.found) { [string] $hit.scope } else { '' }); version = [string] $hit.version; result = $v[1]
+                                verification = $verdict.Verification; findingId = $fid })
         if ($v[1] -eq 'ManualInstallationRequired') { $C.Manual.Add([ordered]@{ id = $fid; text = "$name`: $($v[3])"; url = [string] $it['url'] }) }
     }
     if ($res.Data -and $res.Data['bootstrap'] -is [hashtable] -and [string] $res.Data['bootstrap']['status'] -in 'Failed', 'Unsupported', 'NeedsRepair') {
         Add-WdhFinding $C 'apps.winget' 'applications' 'WinGet' 'Fail' 'Error' 'WinGet usable' "$($res.Data['bootstrap']['status']): $($res.Data['bootstrap']['message'])" 'Applications\result.json bootstrap' 'Applications\result.json' 'Update App Installer from the Microsoft Store, then "Deployment recovery" > Retry failed operations.' -RecoveryAction 'RetryFailed' | Out-Null
     }
+}
+
+# ------------------------------------------------------------------------------------------------
+# Microsoft Office (when this deployment selected it) and its activation as the activation stage recorded it
+# ------------------------------------------------------------------------------------------------
+
+function Test-WdhOffice {
+    param($C)
+    # health-config.json of packages before engine 1.1.0 has no "office": nothing to check then.
+    $o = Get-WdhKey $C.Config 'office'
+    $product = [string] (Get-WdhKey $o 'product' '')
+    if (-not $product -or $product -eq 'none') { return }
+    $want = [string] (Get-WdhKey $o 'productReleaseId' '')
+    $label = $(if (Get-WdhKey $o 'displayName') { [string] $o['displayName'] } else { $product })
+    $res = Read-WdhSource $C 'office' 'Office\result.json'
+    $snap = @($C.Snapshot.stages | Where-Object { $_.id -eq 'office' }) | Select-Object -First 1
+    $engine = [string] (Get-WdhKey $res.Data 'status' '')
+    $final = ($snap -and $snap.state -eq 'Final') -or (-not $snap -and $engine -in 'Succeeded', 'CompletedWithFollowUp', 'Failed', 'Offline')
+    $c2r = Invoke-WdhProbe $C 'officeClickToRun' { Get-WdhOfficeClickToRun }
+    $ids = $(if ($c2r) { @(ConvertTo-WdhList $c2r.productReleaseIds) } else { @() })
+    $view = [ordered]@{ selected = $true; product = $product; displayName = $label; expectedProductReleaseId = $want; present = $(if ($c2r) { [bool] $c2r.present } else { $null }); productReleaseIds = @($ids)
+                        version = $(if ($c2r) { [string] $c2r.version } else { '' }); platform = $(if ($c2r) { [string] $c2r.platform } else { '' }); engineStatus = $engine; engineVerified = [bool] (Get-WdhKey $res.Data 'verified' $false)
+                        result = ''; activation = $null; checkedUtc = (Get-WdhTime).ToString('o') }
+    $method = 'HKLM\SOFTWARE\Microsoft\Office\ClickToRun\Configuration (ProductReleaseIds, VersionToReport, Platform); the Office stage''s result as evidence'
+    $evidence = "Office stage: $(if ($engine) { $engine } else { 'no result' })"
+    $exp = "$label installed$(if ($want) { " ($want)" })"
+    if ($null -eq $c2r) { $view.result = 'Unverifiable'; Add-WdhFinding $C 'office.install' 'applications' $label 'Unverifiable' 'Error' $exp 'The Office Click-to-Run configuration could not be read' $method $evidence 'Run the check again as administrator, or open an Office application and check File > Account.' | Out-Null }
+    elseif ($c2r.present -and (-not $want -or $ids -contains $want)) { $view.result = 'InstalledAndVerified'; Add-WdhFinding $C 'office.install' 'applications' $label 'Pass' 'Error' $exp "Installed: $($ids -join ', '), version $($c2r.version)$(if ($c2r.platform) { ", $($c2r.platform)" })" $method $evidence | Out-Null }
+    elseif ($c2r.present) { $view.result = 'DifferentProduct'; Add-WdhFinding $C 'office.install' 'applications' $label 'Warning' 'Error' $exp "Office Click-to-Run is installed as $($ids -join ', '), not as $want (version $($c2r.version))" $method $evidence 'Check whether a different Office was installed on purpose; this check changes nothing.' | Out-Null }
+    elseif (-not $final) { $view.result = 'Pending'; Add-WdhFinding $C 'office.install' 'applications' $label 'Pending' 'Error' $exp "Not installed yet (the Office stage is $(if ($snap) { $snap.state } else { 'not started' }))" $method $evidence 'Wait; the Office stage continues by itself.' -AutomaticRecovery $true -TechnicianRequired $false | Out-Null }
+    elseif ($engine -in 'Succeeded', 'CompletedWithFollowUp') { $view.result = 'InstallerSucceededUnverified'; Add-WdhFinding $C 'office.install' 'applications' $label 'Fail' 'Error' $exp "The Office stage reported $engine, but Windows has no Office Click-to-Run configuration" $method $evidence 'Open Settings > Apps to look for Office; install it again with "Deployment recovery" if it is missing.' -RecoveryAction 'RetryFailed' | Out-Null }
+    else { $view.result = 'Missing'; Add-WdhFinding $C 'office.install' 'applications' $label 'Fail' 'Error' $exp "Not installed (Office stage: $(if ($engine) { "$engine. $(Get-WdhKey $res.Data 'detail' (Get-WdhKey $res.Data 'reason' ''))" } else { 'no result' }))" $method $evidence 'See Office\logs, fix the cause, then "Deployment recovery" > Retry failed operations.' -RecoveryAction 'RetryFailed' | Out-Null }
+    # Activation: only what the activation stage recorded (deployment state, else Activation\result.json). Never a key or a KMS host.
+    $plan = [string] (Get-WdhKey (Get-WdhKey $C.Config 'activation') 'office' '')
+    $st = $C.StateRead.State
+    $entry = Get-WdhKey (Get-WdhKey $st 'activation') 'office'
+    $source = 'state\deployment.json activation'
+    if ($entry -isnot [System.Collections.IDictionary]) { $entry = Get-WdhKey (Read-WddJson (Join-Path $C.Paths.Root 'Activation\result.json')) 'office'; $source = 'Activation\result.json' }
+    $a = [ordered]@{ requested = $(if ($plan) { $plan } else { 'unknown' }); status = ''; verified = $false; message = ''; source = '' }
+    $aMethod = 'Status recorded by the activation stage (the licence is not read again here; keys and KMS hosts are never shown)'
+    if ($entry -is [System.Collections.IDictionary]) {
+        $a.status = [string] (Get-WdhKey $entry 'status' ''); $a.verified = [bool] (Get-WdhKey $entry 'verified' $false); $a.message = ConvertTo-WdhSafeText ([string] (Get-WdhKey $entry 'message' '')); $a.source = $source
+        $obs = "$($a.status)$(if ($a.verified) { ' (verified by the activation stage)' }). $($a.message)"
+        if ($a.status -eq 'Activated' -and $a.verified) { Add-WdhFinding $C 'office.activation' 'applications' 'Office activation' 'Pass' 'Warning' 'Activated' $obs $aMethod $source -Required $false | Out-Null }
+        elseif ($a.status -in 'AwaitingTechnician', 'Deferred', 'Failed', 'Blocked', 'Unavailable', 'Activated') { Add-WdhFinding $C 'office.activation' 'applications' 'Office activation' 'Warning' 'Warning' 'Activated' $obs $aMethod $source 'Activate Office with the technician''s licence: "Deployment recovery" > Activation (DeploymentRecovery.ps1 -Action Activate -Target Office). Office is installed and works for a grace period meanwhile.' -Required $false | Out-Null }
+        else { Add-WdhFinding $C 'office.activation' 'applications' 'Office activation' 'Info' 'Informational' 'As requested' $obs $aMethod $source -Required $false | Out-Null }
+    } elseif ($plan -eq 'none') {
+        $a.status = 'NotRequested'
+        Add-WdhFinding $C 'office.activation' 'applications' 'Office activation' 'Info' 'Informational' 'Not part of this deployment' 'No Office activation was requested by this deployment' 'health-config.json activation.office' 'health-config.json' -Required $false | Out-Null
+    } elseif ($C.Snapshot.allFinal -or -not $plan) {
+        $a.status = 'NotRecorded'
+        Add-WdhFinding $C 'office.activation' 'applications' 'Office activation' 'Unverifiable' 'Warning' 'Activated' 'The activation stage left no record for Office' $aMethod 'state\deployment.json, Activation\result.json' 'Check with "Deployment recovery" > Activation (CheckActivation only reads the licensing state).' -Required $false | Out-Null
+    } else {
+        $a.status = 'Waiting'
+        Add-WdhFinding $C 'office.activation' 'applications' 'Office activation' 'Pending' 'Warning' 'Activated' 'Not done yet: activation runs at the end of the deployment' $aMethod 'state\deployment.json' 'Wait for the deployment to finish.' -Required $false -AutomaticRecovery $true -TechnicianRequired $false | Out-Null
+    }
+    $view.activation = $a
+    $C.Office = $view
 }
 
 # ------------------------------------------------------------------------------------------------
@@ -895,6 +1354,45 @@ function Test-WdhRestoration {
 # Hardware and drivers (Phase 8 report compared with the devices as they are now)
 # ------------------------------------------------------------------------------------------------
 
+<#
+    Devices the deployment reported with a problem at its end (the update engine's final check, kept in
+    Updates\result.json verification.devicesWithProblems and in the deployment report's windowsUpdate
+    section): name, problem code, hardware IDs and device instance id.
+#>
+function Get-WdhPreviousProblemDevices {
+    param($C)
+    $u = $(if ($C.UpdateResult) { $C.UpdateResult } else { Read-WddJson (Join-Path $C.Paths.Root 'Updates\result.json') })
+    $repPath = $(if ($C.Paths.ContainsKey('ReportJson') -and $C.Paths.ReportJson) { $C.Paths.ReportJson } else { Join-Path $C.Paths.Root 'reports\deployment-report.json' })
+    $rep = Read-WddJson $repPath
+    $lists = @(, @('Updates\result.json', (Get-WdhKey (Get-WdhKey $u 'verification') 'devicesWithProblems')))
+    $lists += , @('reports\deployment-report.json', (Get-WdhKey (Get-WdhKey (Get-WdhKey $rep 'windowsUpdate') 'verification') 'devicesWithProblems'))
+    $seen = @{}; $out = @()
+    foreach ($l in $lists) {
+        foreach ($d in @(ConvertTo-WdhList $l[1])) {
+            if ($d -isnot [System.Collections.IDictionary]) { continue }
+            $hw = @(@(@(ConvertTo-WdhList (Get-WdhKey $d 'hardwareIds')) + @(ConvertTo-WdhList (Get-WdhKey $d 'hardwareId'))) | Where-Object { $_ } | ForEach-Object { ([string] $_).ToUpperInvariant() })
+            $devId = ([string] (Get-WdhKey $d 'deviceId' (Get-WdhKey $d 'instanceId' ''))).ToUpperInvariant()
+            $name = [string] (Get-WdhKey $d 'name' '')
+            $key = $(if ($devId) { $devId } elseif ($hw.Count) { $hw[0] } else { "NAME:$($name.ToUpperInvariant())" })
+            if ($seen.ContainsKey($key)) { continue }
+            $seen[$key] = $true
+            $out += , @{ key = $key; name = $name; problemCode = [int] (Get-WdhKey $d 'problemCode' 0); hardwareIds = $hw; deviceId = $devId; source = [string] $l[0] }
+        }
+    }
+    return $out
+}
+
+<# The previously reported device that is this present device (device id, else a hardware ID, else the name when no id was recorded). #>
+function Find-WdhPreviousDevice {
+    param($Device, [object[]] $Previous)
+    $did = $(if ($Device -is [System.Collections.IDictionary] -and $Device.Contains('deviceId')) { ([string] $Device['deviceId']).ToUpperInvariant() } else { '' })
+    $hw = ([string] $Device['hardwareId']).ToUpperInvariant()
+    foreach ($p in @($Previous | Where-Object { $_ })) { if ($did -and $p.deviceId -and $did -eq $p.deviceId) { return $p } }
+    foreach ($p in @($Previous | Where-Object { $_ })) { if ($hw -and @($p.hardwareIds) -contains $hw) { return $p } }
+    foreach ($p in @($Previous | Where-Object { $_ })) { if (-not $p.deviceId -and -not @($p.hardwareIds).Count -and $p.name -and $p.name -ieq [string] $Device['name']) { return $p } }
+    return $null
+}
+
 function Get-WdhDeviceSeverity { param([string] $Class) if ($Class -in 'Display', 'Net', 'SCSIAdapter', 'HDC', 'DiskDrive', 'System') { 'Error' } else { 'Warning' } }
 
 function Test-WdhDrivers {
@@ -922,10 +1420,24 @@ function Test-WdhDrivers {
     if ($report) { foreach ($d in @(ConvertTo-WdhList $report['devices'])) { foreach ($h in @(ConvertTo-WdhList $d['hardwareIds'])) { $byHw[([string] $h).ToUpperInvariant()] = $d } } }
     $problems = 0
     $basic = 0
+    # Devices the deployment itself reported with a problem, compared with Device Manager now.
+    $prev = @(Get-WdhPreviousProblemDevices $C)
+    $matched = @{}
     foreach ($dev in @($devices)) {
         $code = [int] $dev.problemCode
         $rep = $(if ($dev.hardwareId -and $byHw.ContainsKey($dev.hardwareId.ToUpperInvariant())) { $byHw[$dev.hardwareId.ToUpperInvariant()] } else { $null })
         $id = "drivers.device.$((Get-WddSha256 ([Text.Encoding]::UTF8.GetBytes("$($dev.hardwareId)|$($dev.name)"))).Substring(0, 12).ToLowerInvariant())"
+        $hwText = "hardware ID $(if ($dev.hardwareId) { $dev.hardwareId } else { 'not reported' })"
+        $p = $(if ($prev.Count -and $code -notin 45, 47) { Find-WdhPreviousDevice $dev $prev } else { $null })
+        $pText = ''
+        if ($p) {
+            $matched[$p.key] = $true
+            $pid2 = "drivers.previous.$(Get-WdhShortHash $p.key)"
+            $was = "code $($p.problemCode): $(if ($script:WdhProblemCodes.ContainsKey($p.problemCode)) { $script:WdhProblemCodes[$p.problemCode] } else { 'problem' })"
+            $C.DeviceComparison.Add([ordered]@{ name = [string] $dev.name; hardwareIds = @($p.hardwareIds); deviceId = [string] $p.deviceId; previousProblemCode = [int] $p.problemCode; currentProblemCode = $code; state = $(if ($code -eq 0) { 'NowHealthy' } else { 'StillHasProblem' }); source = $p.source; findingId = $(if ($code -eq 0) { $pid2 } else { $id }) })
+            if ($code -eq 0) { Add-WdhFinding $C $pid2 'drivers' "$($dev.name): previously reported, now healthy" 'Info' 'Informational' 'Working driver' "Working now (problem code 0). The deployment had reported it with $was; $hwText" 'Plug and Play problem code now, compared with the devices the deployment reported (devicesWithProblems)' "Win32_PnPEntity, $($p.source)" -Required $false -TechnicianRequired $false | Out-Null }
+            else { $pText = "; already reported by the deployment ($was)" }
+        }
         $isBasic = $dev.class -eq 'Display' -and ($dev.service -eq 'BasicDisplay' -or $dev.name -like 'Microsoft Basic Display*')
         if ($code -eq 0 -and $isBasic) {
             $basic++
@@ -941,16 +1453,22 @@ function Test-WdhDrivers {
         $what = $(if ($script:WdhProblemCodes.ContainsKey($code)) { $script:WdhProblemCodes[$code] } else { 'problem' })
         $sev = Get-WdhDeviceSeverity $dev.class
         if ($code -eq 22) { Add-WdhFinding $C $id 'drivers' $dev.name 'Info' 'Informational' 'Working, or disabled on purpose' "Disabled (code 22). A disabled device is not treated as broken." 'Plug and Play problem code' 'Win32_PnPEntity' 'Enable it in Device Manager only if it should be in use.' -Required $false | Out-Null; continue }
-        if ($code -eq 14 -or ($rep -and [string] $rep['state'] -eq 'RestartPending')) { Add-WdhFinding $C $id 'drivers' $dev.name 'Pending' $sev 'Working driver' "Waiting for a restart (code ${code}: $what)" 'Plug and Play problem code' 'Win32_PnPEntity' 'Restart the computer.' -AutomaticRecovery $true -TechnicianRequired $false | Out-Null; continue }
+        if ($code -eq 14 -or ($rep -and [string] $rep['state'] -eq 'RestartPending')) { Add-WdhFinding $C $id 'drivers' $dev.name 'Pending' $sev 'Working driver' "Waiting for a restart (code ${code}: $what)$pText; $hwText"'Plug and Play problem code' 'Win32_PnPEntity' 'Restart the computer.' -AutomaticRecovery $true -TechnicianRequired $false | Out-Null; continue }
         $hw = ($rep -and [string] $rep['state'] -eq 'HardwareIssue') -or (-not $rep -and $code -in $script:WdhHardwareCodes -and $code -ne 10)
         $wasOk = $rep -and [string] $rep['state'] -in 'Healthy', 'BasicDriver'
-        $obs = "$(if ($code -eq 28) { 'Missing driver' } elseif ($hw) { 'Possible hardware or firmware problem' } else { 'Not working' }) (code ${code}: $what)$(if ($wasOk) { '; it was working when the driver stage finished' })$(if ($rep -and [string] $rep['result'] -eq 'Succeeded') { '; a driver was installed for it, but the device still reports a problem' })"
+        $obs = "$(if ($code -eq 28) { 'Missing driver' } elseif ($hw) { 'Possible hardware or firmware problem' } else { 'Not working' }) (code ${code}: $what)$(if ($wasOk) { '; it was working when the driver stage finished' })$(if ($rep -and [string] $rep['result'] -eq 'Succeeded') { '; a driver was installed for it, but the device still reports a problem' })$pText; $hwText"
         $next = $(if ($rep -and $rep['manualAction'] -is [hashtable] -and $rep['manualAction']['text']) { [string] $rep['manualAction']['text'] } elseif ($code -eq 28) { 'Install a driver: Windows Update, the manufacturer''s support page, or "Deployment recovery" > Add driver packages.' } elseif ($hw) { 'Check the hardware (seating, cables, firmware settings) before replacing drivers.' } else { 'Open Device Manager for details; reinstall the driver or check the hardware.' })
         $C.Manual.Add([ordered]@{ id = $id; text = "$($dev.name): $next"; url = $(if ($rep -and $rep['manualAction'] -is [hashtable]) { [string] $rep['manualAction']['url'] } else { '' }) })
         Add-WdhFinding $C $id 'drivers' $dev.name 'Fail' $sev 'Working driver' $obs 'Plug and Play problem code (Win32_PnPEntity.ConfigManagerErrorCode), compared with drivers.json' 'Win32_PnPEntity, reports\drivers.json' $next -RecoveryAction $(if ($code -eq 28) { 'AddDrivers' } else { '' }) | Out-Null
     }
-    if (-not $problems -and -not $basic) { Add-WdhFinding $C 'drivers.devices' 'drivers' 'Devices' 'Pass' 'Error' 'Every device working' "$(@($devices).Count) device(s), none reports a problem" 'Plug and Play problem codes (Win32_PnPEntity)' 'Win32_PnPEntity' | Out-Null }
-    elseif (-not $problems) { Add-WdhFinding $C 'drivers.devices' 'drivers' 'Devices' 'Pass' 'Error' 'Every device working' "$(@($devices).Count) device(s), none reports a problem ($basic with a generic driver)" 'Plug and Play problem codes' 'Win32_PnPEntity' | Out-Null }
+    foreach ($p in @($prev | Where-Object { $_ -and -not $matched.ContainsKey($_.key) })) {
+        $pid2 = "drivers.previous.$(Get-WdhShortHash $p.key)"
+        $C.DeviceComparison.Add([ordered]@{ name = [string] $p.name; hardwareIds = @($p.hardwareIds); deviceId = [string] $p.deviceId; previousProblemCode = [int] $p.problemCode; currentProblemCode = $null; state = 'NotPresent'; source = $p.source; findingId = $pid2 })
+        Add-WdhFinding $C $pid2 'drivers' "$($p.name): previously reported, not present now" 'Info' 'Informational' 'Working driver' "Not present now (disconnected, removed or re-enumerated). The deployment had reported it with code $($p.problemCode); hardware ID $(if (@($p.hardwareIds).Count) { @($p.hardwareIds)[0] } else { 'not recorded' })" 'Present devices (Win32_PnPEntity) compared with the devices the deployment reported' "Win32_PnPEntity, $($p.source)" -Required $false -TechnicianRequired $false | Out-Null
+    }
+    $note = ' Zero device problems is a hardware-health result, not proof that every optional driver was installed.'
+    if (-not $problems -and -not $basic) { Add-WdhFinding $C 'drivers.devices' 'drivers' 'Devices' 'Pass' 'Error' 'Every device working' "$(@($devices).Count) device(s), none reports a problem.$note" 'Plug and Play problem codes (Win32_PnPEntity)' 'Win32_PnPEntity' | Out-Null }
+    elseif (-not $problems) { Add-WdhFinding $C 'drivers.devices' 'drivers' 'Devices' 'Pass' 'Error' 'Every device working' "$(@($devices).Count) device(s), none reports a problem ($basic with a generic driver).$note" 'Plug and Play problem codes' 'Win32_PnPEntity' | Out-Null }
     if ($report) {
         foreach ($m in @(ConvertTo-WdhList $report['manualActions'])) {
             $C.Manual.Add([ordered]@{ id = "drivers.manual.$($m['operationId'])"; text = [string] $m['text']; url = [string] $m['url'] })
@@ -961,6 +1479,75 @@ function Test-WdhDrivers {
         $tools = @(@(ConvertTo-WdhList $report['optionalApplications']) | ForEach-Object { [string] $_['name'] } | Where-Object { $_ })
         if ($tools.Count) { Add-WdhFinding $C 'drivers.vendorReview' 'drivers' 'Vendor driver review' 'Info' 'Informational' 'Optional' "Vendor driver review recommended: $($tools -join ', '). These tools have not scanned this computer; the deployment never runs them." 'drivers.json optionalApplications' 'reports\drivers.json' 'Optionally run the vendor tool with the customer. A working driver does not need replacing.' -Required $false | Out-Null }
     }
+}
+
+# ------------------------------------------------------------------------------------------------
+# Manufacturer software: optional recommendations only (every finding Info, never required)
+# ------------------------------------------------------------------------------------------------
+
+$script:WdhNoAutoInstall = 'No verified WinGet package (checked microsoft/winget-pkgs) and the vendor installer''s unattended mode is not verified'
+
+<# Desktop or portable, from the SMBIOS chassis types and a battery. #>
+function Get-WdhChassisKind {
+    param($Chassis)
+    if (-not $Chassis) { return @{ kind = 'unknown'; text = 'the chassis type could not be read' } }
+    $types = @(@(ConvertTo-WdhList $Chassis.chassisTypes) | ForEach-Object { [int] $_ })
+    $list = $(if ($types.Count) { $types -join ', ' } else { 'none reported' })
+    # Portable: 8 Portable, 9 Laptop, 10 Notebook, 11 Hand Held, 12 Docking Station, 14 Sub Notebook, 30 Tablet, 31 Convertible, 32 Detachable.
+    if (@($types | Where-Object { $_ -in 8, 9, 10, 11, 12, 14, 30, 31, 32 }).Count -or [bool] $Chassis.battery) { return @{ kind = 'portable'; text = "portable computer (chassis type $list$(if ($Chassis.battery) { '; a battery is present' }))" } }
+    # Desktop: 3 Desktop, 4 Low Profile, 5 Pizza Box, 6 Mini Tower, 7 Tower, 13 All in One, 15 Space-saving, 16 Lunch Box, 17 Main System Chassis, 24 Sealed-case PC, 35 Mini PC, 36 Stick PC.
+    if (@($types | Where-Object { $_ -in 3, 4, 5, 6, 7, 13, 15, 16, 17, 24, 35, 36 }).Count) { return @{ kind = 'desktop'; text = "desktop (chassis type $list; no battery)" } }
+    return @{ kind = 'unknown'; text = "chassis type $list is not a desktop type (no battery)" }
+}
+
+function Test-WdhManufacturerSoftware {
+    param($C)
+    $gpus = Invoke-WdhProbe $C 'videoControllers' { Get-WdhVideoControllers }
+    $cpus = Invoke-WdhProbe $C 'processors' { Get-WdhProcessors }
+    $chassis = Invoke-WdhProbe $C 'chassis' { Get-WdhChassis }
+    $entries = Invoke-WdhProbe $C 'uninstall' { Get-WdhUninstallEntries $(if ($C.HiveLoaded) { $C.DeploymentSid } else { '' }) }
+    $gpuList = @(ConvertTo-WdhList $gpus); $cpuList = @(ConvertTo-WdhList $cpus)
+    # An empty list is a result; only a failed read (reported in the limitations) leaves the installed state unknown.
+    $uninstallFailed = @($C.Limitations | Where-Object { $_ -like 'Could not read uninstall*' }).Count -gt 0
+    $kind = Get-WdhChassisKind $chassis
+    $now = (Get-WdhTime).ToString('o')
+    $method = 'Win32_VideoController (Name, PNPDeviceID), Win32_Processor, Win32_SystemEnclosure ChassisTypes and Win32_Battery; uninstall records for the installed state (read-only)'
+    $recs = @()
+    $nv = @($gpuList | Where-Object { [string] $_.pnpDeviceId -match '(?i)VEN_10DE' -and [string] $_.name -match '(?i)GeForce|RTX|TITAN|Quadro' }) | Select-Object -First 1
+    if ($nv) {
+        $recs += , @{ id = 'nvidiaApp'; utility = 'NVIDIA App'; vendor = 'NVIDIA'; pattern = '^NVIDIA App\b'; url = 'https://www.nvidia.com/en-us/software/nvidia-app/'; detected = "$($nv.name) (PCI vendor 10DE)"
+                      compatibility = "NVIDIA GeForce, RTX, TITAN or Quadro graphics ($($nv.name)): NVIDIA App is NVIDIA's utility for these cards (driver updates and graphics settings)."
+                      signIn = 'No NVIDIA account is required for driver updates; signing in is optional.'; notes = 'A working driver from Windows Update does not need replacing.' }
+    }
+    $amd = @($gpuList | Where-Object { [string] $_.pnpDeviceId -match '(?i)VEN_1002' -and [string] $_.name -match '(?i)Radeon' }) | Select-Object -First 1
+    if ($amd) {
+        $recs += , @{ id = 'amdAdrenalin'; utility = 'AMD Software: Adrenalin Edition'; vendor = 'AMD'; pattern = '^AMD Software\b'; url = 'https://www.amd.com/en/products/software/adrenalin.html'; detected = "$($amd.name) (PCI vendor 1002)"
+                      compatibility = "AMD Radeon graphics ($($amd.name)): AMD Software: Adrenalin Edition is AMD's graphics driver and settings suite. It is recommended because of the Radeon graphics, never because of an AMD processor alone."
+                      signIn = 'No account is required.'; notes = 'A working driver from Windows Update does not need replacing.' }
+    }
+    $ryzen = @($cpuList | Where-Object { [string] $_.name -match '(?i)^\s*AMD Ryzen' }) | Select-Object -First 1
+    $notes = @()
+    if ($ryzen -and $kind.kind -eq 'desktop') {
+        $recs += , @{ id = 'amdRyzenMaster'; utility = 'AMD Ryzen Master'; vendor = 'AMD'; pattern = '^AMD Ryzen Master\b'; url = 'https://www.amd.com/en/products/software/ryzen-master.html'; detected = "$($ryzen.name); $($kind.text)"
+                      compatibility = "AMD Ryzen desktop processor ($($ryzen.name)) in a $($kind.text): AMD Ryzen Master is an optional monitoring and tuning tool, not a chipset driver."
+                      signIn = 'No account is required.'; notes = 'Windows Deployment Builder never applies tuning, overclocking, undervolting, voltage, BIOS or profile changes; any tuning is the owner''s own decision.' }
+    } elseif ($ryzen) { $notes += "AMD Ryzen Master is not recommended: $($kind.text) (it is meant for desktop Ryzen processors)" }
+    if (-not $amd -and @($cpuList | Where-Object { [string] $_.name -match '(?i)\bAMD\b' -or [string] $_.manufacturer -match '(?i)AMD' }).Count) { $notes += 'AMD Software: Adrenalin Edition is not recommended: no Radeon graphics (an AMD processor alone does not need it)' }
+    $items = @()
+    foreach ($r in $recs) {
+        $hit = @(@(ConvertTo-WdhList $entries) | Where-Object { [string] $_.displayName -match $r.pattern }) | Select-Object -First 1
+        $installed = $(if ($uninstallFailed) { $null } else { [bool] $hit })
+        $fid = "vendor.$($r.id)"
+        $manual = $(if ($installed) { 'Already installed; nothing to do.' } else { "Optional: if the customer wants it, download it from $($r.url) and install it with them." })
+        $obs = "Detected: $($r.detected). $($r.compatibility) Installed: $(if ($null -eq $installed) { 'could not be read' } elseif ($installed) { "yes ($($hit.displayName)$(if ($hit.displayVersion) { " $($hit.displayVersion)" }))" } else { 'no' }). Automatic installation: no ($script:WdhNoAutoInstall). $($r.signIn) $($r.notes)"
+        Add-WdhFinding $C $fid 'hardwareSoftware' "$($r.utility) (optional)" 'Info' 'Informational' 'Optional manufacturer utility (recommendation only)' $obs $method $r.url $(if ($installed) { '' } else { $manual }) -Required $false -TechnicianRequired $false | Out-Null
+        $items += , [ordered]@{ id = $r.id; utility = $r.utility; vendor = $r.vendor; recommended = $true; detectedHardware = $r.detected; compatibility = $r.compatibility; installed = $installed
+                                installedVersion = $(if ($hit) { [string] $hit.displayVersion } else { '' }); automaticInstall = $false; automaticInstallReason = $script:WdhNoAutoInstall; manualAction = $manual; url = $r.url
+                                signIn = $r.signIn; notes = $r.notes; findingId = $fid; checkedUtc = $now }
+    }
+    foreach ($i in $items) { $C.HardwareSoftware.Add($i) }
+    $hwText = "Graphics: $(if ($null -eq $gpus) { 'could not be read' } elseif ($gpuList.Count) { ($gpuList | ForEach-Object { $_.name }) -join ', ' } else { 'none reported' }); processor: $(if ($null -eq $cpus) { 'could not be read' } elseif ($cpuList.Count) { ($cpuList | ForEach-Object { $_.name }) -join ', ' } else { 'none reported' }); $($kind.text)"
+    Add-WdhFinding $C 'vendor.summary' 'hardwareSoftware' 'Manufacturer software recommendations' 'Info' 'Informational' 'Recommendations only; nothing is installed by this check' "$hwText. Recommended: $(if ($items.Count) { ($items | ForEach-Object { $_.utility }) -join ', ' } else { 'none' }).$(if ($notes.Count) { ' ' + ($notes -join '. ') + '.' })" $method 'WMI, uninstall records' -Required $false -TechnicianRequired $false | Out-Null
 }
 
 # ------------------------------------------------------------------------------------------------
@@ -1138,7 +1725,9 @@ function Get-WdhCategories {
         foreach ($f in $counted) { $e = Get-WdhEffective $f; if ($script:WdhCategoryRank[$e] -gt $script:WdhCategoryRank[$worst]) { $worst = $e } }
         $bad = @($counted | Where-Object { (Get-WdhEffective $_) -ne 'Verified' })
         $passed = @($counted | Where-Object { $_.status -eq 'Pass' }).Count
-        $summary = $(if ($bad.Count) { "$($bad.Count) of $($counted.Count) check(s) need attention: $((@($bad | Select-Object -First 3) | ForEach-Object { $_.title }) -join ', ')$(if ($bad.Count -gt 3) { ', ...' })" } else { "$passed of $($counted.Count) check(s) verified" })
+        $summary = $(if ($bad.Count) { "$($bad.Count) of $($counted.Count) check(s) need attention: $((@($bad | Select-Object -First 3) | ForEach-Object { $_.title }) -join ', ')$(if ($bad.Count -gt 3) { ', ...' })" }
+                     elseif (-not $passed) { "$($counted.Count) item(s) for information; nothing here needs action" }
+                     else { "$passed of $($counted.Count) check(s) verified" })
         $out += , [ordered]@{ id = $id; name = $script:WdhCategoryNames[$id]; status = $worst; summary = $summary; findings = $fs.Count }
     }
     return $out
@@ -1206,6 +1795,7 @@ function Get-WdhChecklist {
     $list += & $item 'updates' 'Windows Update completed as required' @('updates.*')
     $list += & $item 'drivers' 'Hardware drivers healthy' @('drivers.*')
     $list += & $item 'apps' 'Selected applications verified' @('app.*', 'apps.*')
+    if (@($fs | Where-Object { $_.id -eq 'office.install' }).Count) { $list += & $item 'office' 'Microsoft Office installed and verified (activation as recorded)' @('office.*') }
     $list += & $item 'restoration' 'Settings restoration completed' @('restore.*')
     $list += & $item 'security' 'Security protections checked' @('security.antivirus', 'security.firewall', 'security.uac', 'security.smartScreen')
     $list += & $item 'network' 'Network functional where required' @('network.*')
@@ -1234,7 +1824,13 @@ function Get-WdhCustomerHandoff {
         [ordered]@{ label = 'Firewall'; state = (& $state 'security.firewall' 'On' 'Off - ask your technician') }
     )
     if ($f.ContainsKey('security.encryption')) { $security += [ordered]@{ label = 'Device encryption'; state = $(if ($f.ContainsKey('security.recoveryKey')) { "On $([char] 0x2014) keep your recovery key safe" } else { 'Off' }) } }
-    $updates = $(if (-not $f.ContainsKey('updates.stage') -or $f['updates.stage'].status -eq 'NotApplicable') { 'Windows installs updates automatically.' } elseif ($f['updates.stage'].status -eq 'Pass') { 'Windows was updated during setup.' } elseif ($f['updates.stage'].status -eq 'Pending') { 'Updates are still being installed.' } else { 'Some updates still need to be installed (your technician will finish this).' })
+    # The Windows Update state (engine 2.1.0, or a later retry run) decides when it exists; otherwise the stage result.
+    $uf = $(if ($f.ContainsKey('updates.state')) { $f['updates.state'] } elseif ($f.ContainsKey('updates.stage')) { $f['updates.stage'] } else { $null })
+    $updates = $(if (-not $uf -or $uf.status -eq 'NotApplicable') { 'Windows installs updates automatically.' }
+                 elseif ($uf.status -eq 'Pass' -or ($uf.id -eq 'updates.state' -and $uf.status -eq 'Info')) { 'Windows was updated during setup.' }
+                 elseif ($uf.status -eq 'Pending') { 'Updates are still being installed.' }
+                 elseif ($uf.id -eq 'updates.state' -and $uf.observed -like 'RestartRequired*') { 'Restart the computer once to finish installing updates.' }
+                 else { 'Some updates still need to be installed (your technician will finish this).' })
     $actions = @()
     if ($f.ContainsKey('windows.activation') -and $f['windows.activation'].status -ne 'Pass') { $actions += 'Activate Windows (Settings > System > Activation).' }
     if ((@($C.Findings | Where-Object { $_.status -eq 'Pending' -and $_.id -in 'windows.restart', 'identity.computerName' })).Count) { $actions += 'Restart the computer once.' }
@@ -1364,7 +1960,73 @@ function New-WdhContext {
         Findings = New-Object System.Collections.Generic.List[object]; Sources = New-Object System.Collections.Generic.List[object]
         Apps = New-Object System.Collections.Generic.List[object]; Manual = New-Object System.Collections.Generic.List[object]; Custom = New-Object System.Collections.Generic.List[object]
         Limitations = New-Object System.Collections.Generic.List[string]; Obs = @{}; Backups = [ordered]@{ retained = 0; bytes = 0; location = ''; requiredForOutstanding = $false; cleanup = '' }
+        # Engine 1.1.0 sections: Windows Update state and history, device comparison, Office, manufacturer software.
+        WindowsUpdate = $null; UpdateResult = $null; Office = $null
+        DeviceComparison = New-Object System.Collections.Generic.List[object]; HardwareSoftware = New-Object System.Collections.Generic.List[object]
     }
+}
+
+<# The technician report as plain text (technician-report.txt): the same findings, the new sections and their evidence. #>
+function Format-WdhTextReport {
+    param($Report)
+    $l = New-Object System.Collections.Generic.List[string]
+    $os = $Report['os']; $o = $Report['overall']
+    $l.Add('Windows Deployment Builder - deployment health report (read-only)')
+    $l.Add("Computer $($os['computerName']), $($os['caption']) $($os['displayVersion']) (build $($os['build']))")
+    $l.Add("Verified $($Report['generatedUtc']) by $($Report['context']['runAs']) ($($Report['trigger'])); health engine $($Report['engineVersion']); verification $($Report['verificationId']); deployment $($Report['deploymentId'])")
+    $l.Add('')
+    $l.Add("OVERALL: $($o['status']) - $($o['title']). $($o['summary'])")
+    $l.Add('')
+    $l.Add('Categories')
+    foreach ($k in @($Report['categories'])) { $l.Add(('  {0,-32} {1,-15} {2}' -f $k['name'], $k['status'], $k['summary'])) }
+    $l.Add('')
+    $todo = @(@($Report['findings']) | Where-Object { $_['status'] -notin 'Pass', 'Info', 'NotApplicable' })
+    $l.Add("What needs attention ($($todo.Count))")
+    foreach ($f in $todo) { $l.Add("  [$($f['status'])] $($f['title']): $($f['observed'])"); if ($f['nextAction']) { $l.Add("      Next: $($f['nextAction'])") } }
+    $w = $Report['windowsUpdate']
+    if ($w) {
+        $l.Add('')
+        $l.Add("Windows Update (checked $($w['checkedUtc']))")
+        foreach ($pair in @(@('Deployment', $w['original']), @('Current', $w['current']))) {
+            $v = $pair[1]
+            if (-not $v) { continue }
+            $l.Add("  $($pair[0]): $($v['label']); status $($v['status'])$(if ($v['updateState']) { ", state $($v['updateState'])" }); engine $(if ($v['engineVersion']) { $v['engineVersion'] } else { 'unknown' }); finished $($v['finishedUtc']); installed $($v['installed']), failed $($v['failed'])")
+            if ($v['updateStateText']) { $l.Add("    $($v['updateStateText'])") }
+            if ($v['summary']) { $l.Add('    Summary: ' + (@($v['summary'].Keys | ForEach-Object { "$_ $($v['summary'][$_])" }) -join ', ')) }
+        }
+        if ($w['policy']) { $p = $w['policy']; $l.Add("  Policy ($($p['source'])): feature updates $($p['featureUpdates']), optional updates $($p['optionalUpdates']), drivers $($p['drivers']), preview updates $(if ($null -eq $p['previewUpdates']) { 'not recorded' } elseif ($p['previewUpdates']) { 'included' } else { 'intentionally excluded' }) ($($p['previewSource']))") }
+        if ($w['settingsRefresh']) { $s = $w['settingsRefresh']; $l.Add("  Final Settings refresh: available $($s['available']), requested $($s['requested']) $($s['requestedUtc']), completed $($s['completed']) $($s['completedUtc']); last successful scan $($s['lastSuccessfulScanBefore']) -> $($s['lastSuccessfulScanAfter']). The Settings page display is NOT verified.") }
+        if ($w['orchestrator']) { $g = $w['orchestrator']; $l.Add("  Windows Update (Settings) last successful check: $(if ($g['available']) { if ($g['lastSuccessfulScanUtc']) { $g['lastSuccessfulScanUtc'] } else { 'none recorded' } } else { 'not available on this Windows' })") }
+        foreach ($x in @($w['retries'])) { if ($x) { $l.Add("  Retry run $($x['runId']) ($($x['selection'])): $($x['state'])$(if ($x['final']) { " ($($x['final']))" }); installed $($x['installed']), failed $($x['failed']); engine $($x['engineVersion']); $($x['updateState'])") } }
+        foreach ($x in @($w['originalFailures'])) { if ($x) { $l.Add("  Original failure: $(@($x['kbs']) -join ',') $($x['title']) ($($x['lastHResult']))$(if ($x['laterInstalled']) { " - installed later on $($x['installedUtc']) by $($x['installedBy'])" } else { ' - not installed since' })") } }
+        foreach ($x in @($w['drivers'])) { if ($x) { $l.Add("  Driver via Windows Update: $($x['title']) $($x['model']) [$($x['result'])]") } }
+        if ($w['liveScan']) { $s = $w['liveScan']; $l.Add("  Live scan (read-only): $(if ($s['performed']) { "$($s['required']) required, $($s['optional']) optional, $($s['drivers']) driver, $($s['feature']) feature update(s)" } else { 'not possible' })") }
+    }
+    if (@($Report['deviceComparison']).Count) {
+        $l.Add('')
+        $l.Add('Devices the deployment reported with problems, now')
+        foreach ($d in @($Report['deviceComparison'])) { if ($d) { $l.Add("  $($d['state']): $($d['name']) (was code $($d['previousProblemCode']), now $(if ($null -eq $d['currentProblemCode']) { 'not present' } else { "code $($d['currentProblemCode'])" })); $(@($d['hardwareIds']) | Select-Object -First 1)") } }
+        $l.Add('  Zero device problems is a hardware-health result, not proof that every optional driver was installed.')
+    }
+    if ($Report['office']) {
+        $x = $Report['office']
+        $l.Add('')
+        $l.Add("Microsoft Office: $($x['displayName']) - $($x['result']); Click-to-Run $(if ($x['present']) { "$(@($x['productReleaseIds']) -join ', ') $($x['version']) $($x['platform'])" } else { 'not found' }); Office stage $($x['engineStatus'])")
+        if ($x['activation']) { $l.Add("  Activation (as the activation stage recorded it): $($x['activation']['status'])$(if ($x['activation']['message']) { " - $($x['activation']['message'])" })") }
+    }
+    $l.Add('')
+    $l.Add('Manufacturer software (optional recommendations; nothing is installed automatically)')
+    if (-not @($Report['hardwareSoftware']).Count) { $l.Add('  None recommended for this hardware.') }
+    foreach ($x in @($Report['hardwareSoftware'])) { if ($x) { $l.Add("  $($x['utility']): $($x['detectedHardware']); installed $(if ($null -eq $x['installed']) { 'unknown' } else { $x['installed'] }); $($x['url'])"); $l.Add("    $($x['compatibility']) $($x['signIn']) Automatic installation: no ($($x['automaticInstallReason']))") } }
+    $l.Add('')
+    $l.Add("Applications ($(@($Report['applications']).Count))")
+    foreach ($a in @($Report['applications'])) { if ($a) { $l.Add(('  {0,-36} {1,-30} engine: {2}' -f $a['name'], $a['verification'], $(if ($a['engineStatus']) { $a['engineStatus'] } else { '-' }))) } }
+    $l.Add('')
+    $l.Add('Limitations')
+    foreach ($x in @($Report['limitations'])) { $l.Add("  - $x") }
+    $l.Add('')
+    $l.Add('Machine-readable: deployment-health.json in this folder. Verification never changes this computer.')
+    return ($l -join "`r`n") + "`r`n"
 }
 
 <#
@@ -1375,10 +2037,13 @@ function Invoke-WdhVerify {
     param([hashtable] $Manifest, [hashtable] $Paths, [hashtable] $Config, [string] $Trigger = 'Technician', [switch] $ScanUpdates)
     $script:WdhNow = Get-WddNow
     $C = New-WdhContext $Manifest $Paths $Config -ScanUpdates:$ScanUpdates
-    foreach ($t in 'Test-WdhDeployment', 'Test-WdhWindows', 'Test-WdhAccounts', 'Test-WdhUpdates', 'Test-WdhApplications', 'Test-WdhRestoration', 'Test-WdhDrivers', 'Test-WdhSecurity', 'Test-WdhNetwork', 'Test-WdhStorage', 'Test-WdhCustomizations') {
+    foreach ($t in 'Test-WdhDeployment', 'Test-WdhWindows', 'Test-WdhAccounts', 'Test-WdhUpdates', 'Test-WdhApplications', 'Test-WdhOffice', 'Test-WdhRestoration', 'Test-WdhDrivers', 'Test-WdhManufacturerSoftware', 'Test-WdhSecurity', 'Test-WdhNetwork', 'Test-WdhStorage', 'Test-WdhCustomizations') {
         try { & $t $C } catch {
-            $cat = @{ 'Test-WdhDeployment' = 'recovery'; 'Test-WdhWindows' = 'windows'; 'Test-WdhAccounts' = 'accounts'; 'Test-WdhUpdates' = 'updates'; 'Test-WdhApplications' = 'applications'; 'Test-WdhRestoration' = 'restoration'; 'Test-WdhDrivers' = 'drivers'; 'Test-WdhSecurity' = 'security'; 'Test-WdhNetwork' = 'network'; 'Test-WdhStorage' = 'storage'; 'Test-WdhCustomizations' = 'customizations' }[$t]
-            Add-WdhFinding $C "$cat.checkError" $cat "$($script:WdhCategoryNames[$cat]) check" 'Unverifiable' 'Error' 'The check completes' "The check stopped: $($_.Exception.Message)" $t 'DeploymentHealth.ps1' 'Run the check again; report this message if it repeats.' | Out-Null
+            $cat = @{ 'Test-WdhDeployment' = 'recovery'; 'Test-WdhWindows' = 'windows'; 'Test-WdhAccounts' = 'accounts'; 'Test-WdhUpdates' = 'updates'; 'Test-WdhApplications' = 'applications'; 'Test-WdhOffice' = 'applications'; 'Test-WdhRestoration' = 'restoration'; 'Test-WdhDrivers' = 'drivers'; 'Test-WdhManufacturerSoftware' = 'hardwareSoftware'; 'Test-WdhSecurity' = 'security'; 'Test-WdhNetwork' = 'network'; 'Test-WdhStorage' = 'storage'; 'Test-WdhCustomizations' = 'customizations' }[$t]
+            $req = $t -ne 'Test-WdhManufacturerSoftware'
+            # Manufacturer software is a recommendation: its failure never affects the overall state beyond "Info".
+            if (-not $req) { Add-WdhFinding $C "$cat.checkError" $cat "$($script:WdhCategoryNames[$cat]) check" 'Info' 'Informational' 'The check completes' "The check stopped: $($_.Exception.Message)" $t 'DeploymentHealth.ps1' -Required $false -TechnicianRequired $false | Out-Null; continue }
+            Add-WdhFinding $C "$cat$(if ($t -eq 'Test-WdhOffice') { '.office' }).checkError" $cat "$($script:WdhCategoryNames[$cat]) check" 'Unverifiable' 'Error' 'The check completes' "The check stopped: $($_.Exception.Message)" $t 'DeploymentHealth.ps1' 'Run the check again; report this message if it repeats.' | Out-Null
         }
     }
     # ToArray: @() on a generic List can fail in Windows PowerShell 5.1 ("Argument types do not match").
@@ -1418,10 +2083,18 @@ function Invoke-WdhVerify {
         limitations = @($limitations)
         comparison = (Get-WdhComparison $h.Previous $findings)
         history = @($h.History)
+        # Engine 1.1.0 sections (each with its own timestamps, versions and evidence).
+        windowsUpdate = $C.WindowsUpdate
+        deviceComparison = $C.DeviceComparison.ToArray()
+        office = $C.Office
+        hardwareSoftware = $C.HardwareSoftware.ToArray()
     }
     Write-WddJson $current $report
-    $template = Join-Path $Paths.Package 'scripts\health\HealthReport.html'
-    if (-not (Test-Path -LiteralPath $template)) { $template = Join-Path $script:WdhScriptRoot 'HealthReport.html' }
+    # The template beside this script first: a newer audit (for example from a recovery download) run on a
+    # computer deployed with an older package must not render its report with that package's older template.
+    $template = Join-Path $script:WdhScriptRoot 'HealthReport.html'
+    if (-not (Test-Path -LiteralPath $template)) { $template = Join-Path $Paths.Package 'scripts\health\HealthReport.html' }
+    if ($Config['options']['technicianReport']) { Write-WdhText (Join-Path $dir 'technician-report.txt') (Format-WdhTextReport $report) }
     if (Test-Path -LiteralPath $template) {
         $tpl = [IO.File]::ReadAllText($template, [Text.Encoding]::UTF8)
         if ($Config['options']['technicianReport']) { Write-WdhText (Join-Path $dir 'technician-report.html') (ConvertTo-WdhHtml $tpl ([ordered]@{ mode = 'technician'; report = $report })) }
@@ -1563,8 +2236,14 @@ function Invoke-WdhExport {
 if ($script:WdhMain) {
     $a = $script:WdhArgs
     $package = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+    # Run from a standalone download (no manifest beside it): verify the deployment staged on this computer.
+    $staged = Join-Path $env:ProgramData 'WindowsDeploymentBuilder\Package'
+    if (-not (Test-Path -LiteralPath (Join-Path $package 'deployment-manifest.json')) -and (Test-Path -LiteralPath (Join-Path $staged 'deployment-manifest.json'))) { $package = $staged }
     try { $manifest = Read-WddManifest (Join-Path $package 'deployment-manifest.json') } catch { Write-Output "Unverifiable: $($_.Exception.Message)"; exit 50 }
-    $config = Read-WddJson (Join-Path $PSScriptRoot 'health-config.json')
+    # The plan beside this script, else the staged package's (older packages lack the newer, optional sections).
+    $cfgPath = Join-Path $PSScriptRoot 'health-config.json'
+    if (-not (Test-Path -LiteralPath $cfgPath)) { $cfgPath = Join-Path $package 'scripts\health\health-config.json' }
+    $config = Read-WddJson $cfgPath
     if (-not $config) { Write-Output 'Unverifiable: health-config.json is missing or damaged.'; exit 50 }
     $paths = Get-WddPaths $manifest.dataRoot
     $id = Get-WddIdentity
