@@ -372,11 +372,11 @@ describe('deployment generation with a restoration plan', () => {
     return p;
   }
 
-  it('settings wait for their applications; the plan pins the backup; the engine is 1.5.0', () => {
+  it('settings wait for their applications; the plan pins the backup; the engine is 1.6.0', () => {
     const p = migrated();
     expect(settingsRestoreActive(p)).toBe(true);
     const c = applicationsConfig(p);
-    expect(c.engineVersion).toBe('1.5.0');
+    expect(c.engineVersion).toBe('1.6.0');
     expect(c.settingsRestore).toEqual({
       backupId: 'a1b2c3d4e5f60718',
       manifestSha256: p.migration.backup!.manifestSha256,

@@ -40,7 +40,7 @@
       "description": "Spotify for streaming, MusicBee for the local library, Audacity for editing, mpv.net for playback and Mp3tag for tags. Other players, streaming services and audio tools are recommendations (VLC is already in Core Essentials).",
       "inherits": [],
       "defaults": ["spotify", "musicbee", "audacity", "mpv-net", "mp3tag"],
-      "optional": ["foobar2000", "mediamonkey", "dopamine", "itunes", "apple-music", "ffmpeg", "aimp", "musicbrainz-picard", "exact-audio-copy", "tidal", "amazon-music", "deezer", "tauon", "museeks", "voicemeeter", "reaper", "musescore"],
+      "optional": ["foobar2000", "mediamonkey", "dopamine", "itunes", "apple-music", "ffmpeg", "aimp", "musicbrainz-picard", "exact-audio-copy", "tidal", "deezer", "tauon", "museeks", "voicemeeter", "reaper", "musescore"],
       "activation": "selectable"
     },
     {
@@ -137,10 +137,10 @@
       "id": "touch",
       "name": "Touchscreen / 2-in-1",
       "category": "touch",
-      "description": "Pen and touch: Xournal++ for handwritten notes and PDF annotation, with Whiteboard and Joplin to choose from.",
+      "description": "Pen and touch: Xournal++ for handwritten notes and PDF annotation, with Joplin to choose from.",
       "inherits": [],
       "defaults": ["xournalpp"],
-      "optional": ["whiteboard", "joplin"],
+      "optional": ["joplin"],
       "activation": "selectable"
     }
   ]

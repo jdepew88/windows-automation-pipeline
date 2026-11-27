@@ -20,7 +20,7 @@ import { DRIVER_STAGE } from '../drivers/contract';
  * native WinGet package list, which the engine reads at run time.
  */
 
-export const APP_ENGINE_VERSION = '1.5.0';
+export const APP_ENGINE_VERSION = '1.6.0';
 export const APP_STAGING_DIR = 'C:\\Windows\\Setup\\Scripts\\Applications';
 export const APP_ROOT = `${DATA_ROOT}\\Applications`;
 export const APP_TASK_NAME = 'Applications';
@@ -344,6 +344,9 @@ Manual use (elevated Windows PowerShell 5.1, signed in as the target user, all f
   powershell.exe -ExecutionPolicy Bypass -File .\\${APP_BOOTSTRAP_FILE} -Mode Check
   powershell.exe -ExecutionPolicy Bypass -File .\\${APP_ENGINE_FILE} -Mode Plan
       (read-only: WinGet state, installed/available per package and the exact command)
+  powershell.exe -ExecutionPolicy Bypass -File ${APP_ROOT}\\${APP_ENGINE_FILE} -Mode Verify
+      (engine 1.6.0: re-verifies every package from installation evidence, installs nothing;
+       exit 0 verified, 10 pending, 20 failed or not installed, 1 engine running)
   powershell.exe -ExecutionPolicy Bypass -File .\\${APP_INSTALLER_FILE}
   powershell.exe -ExecutionPolicy Bypass -File .\\${APP_INSTALLER_FILE} -Uninstall
 

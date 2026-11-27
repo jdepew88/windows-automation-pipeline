@@ -229,7 +229,7 @@ describe('Final Review considerations: only when relevant', () => {
     expect(s.computer.computerTypes).toEqual(['Gamer']);
     expect(s.networking.password).toBe('Password entered (not shown)');
     expect(s.updates.timing).toContain('after the initial Windows Update stage');
-    expect(s.applications.manual).toEqual(['RustDesk']);
+    expect(s.applications.manual).toEqual(['Battle.net', 'RustDesk']);
     expect(JSON.stringify(s)).not.toContain('never-show-me');
   });
 });

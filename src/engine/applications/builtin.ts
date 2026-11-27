@@ -2,7 +2,8 @@ import { z } from 'zod';
 import profilesJson from '../../data/apps/profiles.json';
 import profilesV1Json from '../../data/apps/profiles-v1.json';
 import { AppProfileCategorySchema, APP_PROFILE_ID, type AppProfile, type Devices, type PackageRef } from '../schema/applications';
-import { catalogEntryById, catalogRef, entryKey } from './catalog';
+import { catalogEntryById, catalogRef, entryKey, removalForCatalogId } from './catalog';
+import { CATALOG_SOURCE } from './ids';
 
 /**
  * Built-in application profiles (Phase 4.2): templates defined in `src/data/apps/profiles.json`,
@@ -61,6 +62,9 @@ const fileSchema = (version: ProfileRevision) =>
         if (new Set(all).size !== all.length) issue(`${p.id}: an app is listed twice`);
         for (const id of all) {
           const e = catalogEntryById(id);
+          // Revision 1 is frozen: an app removed from the catalog since stays named there; it resolves
+          // to a "removed" warning and is never installed. The current revision must not name one.
+          if (!e && version === 1 && removalForCatalogId(id)) continue;
           if (!e) issue(`${p.id}: unknown catalog id ${id}`);
           else if (!entryKey(e)) issue(`${p.id}: ${id} has no package and cannot be selected`);
         }
@@ -69,7 +73,12 @@ const fileSchema = (version: ProfileRevision) =>
 
 const FILES = { 1: fileSchema(1).parse(profilesV1Json), 2: fileSchema(2).parse(profilesJson) } as const;
 
-const refs = (ids: readonly string[]): PackageRef[] => ids.map((id) => catalogRef(catalogEntryById(id)!)!);
+const refs = (ids: readonly string[]): PackageRef[] =>
+  ids.map((id) => {
+    const e = catalogEntryById(id);
+    // A removed entry (revision 1 only): a catalog reference the planner reports as removed.
+    return e ? catalogRef(e)! : { packageIdentifier: id, source: CATALOG_SOURCE, displayName: removalForCatalogId(id)?.name ?? id, version: '', scope: '' };
+  });
 
 const SETS: Record<ProfileRevision, readonly AppProfile[]> = {
   1: build(1),

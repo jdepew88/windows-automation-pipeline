@@ -164,6 +164,12 @@ const CatalogEntrySchema = z
     upgrade: z.enum(UPGRADE_METHODS).optional(),
     /** Hardware the application is only useful with; the manager shows it, it never installs because of it. */
     hardware: z.object({ requirement: z.string().min(1).max(200), vendors: z.array(z.string().max(40)).max(10) }).strict().optional(),
+    /**
+     * Package keys ("winget:<id>" / "msstore:<id>", lower case) this entry was saved under before it
+     * moved to another source or became manual (catalog audit 2026-11). Saved selections and
+     * deselections under a former key mean this entry; the plan says so (never a silent substitution).
+     */
+    formerKeys: z.array(z.string().regex(/^(winget|msstore):[a-z0-9][a-z0-9.+_-]{0,127}$/)).max(5).optional(),
     /** Other verified WinGet identifiers of the same product (recognised as installed, never installed). */
     alternateIds: z.array(z.string().regex(WINGET_ID)).max(5).optional(),
     /** "Apps & features" names from the package manifest, used to recognise installations made outside WinGet. */
@@ -221,6 +227,12 @@ const ExcludedSchema = z
     name: z.string().min(1).max(100),
     packageIdentifier: z.string().max(128).optional(),
     reason: z.string().min(1).max(300),
+    /**
+     * Set when the app was an automated catalog entry and was taken out because WDB cannot install
+     * and verify it unattended. A saved profile that still selects it loads with a compatibility
+     * warning and keeps the reference, but the app is never installed and never replaced by another.
+     */
+    removed: z.object({ date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), formerId: z.string().regex(/^[a-z0-9][a-z0-9-]{0,47}$/) }).strict().optional(),
   })
   .strict();
 export type ExcludedApp = z.infer<typeof ExcludedSchema>;
@@ -283,6 +295,14 @@ export function catalogEntryForKey(key: string): CatalogEntry | undefined {
   return BY_KEY.get(key);
 }
 
+const BY_FORMER_KEY = new Map(CATALOG.flatMap((e) => (e.formerKeys ?? []).map((k) => [k, e] as const)));
+
+/** The entry that a key saved before the catalog audit now means (an entry that moved source or became manual). */
+export function entryForFormerKey(key: string): CatalogEntry | undefined {
+  const k = key.toLowerCase();
+  return BY_KEY.has(k) ? undefined : BY_FORMER_KEY.get(k);
+}
+
 export function catalogEntryById(id: string): CatalogEntry | undefined {
   return CATALOG.find((e) => e.id === id);
 }
@@ -304,6 +324,11 @@ export function catalogRef(e: CatalogEntry): PackageRef | undefined {
 /** The curated-catalog exclusion matching a package, if any (a custom ID may still add it). */
 export function exclusionFor(ref: Pick<PackageRef, 'packageIdentifier'>): ExcludedApp | undefined {
   return CATALOG_EXCLUDED.find((x) => !!x.packageIdentifier && x.packageIdentifier.toLowerCase() === ref.packageIdentifier.toLowerCase());
+}
+
+/** The removal record of a former catalog entry, by its old catalog id (a "catalog:<id>" reference). */
+export function removalForCatalogId(id: string): ExcludedApp | undefined {
+  return CATALOG_EXCLUDED.find((x) => x.removed?.formerId === id.toLowerCase());
 }
 
 /** The text a catalog search looks in: name, publisher, description, identifier and category label. */

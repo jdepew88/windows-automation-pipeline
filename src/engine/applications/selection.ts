@@ -1,6 +1,6 @@
 import type { AppProfile, ApplicationsSelection, Devices, PackageRef } from '../schema/applications';
 import { builtinProfile, builtinProfiles, deviceProfiles, isBuiltinProfile, revisionOf, type ProfileRevision } from './builtin';
-import { CONFLICT_GROUPS, OVERLAP_GROUPS, catalogEntryForKey, catalogRef, exclusionFor, isManual, methodOf, type CatalogEntry, type ConflictGroup, type ExcludedApp, type InstallMethod } from './catalog';
+import { CONFLICT_GROUPS, OVERLAP_GROUPS, catalogEntryForKey, catalogRef, entryForFormerKey, entryKey, exclusionFor, isManual, methodOf, removalForCatalogId, type CatalogEntry, type ConflictGroup, type ExcludedApp, type InstallMethod } from './catalog';
 import { CATALOG_SOURCE, packageKey, unresolvedReason } from './ids';
 
 /**
@@ -168,7 +168,16 @@ export function attachedAdditions(sel: ApplicationsSelection, active: readonly s
 function plan(key: string, input: PackageRef, origin: string): PlannedPackage {
   const catalog = catalogEntryForKey(key);
   const isCatalogRef = input.source.toLowerCase() === CATALOG_SOURCE;
-  const reason = unresolvedReason(input) ?? (isCatalogRef && !catalog ? `"${input.packageIdentifier}" is not an entry of this catalog.` : undefined);
+  // A former catalog entry removed because it cannot be installed and verified unattended: the saved
+  // reference stays (for diagnostics and so the technician can remove or replace it), nothing is installed.
+  const removal = catalog ? undefined : isCatalogRef ? removalForCatalogId(input.packageIdentifier) : exclusionFor(input)?.removed ? exclusionFor(input) : undefined;
+  const reason =
+    unresolvedReason(input) ??
+    (removal
+      ? `${removal.name} was removed from the automated catalog on ${removal.removed!.date}: ${removal.reason} It stays in this profile for reference and is not installed; remove it or choose another application.`
+      : isCatalogRef && !catalog
+        ? `"${input.packageIdentifier}" is not an entry of this catalog.`
+        : undefined);
   const method: InstallMethod = catalog ? methodOf(catalog) : input.source.toLowerCase() === 'msstore' ? 'msstore' : 'winget';
   // Portable packages are always installed machine-wide (protected folder, shortcut for all users).
   const ref = method === 'portable' ? { ...input, scope: 'machine' as const } : input;
@@ -187,13 +196,57 @@ function plan(key: string, input: PackageRef, origin: string): PlannedPackage {
     accountSignIn: catalog?.accountSignIn ?? false,
     reboot: catalog?.reboot ?? 'unknown',
     after: [],
-    excludedFromCatalog: catalog ? undefined : exclusionFor(ref),
+    excludedFromCatalog: catalog ? undefined : (removal ?? exclusionFor(ref)),
   };
 }
 
 const describe = (r: PackageRef) => `${r.version ? `version ${r.version}` : 'latest version'}, ${r.scope ? `${r.scope} scope` : 'default scope'}`;
 
-export function resolveSelection(sel: ApplicationsSelection): SelectionResult {
+/**
+ * Catalog audit 2026-11: a selection saved before an entry moved to another source (or became a manual
+ * entry) names it by its former key. Additions, deselections, links and custom profiles are rewritten
+ * to the entry's current key, and each rewrite is reported (never a silent substitution).
+ */
+export function canonicalSelection(sel: ApplicationsSelection): { sel: ApplicationsSelection; moved: Notice[] } {
+  const moved = new Map<string, Notice>();
+  const note = (oldKey: string) => {
+    const e = entryForFormerKey(oldKey);
+    if (!e) return undefined;
+    const key = entryKey(e)!;
+    if (!moved.has(key)) {
+      moved.set(key, {
+        key,
+        kind: 'info',
+        message: `${e.displayName} was saved as ${oldKey}; it is now ${isManual(e) ? 'a manual installation (WDB cannot install it unattended)' : `installed from ${e.source === 'msstore' ? 'the Microsoft Store' : 'WinGet'} as ${e.packageIdentifier}`}${e.notes ? ` (${e.notes})` : ''}. The same application, not a replacement.`,
+      });
+    }
+    return e;
+  };
+  const ref = (r: PackageRef): PackageRef => {
+    const e = note(packageKey(r));
+    return e ? { ...catalogRef(e)!, scope: isManual(e) ? '' : r.scope } : r;
+  };
+  const key = (k: string): string => {
+    const e = note(k);
+    return e ? entryKey(e)! : k;
+  };
+  const next: ApplicationsSelection = {
+    ...sel,
+    added: sel.added.map(ref),
+    removed: sel.removed.map(key),
+    ...(sel.addedWith ? { addedWith: Object.fromEntries(Object.entries(sel.addedWith).map(([k, v]) => [key(k), v])) } : {}),
+    profiles: sel.profiles.map((p) => ({
+      ...p,
+      packages: p.packages.map(ref),
+      ...(p.optional ? { optional: p.optional.map(ref) } : {}),
+      ...(p.excluded ? { excluded: p.excluded.map(key) } : {}),
+    })),
+  };
+  return moved.size ? { sel: next, moved: [...moved.values()] } : { sel, moved: [] };
+}
+
+export function resolveSelection(input: ApplicationsSelection): SelectionResult {
+  const { sel, moved } = canonicalSelection(input);
   const profiles = allProfiles(sel);
   const cycles: string[] = [];
   const missingProfiles = sel.selectedProfiles.filter((id) => !profiles.some((p) => p.id === id));
@@ -231,7 +284,7 @@ export function resolveSelection(sel: ApplicationsSelection): SelectionResult {
   for (const id of active) for (const k of profiles.find((p) => p.id === id)?.excluded ?? []) if (!addedKeys.has(k.toLowerCase())) removedBy.set(k.toLowerCase(), id);
   for (const k of sel.removed) removedBy.set(k.toLowerCase(), 'user');
 
-  const notices: Notice[] = [];
+  const notices: Notice[] = [...moved];
   // Dependencies of selected packages join the plan (unless removed, which is reported).
   for (let changed = true; changed; ) {
     changed = false;
@@ -293,7 +346,8 @@ export function resolveSelection(sel: ApplicationsSelection): SelectionResult {
   }
   for (const p of kept) {
     if (p.catalog?.selectionWarning) notices.push({ key: p.key, kind: 'warning', message: `${p.displayName}: ${p.catalog.selectionWarning}` });
-    if (p.excludedFromCatalog) notices.push({ key: p.key, kind: 'info', message: `${p.displayName} is not in the curated catalog (${p.excludedFromCatalog.reason}). It is installed by its exact identifier because you added it.` });
+    if (p.excludedFromCatalog?.removed) notices.push({ key: p.key, kind: 'warning', message: p.reason ?? `${p.displayName} was removed from the automated catalog.` });
+    else if (p.excludedFromCatalog) notices.push({ key: p.key, kind: 'info', message: `${p.displayName} is not in the curated catalog (${p.excludedFromCatalog.reason}). It is installed by its exact identifier because you added it.` });
   }
   // Overlapping tools (two remote-support tools, two PDF readers…): allowed when deliberate, but said.
   for (const g of Object.values(OVERLAP_GROUPS) as { label: string; ids: readonly string[] }[]) {

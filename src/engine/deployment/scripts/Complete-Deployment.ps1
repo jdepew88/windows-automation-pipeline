@@ -281,7 +281,7 @@ function New-WddReport {
         foreach ($x in @($drv.result.outstanding) | Where-Object { $_ }) {
             $how = switch ([string] $x.status) {
                 'FailedRetryable' { 'retry (RetryFailed)' } 'WaitingForNetwork' { 'resume when the network is back' } 'Pending' { 'resume' }
-                'FailedPermanent' { $(if ([string] $x.failureClass -in 'Integrity', 'Signature') { 'replace the package with a correctly signed, unmodified one' } else { 'correct the cause, then retry with -IncludePermanent' }) }
+                'FailedPermanent' { $(if ([string] $x.failureClass -eq 'HashMismatch') { 'the publisher''s installer no longer matches WinGet''s manifest (hash check kept); retry after the manifest is updated (winget source update), or install it from the publisher' } elseif ([string] $x.failureClass -in 'Integrity', 'Signature') { 'replace the package with a correctly signed, unmodified one' } else { 'correct the cause, then retry with -IncludePermanent' }) }
                 'ManualActionRequired' { 'install the driver by hand (see the device in drivers.json) or supply one with -Action AddDrivers' } 'WaitingForReboot' { 'restart the computer' } 'Unsupported' { 'check the device' } default { 'check' }
             }
             $outstanding += [ordered]@{ operationId = $x.operationId; name = $x.name; lifecycle = $x.status; failureClass = $x.failureClass; retryable = ($x.status -eq 'FailedRetryable'); action = $how; message = $x.message }

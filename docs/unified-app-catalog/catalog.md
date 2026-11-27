@@ -124,16 +124,21 @@ The Deployment Builder and the Application Manager read **one** catalog: `src/da
 
 Identifiers checked and **not** found (nothing was added for them): `RustDesk.RustDesk`, `TimKosse.FileZilla.Client`, `FreeFileSync.FreeFileSync`, `LaunchBox.LaunchBox`, `SaferNetworking.SpybotSearchandDestroy`, `Cisco.WebexMeetings`, `AnyDeskSoftwareGmbH.AnyDesk`, `StrawberryMusicPlayer.Strawberry`, `EqualizerAPO.EqualizerAPO`, `BlackmagicDesign.DaVinciResolve`, `Ryochan7.DS4Windows`, `Jounin.TFTPD64`, `GNS3.GNS3`, `dbeaver.dbeaver`, `Box.Drive`. AnyDesk, DBeaver and Box were found under `AnyDesk.AnyDesk`, `DBeaver.DBeaver.Community` and `Box.Box`.
 
+## Audit of 2026-11-27
+
+Every entry was re-checked against its WinGet manifest or Store listing ([catalog-audit.md](catalog-audit.md), machine-readable [catalog-audit.json](catalog-audit.json)): 289 → 287 entries. Microsoft Whiteboard (Store id no longer resolves) and Amazon Music (no unattended installer, stale manifest) were removed with removal records; Battle.net became a manual follow-up (its setup has no silent mode); Sysinternals Suite and AIMP now install from the Microsoft Store (stale-hash zip and an unmaintained WinGet package respectively). Installer types, scopes, architectures, interaction and package-aware `verify` evidence come from the manifests.
+
 ## Manual installations
 
 | Application | Why | Official source |
 | --- | --- | --- |
 | RustDesk | No RustDesk package in WinGet or the Microsoft Store. Rechecked 2026-11-26: no manifests/r/RustDesk folder in winget-pkgs (aca69c38); "winget search RustDesk" finds nothing in the winget and msstore sources. | https://github.com/rustdesk/rustdesk/releases/latest |
-| FileZilla Client | FileZilla is not in the WinGet community repository (no manifests/t/TimKosse folder, rechecked 2026-11-26) or the Microsoft Store. | https://filezilla-project.org/download.php?show_all=1 |
-| FreeFileSync | FreeFileSync is not in the WinGet community repository (no manifests/f/FreeFileSync folder, rechecked 2026-11-26) or the Microsoft Store. | https://freefilesync.org/download.php |
+| FileZilla Client | FileZilla is not in the WinGet community repository (no manifests/t/TimKosse folder, rechecked 2026-11-27) or the Microsoft Store. | https://filezilla-project.org/download.php?show_all=1 |
+| FreeFileSync | FreeFileSync is not in the WinGet community repository (no manifests/f/FreeFileSync folder, rechecked 2026-11-27) or the Microsoft Store. | https://freefilesync.org/download.php |
 | Spybot - Search & Destroy | Only Spybot Anti-Beacon is in WinGet; Search & Destroy is not in WinGet (rechecked 2026-11-26) or the Microsoft Store. | https://www.safer-networking.org/ |
 | LaunchBox | No verified LaunchBox package in WinGet (no manifests/l/LaunchBox folder, rechecked 2026-11-26) or the Microsoft Store. | https://www.launchbox-app.com/download |
 | VMware Workstation Pro | No VMware Workstation Pro package in the WinGet community repository (manifests/v/VMware has only SpringToolSuite, checked 2026-10-25). Broadcom distributes the installer only to signed-in accounts of its support portal. | https://knowledge.broadcom.com/external/article/368667/download-and-license-vmware-desktop-hype.html |
+| Battle.net | The WinGet package Blizzard.BattleNet and the Store listing XPDM5VSMTKQLBJ are the same plain exe setup without a silent switch (audit 2026-11-27). | https://download.battle.net/en-us/desktop |
 | .NET Framework 3.5 | .NET Framework 3.5 is a Windows optional feature, not a WinGet package; enabling it downloads files from Windows Update. | https://learn.microsoft.com/dotnet/framework/install/dotnet-35-windows |
 
 RustDesk was rechecked: there is no `manifests/r/RustDesk` folder in winget-pkgs, and `winget search RustDesk` finds nothing in the winget or msstore sources. It stays discoverable as a manual follow-up with RustDesk's official GitHub releases. TeamViewer is installed through WinGet (`TeamViewer.TeamViewer`). Installing either never turns on unattended access or sets a password.
@@ -146,8 +151,8 @@ Profiles are additive: ticking several combines their defaults, each package is 
 | --- | ---: | --- | ---: |
 | Core Essentials (`core`) | 9 | Google Chrome, 7-Zip, VLC media player, Notepad++, Bitwarden, SumatraPDF, ImageGlass, Visual C++ Redistributable 2015-2026 (x64), Visual C++ Redistributable 2015-2026 (x86) | 9 |
 | Everyday / Home (`everyday`) | 5 | Zoom Workplace, Microsoft Teams, LibreOffice, Everything, Revo Uninstaller | 25 |
-| Gamer (`gaming`) | 7 | Steam, Epic Games Launcher, Battle.net, GOG GALAXY, Ubisoft Connect, Rockstar Games Launcher, Discord | 19 |
-| Music Lover (`music`) | 5 | Spotify, MusicBee, Audacity, mpv.net, Mp3tag | 17 |
+| Gamer (`gaming`) | 7 | Steam, Epic Games Launcher, Battle.net (manual follow-up), GOG GALAXY, Ubisoft Connect, Rockstar Games Launcher, Discord | 19 |
+| Music Lover (`music`) | 5 | Spotify, MusicBee, Audacity, mpv.net, Mp3tag | 16 |
 | Student / Office (`student-office`) | 6 | LibreOffice, Mozilla Thunderbird, Microsoft Teams, PDFsam Basic, Zotero, Anki | 18 |
 | Content Creator (`creator`) | 6 | OBS Studio, GIMP, Inkscape, Audacity, HandBrake, ShareX | 20 |
 | Developer (`developer`) | 5 | Git, Visual Studio Code, Python 3.14, Node.js (LTS), GitHub CLI | 33 |
@@ -157,7 +162,7 @@ Profiles are additive: ticking several combines their defaults, each package is 
 | iPhone / iPad (`apple-devices`) | 1 | Apple Devices | 4 |
 | Android (`android-devices`) | 0 | (none: device answers / recommendations only) | 4 |
 | Laptop (`laptop`) | 1 | BatteryInfoView | 4 |
-| Touchscreen / 2-in-1 (`touch`) | 1 | Xournal++ | 2 |
+| Touchscreen / 2-in-1 (`touch`) | 1 | Xournal++ | 1 |
 
 Microsoft Office LTSC stays a separate, optional choice (its own card on the Applications page).
 

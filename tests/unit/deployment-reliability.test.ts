@@ -212,7 +212,7 @@ describe('engines: Windows Update 1.3.0, applications 1.5.0', () => {
   it('a hash mismatch is retried at most once from a refreshed source and the hash check is never skipped', () => {
     expect(appEngineSource).not.toMatch(/ignore-security-hash|ignore-local-archive-malware-scan/i);
     expect(appEngineSource).toContain("-not ($e.ContainsKey('integrityRetried') -and $e.integrityRetried)");
-    expect(WINGET_EXIT_CODES['0x8A150011']).toMatchObject({ retry: false, class: 'Integrity' });
+    expect(WINGET_EXIT_CODES['0x8A150011']).toMatchObject({ retry: false, class: 'HashMismatch' });
   });
 
   it('an installer that refuses elevation runs once with the user\'s own limited rights, through validated arguments', () => {

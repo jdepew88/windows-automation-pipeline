@@ -724,7 +724,7 @@ test('Phase 5: Reliability & recovery settings have safe defaults and shape the 
   expect(files.has(tool)).toBe(true);
   expect(files.get('autounattend.xml')).toContain('C:\\Windows\\Setup\\Scripts\\Deployment\\scripts\\recovery\\DeploymentRecovery.ps1');
   let cfg = JSON.parse(files.get('WindowsDeployment/scripts/applications/applications-config.json')!);
-  expect(cfg).toMatchObject({ engineVersion: '1.5.0', maxAttemptsPerPackage: 3, retry: { automatic: true, continueAfterFailure: true, baseDelaySeconds: 60, maxDelaySeconds: 900 } });
+  expect(cfg).toMatchObject({ engineVersion: '1.6.0', maxAttemptsPerPackage: 3, retry: { automatic: true, continueAfterFailure: true, baseDelaySeconds: 60, maxDelaySeconds: 900 } });
   let manifest = JSON.parse(files.get('WindowsDeployment/deployment-manifest.json')!);
   expect(manifest.recovery).toMatchObject({ tool: 'scripts/recovery/DeploymentRecovery.ps1', automaticRetry: true, maxAttemptsPerPackage: 3 });
   expect(files.get('WindowsDeployment/README.txt')).toContain('Manual recovery');

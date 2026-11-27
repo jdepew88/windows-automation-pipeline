@@ -218,8 +218,10 @@ describe('the generated package contains exactly the selected applications', () 
     expect(want).toContain('KDE.Krita');
     expect(want).not.toContain('EpicGames.EpicGamesLauncher');
     const pkg = buildDeploymentPackage(p, generate(p));
-    const manifestIds = pkg.manifest.applications!.packages.map((x) => x.packageIdentifier);
+    // Manual follow-ups (Battle.net since the 2026-11-27 audit) are listed in the manifest, never installed.
+    const manifestIds = pkg.manifest.applications!.packages.filter((x) => x.resolution !== 'manual').map((x) => x.packageIdentifier);
     expect(manifestIds).toEqual(want);
+    expect(pkg.manifest.applications!.packages.filter((x) => x.resolution === 'manual').map((x) => x.packageIdentifier)).toEqual(['battlenet']);
     const native = JSON.parse(new TextDecoder().decode(readZip(pkg.zip).find((e) => e.path.endsWith('winget-packages.json'))!.data));
     expect(native.Sources.flatMap((src: { Packages: { PackageIdentifier: string }[] }) => src.Packages.map((x) => x.PackageIdentifier)).sort()).toEqual([...want].sort());
   });
