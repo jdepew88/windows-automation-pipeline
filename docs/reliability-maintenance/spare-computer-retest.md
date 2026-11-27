@@ -1,6 +1,6 @@
 # Spare-computer retest: Retry Windows Update without reinstalling Windows
 
-This tests the corrected Windows Update engine (2.0.0) on the spare computer whose deployment reported 16 updates failed with `0x80131508`. Nothing is erased and Windows is not reinstalled. The original deployment's logs and reports are only read, never changed.
+This tests the corrected Windows Update engine (2.0.0) on the spare computer whose deployment reported 16 updates failed with `0x80131508`. Nothing is erased and Windows is not reinstalled. The original deployment's Windows Update results, logs and reports are only read, never changed; a retry adds its own lines to the deployment's activity log and the Application event log.
 
 ## What you need
 
@@ -10,7 +10,7 @@ This tests the corrected Windows Update engine (2.0.0) on the spare computer who
   - `WDB-WindowsUpdate\Invoke-WindowsUpdateRetry.ps1`;
   - `README.txt`, the same procedure;
   - `files.json`, which holds the SHA-256 of every file.
-- The first spare-computer run used the same two scripts, byte for byte, from an earlier development download (`WDB-Maintenance\windows-update\`).
+- The first spare-computer run used an earlier development download (`WDB-Maintenance\windows-update\`) with the same engine, byte for byte. The retry tool there lacked one later safeguard: another kind of retry is now refused while a run is unfinished (all runs share one scheduled task).
 - **The computer:** an administrator account, and the network connected.
 
 Copy the ZIP to the spare computer, extract it (for example to `C:\WDB-WindowsUpdate`), and open **Windows PowerShell as administrator** in `C:\WDB-WindowsUpdate`.
@@ -69,6 +69,8 @@ Copy the ZIP to the spare computer, extract it (for example to `C:\WDB-WindowsUp
    `RW -Mode RetryDrivers -Wait`
 
    Drivers are installed one at a time, and each is recorded with its device's hardware ID and model.
+
+   Start this once step 4's run has finished (`RW -Mode Status` lists it as finished). Every retry uses the one task `\WindowsDeploymentBuilder\WindowsUpdateRetry`, so another kind of retry is refused while a run still owns it, and nothing is changed.
 
 6. **After the last restart, verify.**
 

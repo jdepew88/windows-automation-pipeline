@@ -125,10 +125,28 @@ $tests['an unfinished retry of the same kind is resumed; -Fresh starts a new run
     Assert-Equal "$($r2.resumed) $($r2.runId -eq $r1.runId)" 'True True' 'resumed'
     $r3 = Start-WurRetry $root 'normal' -Fresh
     Assert-Equal "$($r3.resumed) $($r3.runId -ne $r1.runId)" 'False True' 'fresh run'
+    # Every run shares the one retry task, which the engine removes when its run finishes: another
+    # kind is refused while a run still owns the task, and nothing changes.
+    $reg = @($script:Sim.Registered).Count; $started = $script:Sim.Started
+    $m = ''; try { [void] (Start-WurRetry $root 'drivers') } catch { $m = $_.Exception.Message }
+    Assert-True ($m -like "Retry $($r3.runId) is unfinished*-Mode RetryUpdates -Wait*-Fresh*") "refused while the normal run owns the task: $m"
+    $script:Sim.Task = [pscustomobject]@{ State = 'Running' }
+    $m = ''; try { [void] (Start-WurRetry $root 'drivers' -Fresh) } catch { $m = $_.Exception.Message }
+    Assert-True ($m -like "Retry $($r3.runId) is running now*-Mode RetryUpdates -Wait*") "refused while it runs, even with -Fresh: $m"
+    Assert-Equal "$(@($script:Sim.Registered).Count) $($script:Sim.Started)" "$reg $started" 'task neither re-registered nor started'
+    Assert-Equal @(Get-ChildItem -LiteralPath (Join-Path $root 'UpdateRetry') -Directory | Where-Object { $_.Name -like '*-drivers' }).Count 0 'no drivers run created'
+    # A registered task that is not running can be taken over deliberately with -Fresh.
+    $script:Sim.Task = [pscustomobject]@{ State = 'Ready' }
+    $rf = Start-WurRetry $root 'drivers' -Fresh
+    Assert-Equal "$($rf.resumed) $($script:Sim.Registered[-1][1] -eq $rf.config)" 'False True' '-Fresh takes the task over'
+    Write-WurJson (Join-Path $rf.folder 'state.json') @{ final = 'Succeeded' }
+    # Once the engine has finished and removed the task, another kind starts its own run.
+    $script:Sim.Task = $null
     $r4 = Start-WurRetry $root 'drivers'
     Assert-Equal $r4.resumed $false 'another kind is a new run'
     # A finished run is never resumed.
     Write-WurJson (Join-Path $r4.folder 'state.json') @{ final = 'Succeeded' }
+    $script:Sim.Task = $null   # the engine removes the task when its run finishes
     $r5 = Start-WurRetry $root 'drivers'
     Assert-Equal $r5.resumed $false 'finished run not resumed'
 }

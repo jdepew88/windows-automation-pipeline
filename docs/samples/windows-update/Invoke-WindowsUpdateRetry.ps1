@@ -302,7 +302,7 @@ function Get-WurStatus {
     if ($origSummary -and $origSummary.collectionDefect) {
         $s.advice += "The original deployment used engine $($origSummary.engineVersion): its $($origSummary.failed) failure(s) with 0x80131508 are the engine's collection defect (fixed in 2.0.0), not update failures. Run -Mode RetryUpdates, then -Mode RetryDrivers."
     }
-    if (@($s.retries | Where-Object { -not $_.final }).Count) { $s.advice += 'An earlier retry is unfinished; a Retry mode of the same kind resumes it (add -Fresh for a new run).' }
+    if (@($s.retries | Where-Object { -not $_.final }).Count) { $s.advice += 'An earlier retry is unfinished; a Retry mode of the same kind resumes it (add -Fresh for a new run). Another kind starts once it has finished.' }
     $s
 }
 
@@ -343,6 +343,21 @@ function Start-WurRetry {
     foreach ($n in 'wuauserv', 'bits') { if ($status.services[$n]['startType'] -eq 'Disabled') { throw "The $n service is disabled. Set it back to Manual first; nothing was changed." } }
     $runs = @(Get-WurRuns $DataRoot)
     $open = @($runs | Where-Object { -not $_.final -and $_.selection -eq $(if ($Selection -eq 'all') { 'configured' } else { $Selection }) })
+    # Every run uses the one task \WindowsDeploymentBuilder\WindowsUpdateRetry, and the engine removes
+    # that task when its run finishes. Starting another kind while a run still owns the task would
+    # leave one of the two runs unfinished for good, so it is refused before anything changes.
+    $task = Get-WurTask
+    $other = @($runs | Where-Object { -not $_.final -and $_.selection -ne $(if ($Selection -eq 'all') { 'configured' } else { $Selection }) })
+    if ($task -and $other.Count) {
+        $o = $other[-1]
+        $oMode = switch ($o.selection) { 'normal' { 'RetryUpdates' } 'drivers' { 'RetryDrivers' } default { 'RetryAll' } }
+        if ([string] $task.State -eq 'Running') {
+            throw "Retry $($o.runId) is running now. Wait until it finishes: follow it with -Mode $oMode -Wait, or check -Mode Status. Nothing was changed."
+        }
+        if (-not $Fresh) {
+            throw "Retry $($o.runId) is unfinished (it continues after a restart). Finish it first with -Mode $oMode -Wait, or add -Fresh to abandon it. Nothing was changed."
+        }
+    }
     $installDir = Join-Path $DataRoot 'UpdateRetry'
     $engineCopy = Join-Path $installDir $script:EngineFile
     if (-not (Test-Path -LiteralPath $installDir)) { New-Item -ItemType Directory -Path $installDir -Force | Out-Null }

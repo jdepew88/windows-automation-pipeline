@@ -26,7 +26,9 @@ export function recoveryKitReadme(): string {
 
 For a computer that is already installed, typically one deployed with Windows Update engine
 1.0.0-1.3.0, whose updates and drivers all failed with 0x80131508. Windows is not reinstalled and
-nothing is erased. The original deployment's records are only read; every retry is a separate run
+nothing is erased. The original deployment's Windows Update results and report are only read (a
+retry adds its own lines to the deployment's activity log, shown in the progress window and LAN
+monitor, and to the Application event log). Every retry is a separate run
 in ${DATA_ROOT}\\UpdateRetry\\<run>, under the scheduled task
 \\WindowsDeploymentBuilder\\WindowsUpdateRetry (SYSTEM).
 
@@ -45,6 +47,8 @@ administrator in it and run, in order:
        command again to follow the same run.
   5. ${rw} -Mode RetryDrivers -Wait
        Drivers offered by Windows Update, one at a time, each recorded with its device.
+       Start it once step 4's run has finished (-Mode Status lists it as Succeeded,
+       CompletedWithFollowUp or CompletedWithFailures); until then it is refused and nothing changes.
   6. ${rw} -Mode Status
   7. ${rw} -Mode ExportDiagnostics
        Includes comparison.txt: the original run against each retry.

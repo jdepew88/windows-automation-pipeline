@@ -202,7 +202,8 @@ Results
 
 Retry Windows Update (${RETRY_FILE})
   Runs the corrected engine again on an installed computer, as a separate run that never changes
-  the original records (${DATA_ROOT}\\UpdateRetry\\<run>). Elevated Windows PowerShell:
+  the original Windows Update results or the deployment report; it adds its own lines to the
+  deployment's activity log and the Application event log (${DATA_ROOT}\\UpdateRetry\\<run>). Elevated Windows PowerShell:
     -Mode Status             read-only readiness and what the original run shows
     -Mode Scan               read-only search: what would be installed, by pass
     -Mode RetryUpdates       normal updates (no drivers, no optional updates)
