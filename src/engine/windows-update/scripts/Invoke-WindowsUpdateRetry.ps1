@@ -20,14 +20,19 @@
                          retries, devices with problems. Nothing is searched or changed.
       Scan               Read-only search: what would be installed now, by pass (A/B/C), with drivers
                          and the device each is for. Nothing is installed; no state is written.
-      RetryUpdates       Installs normal updates (passes A and B: servicing prerequisites, cumulative,
-                         security, Defender, .NET); no drivers and no optional updates.
+      RetryUpdates       Installs every Windows update the deployment's policy allows, without drivers:
+                         servicing prerequisites, cumulative, security, Defender, MSRT, .NET, and the
+                         Windows and .NET previews and other optional updates when the policy allows
+                         them (tool 1.1.0; 1.0.0 left optional updates and previews out).
       RetryDrivers       Installs drivers offered by Windows Update (optional ones included).
       RetryAll           Everything the deployment's policy allows (normally drivers and optional
                          updates included; feature updates and Insider builds never).
       ExportDiagnostics  Read-only. Copies logs, states, results and reports of the original run and
                          every retry, the Windows Update history and event log, services, devices, and
                          a before/after comparison into a ZIP on the desktop (or -OutputPath).
+      HealthAudit        Read-only system health audit (DeploymentHealth.ps1 -Mode Verify -ScanUpdates):
+                         from this folder's health\ when present (the recovery download), otherwise the
+                         one installed with the deployment package. Writes only its reports.
 
     A Retry* mode needs elevation. If an earlier retry of the same kind is unfinished it is resumed
     (its task is started again) unless -Fresh is given; -Fresh starts a new run with a fresh search,
@@ -44,7 +49,7 @@
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('Status', 'Scan', 'RetryUpdates', 'RetryDrivers', 'RetryAll', 'ExportDiagnostics')]
+    [ValidateSet('Status', 'Scan', 'RetryUpdates', 'RetryDrivers', 'RetryAll', 'ExportDiagnostics', 'HealthAudit')]
     [string] $Mode = 'Status',
     [string] $DataRoot = 'C:\ProgramData\WindowsDeploymentBuilder',
     [switch] $Fresh,
@@ -57,7 +62,7 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-$script:ToolVersion = '1.0.0'
+$script:ToolVersion = '1.1.0'
 $script:TaskPath = '\WindowsDeploymentBuilder\'
 $script:TaskName = 'WindowsUpdateRetry'
 $script:EngineFile = 'WindowsUpdateEngine.ps1'
@@ -207,6 +212,9 @@ function Get-WurResultSummary {
         reboots = [int] $Result['reboots']
         collectionDefect = [bool] $defect
         devicesWithProblems = $(if ($Result['verification']) { Get-WurCount $Result['verification']['devicesWithProblems'] } else { $null })
+        # Engine 2.1.0 (absent from older results).
+        updateState = [string] $Result['updateState']
+        updateStateText = [string] $Result['updateStateText']
         failedTitles = @($failed | ForEach-Object { "$((@($_['kbs']) -join ',')) $($_['title'])".Trim() })
     }
 }
@@ -250,10 +258,14 @@ function New-WurRunConfig {
     $c = @{}
     foreach ($k in 'featureUpdates', 'microsoftUpdate', 'excludedKbs', 'maxAttemptsPerUpdate', 'rebootWarningSeconds') { if ($base.ContainsKey($k)) { $c[$k] = $base[$k] } }
     if (-not $c.ContainsKey('featureUpdates') -or $c.featureUpdates -ne 'install') { $c.featureUpdates = 'skip' }
+    # Tool 1.1.0: the deployment's optional-update and preview policy applies to Windows updates too
+    # (a configuration written before schema 10 has no previewUpdates: previews follow optionalUpdates).
+    $optional = $(if ($base['optionalUpdates']) { [string] $base['optionalUpdates'] } else { 'install' })
+    $c.previewUpdates = $(if ($base.ContainsKey('previewUpdates') -and $null -ne $base['previewUpdates']) { [bool] $base['previewUpdates'] } else { $optional -eq 'install' })
     switch ($Selection) {
-        'normal'  { $c.drivers = 'exclude'; $c.optionalUpdates = 'skip' }
+        'normal'  { $c.drivers = 'exclude'; $c.optionalUpdates = $optional }
         'drivers' { $c.drivers = 'include'; $c.optionalUpdates = 'install' }
-        default   { $c.drivers = $(if ($base['drivers'] -eq 'exclude') { 'exclude' } else { 'include' }); $c.optionalUpdates = $(if ($base['optionalUpdates']) { [string] $base['optionalUpdates'] } else { 'install' }) }
+        default   { $c.drivers = $(if ($base['drivers'] -eq 'exclude') { 'exclude' } else { 'include' }); $c.optionalUpdates = $optional }
     }
     $c.selection = $(if ($Selection -eq 'all') { 'configured' } else { $Selection })
     $c.dataRoot = $DataRoot
@@ -291,7 +303,7 @@ function Get-WurStatus {
         restartPendingBecause = @($pending)
         installerBusy = Test-WurInstallerBusy
         original = $origSummary
-        retries = @(Get-WurRuns $DataRoot)
+        retries = @(Get-WurRuns $DataRoot | ForEach-Object { $_.phase = Get-WurRunPhase $_ $task; $_ })
         retryTask = $(if ($task) { [string] $task.State } else { 'not registered' })
         devicesWithProblems = Get-WurDevices
         advice = @()
@@ -299,11 +311,73 @@ function Get-WurStatus {
     if (-not $s.elevated) { $s.advice += 'Run the Retry modes from an elevated Windows PowerShell (Run as administrator).' }
     foreach ($n in 'wuauserv', 'bits') { if ($s.services[$n]['startType'] -eq 'Disabled') { $s.advice += "The $n service is disabled; set it back to Manual before retrying." } }
     if ($s.restartPending) { $s.advice += 'Windows has a restart pending; the retry restarts once before installing (or restart now).' }
-    if ($origSummary -and $origSummary.collectionDefect) {
-        $s.advice += "The original deployment used engine $($origSummary.engineVersion): its $($origSummary.failed) failure(s) with 0x80131508 are the engine's collection defect (fixed in 2.0.0), not update failures. Run -Mode RetryUpdates, then -Mode RetryDrivers."
-    }
-    if (@($s.retries | Where-Object { -not $_.final }).Count) { $s.advice += 'An earlier retry is unfinished; a Retry mode of the same kind resumes it (add -Fresh for a new run). Another kind starts once it has finished.' }
+    foreach ($a in @(Get-WurAdvice $s.original @($s.retries) $task $DataRoot)) { $s.advice += $a }
     $s
+}
+
+<# Tool 1.1.0: the mode that runs a selection again. #>
+function Get-WurModeName { param([string] $Selection) switch ($Selection) { 'normal' { 'RetryUpdates' } 'drivers' { 'RetryDrivers' } default { 'RetryAll' } } }
+
+<#
+    Tool 1.1.0: where an unfinished run is. Running (the task is running), AwaitingRestart (it asked for a
+    restart and continues after it), Resuming (its task is registered and starts it again), or Stopped
+    (no task left: it will not continue by itself).
+#>
+function Get-WurRunPhase {
+    param($Run, $Task)
+    if ($Run.final) { return 'Finished' }
+    $st = Read-WurJson (Join-Path $Run.path 'status.json')
+    $phase = $(if ($st) { [string] $st['phase'] } else { '' })
+    if (-not $Task) { return 'Stopped' }
+    if ([string] $Task.State -eq 'Running') { return $(if ($phase -eq 'Rebooting') { 'AwaitingRestart' } else { 'Running' }) }
+    if ($phase -eq 'Rebooting') { return 'AwaitingRestart' }
+    return 'Resuming'
+}
+
+<#
+    Tool 1.1.0: advice from what actually happened (tool 1.0.0 kept suggesting RetryUpdates and
+    RetryDrivers after both had succeeded). A completed recovery recommends the health audit.
+#>
+function Get-WurAdvice {
+    param($Original, [object[]] $Retries, $Task, [string] $DataRoot)
+    $out = @()
+    $ok = 'Succeeded', 'CompletedWithFollowUp'
+    $open = @($Retries | Where-Object { $_ -and -not $_.final })
+    foreach ($r in $open) {
+        $mode = Get-WurModeName $r.selection
+        switch (Get-WurRunPhase $r $Task) {
+            'Running' { $out += "Retry $($r.runId) ($mode) is running. Follow it with -Mode $mode -Wait; start nothing else meanwhile." }
+            'AwaitingRestart' { $out += "Retry $($r.runId) ($mode) is waiting for a restart and continues by itself after it. Afterwards run -Mode Status." }
+            'Resuming' { $out += "Retry $($r.runId) ($mode) is unfinished and continues by itself (its task is registered). Follow it with -Mode $mode -Wait." }
+            default { $out += "Retry $($r.runId) ($mode) stopped before finishing (its task is gone). Run -Mode $mode again to resume it, or add -Fresh for a new run." }
+        }
+    }
+    if ($open.Count) { return , $out }
+    $done = @($Retries | Where-Object { $_ -and $_.final })
+    $normalDone = @($done | Where-Object { $_.selection -in 'normal', 'configured' -and $_.final -in $ok }).Count -gt 0
+    $driversDone = @($done | Where-Object { $_.selection -in 'drivers', 'configured' -and $_.final -in $ok }).Count -gt 0
+    $last = $(if ($done.Count) { $done[-1] } else { $null })
+    $needsRecovery = $Original -and ($Original.collectionDefect -or $Original.failed -gt 0 -or $Original.status -in 'Failed', 'Offline')
+    if ($needsRecovery -and -not ($normalDone -and $driversDone)) {
+        $why = $(if ($Original.collectionDefect) { "The original deployment used engine $($Original.engineVersion): its $($Original.failed) failure(s) with 0x80131508 are the engine's collection defect (fixed in 2.0.0), not update failures." } else { "The original deployment reported $($Original.failed) failed update(s) ($($Original.status))." })
+        $todo = @()
+        if (-not $normalDone) { $todo += '-Mode RetryUpdates' }
+        if (-not $driversDone) { $todo += '-Mode RetryDrivers' }
+        $out += "$why Run $($todo -join ', then ')$(if ($normalDone -or $driversDone) { ' (the other part already succeeded)' })."
+        return , $out
+    }
+    if ($last -and $last.final -notin $ok) {
+        $text = $(if ($last.result -and $last.result.updateStateText) { " $($last.result.updateStateText)" } else { '' })
+        $out += "The last retry $($last.runId) ($(Get-WurModeName $last.selection)) finished $($last.final).$text See its result.json; run -Mode ExportDiagnostics and the health audit (-Mode HealthAudit)."
+        return , $out
+    }
+    if ($last -and $last.result -and $last.result.updateState -in 'UpdatesRemaining', 'RestartRequired', 'VerificationUnavailable', 'InstallationIncomplete') {
+        $out += "The last retry $($last.runId) finished $($last.final) but reports $($last.result.updateState): $($last.result.updateStateText)"
+    }
+    if ($done.Count) {
+        $out += "Recovery complete: $(@($done | ForEach-Object { "$(Get-WurModeName $_.selection) $($_.final)" }) -join ', '). No further retry is needed; run the health audit: -Mode HealthAudit (read-only)."
+    }
+    return , $out
 }
 
 function Show-WurStatus {
@@ -318,7 +392,7 @@ function Show-WurStatus {
         if (@($o.failedByHResult.Keys).Count) { $l.Add('    failures by code: ' + ((@($o.failedByHResult.Keys) | ForEach-Object { "$_ x$($o.failedByHResult[$_])" }) -join ', ')) }
         if ($o.collectionDefect) { $l.Add('    -> engine 1.x collection defect (0x80131508): these updates were never offered to Windows Update by the engine.') }
     } else { $l.Add('  Original deployment: no update result found.') }
-    foreach ($r in @($S.retries)) { $l.Add("  Retry $($r.runId) [$($r.selection)]: $(if ($r.final) { $r.final } else { 'unfinished' })$(if ($r.result) { ", installed $($r.result.installed), failed $($r.result.failed)" })") }
+    foreach ($r in @($S.retries)) { $l.Add("  Retry $($r.runId) [$($r.selection)]: $(if ($r.final) { $r.final } else { "unfinished ($($r.phase))" })$(if ($r.result) { ", installed $($r.result.installed), failed $($r.result.failed)$(if ($r.result.updateState) { ", $($r.result.updateState)" })" })") }
     $l.Add("  Retry task: $($S.retryTask). Devices with problems: $(@($S.devicesWithProblems).Count).")
     foreach ($d in @($S.devicesWithProblems)) { $l.Add("    code $($d.problemCode)  $($d.name)") }
     foreach ($a in @($S.advice)) { $l.Add("  NEXT: $a") }
@@ -401,6 +475,33 @@ function Wait-WurRetry {
     }
     Write-Output "Still running after $Minutes minutes; it continues in the background. Check with -Mode Status."
     return $null
+}
+
+<#
+    Tool 1.1.0: the read-only health audit. The copy beside this tool (recovery download: health\ and
+    common\) is preferred, then the one in the installed deployment package.
+#>
+function Get-WurHealthScript {
+    param([string] $DataRoot)
+    foreach ($p in (Join-Path $PSScriptRoot 'health\DeploymentHealth.ps1'), (Join-Path $PSScriptRoot '..\health\DeploymentHealth.ps1'), (Join-Path $DataRoot 'Package\scripts\health\DeploymentHealth.ps1')) {
+        if (Test-Path -LiteralPath $p) { return (Resolve-Path -LiteralPath $p).Path }
+    }
+    return $null
+}
+
+function Invoke-WurHealthAudit {
+    param([string] $DataRoot)
+    $script = Get-WurHealthScript $DataRoot
+    if (-not $script) { return @{ Text = @('The health audit (DeploymentHealth.ps1) is not on this computer: use the recovery download, which includes it.'); Exit = 1 } }
+    $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    # Windows PowerShell 5.1 turns a native stderr line into a terminating error under 'Stop'.
+    $eap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $text = @(& $ps -NoProfile -ExecutionPolicy Bypass -File $script -Mode Verify -ScanUpdates 2>&1 | ForEach-Object { [string] $_ })
+        $code = $LASTEXITCODE
+    } finally { $ErrorActionPreference = $eap }
+    @{ Text = @("Health audit: $script") + $text; Exit = $code }
 }
 
 <# Before/after comparison of the original deployment and every retry (also in the diagnostics ZIP). #>
@@ -496,6 +597,11 @@ if ($MyInvocation.InvocationName -ne '.') {
                     "Engine $($r.engineVersion). Restart pending: $($r.rebootPending). Installer busy: $($r.installerBusy). Nothing was installed."
                 }
                 exit 0
+            }
+            'HealthAudit' {
+                $r = Invoke-WurHealthAudit $DataRoot
+                $r.Text
+                exit $r.Exit
             }
             'ExportDiagnostics' {
                 $r = Export-WurDiagnostics $DataRoot $OutputPath

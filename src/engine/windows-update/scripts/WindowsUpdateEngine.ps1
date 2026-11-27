@@ -104,7 +104,7 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-$script:EngineVersion = '2.0.0'
+$script:EngineVersion = '2.1.0'
 $script:UpgradeCategoryId = '3689bdc8-b205-4af4-8d4b-a63924c5e9d5'   # WUA category "Upgrades"
 $script:MicrosoftUpdateServiceId = '7971f918-a847-4430-9279-4a52d1efe18d'
 $script:EventSource = 'WindowsDeploymentBuilder'
@@ -338,6 +338,10 @@ $script:ConfigDefaults = @{
     drivers              = 'exclude'
     featureUpdates       = 'skip'
     optionalUpdates      = 'skip'
+    # Engine 2.1.0: $null = follow optionalUpdates (a configuration written before schema 10).
+    previewUpdates       = $null
+    settingsRefresh      = $true
+    settingsRefreshMinutes = 15
     microsoftUpdate      = $false
     maxReboots           = 10
     maxAttemptsPerUpdate = 3
@@ -471,6 +475,10 @@ function New-WduState {
         offered         = @{}     # every update ever offered: id -> { title, kbs, kind, pass, firstSeenUtc }
         restarts        = @()     # restart history: { atUtc, reason, pass }
         stopReason      = ''      # why processing stopped
+        # Engine 2.1.0
+        settingsRefresh = $null   # the last Update Orchestrator scan request (what Settings shows)
+        settingsRefreshes = 0     # how many were made (at most 2 per run)
+        installedAtRefresh = -1   # installed count when the last one was made
     }
 }
 
@@ -552,6 +560,7 @@ function Get-WduAvailableUpdates {
             IsUpgrade      = ($cats -contains $script:UpgradeCategoryId) -or (Test-WduFeatureTitle $title)
             IsInsider      = ($title -match '(?i)\bInsider Preview\b')
             IsOptional     = [bool] $u.BrowseOnly
+            AutoSelect     = $(try { [bool] $u.AutoSelectOnWebSites } catch { $false })
             NeedsUserInput = [bool] $u.InstallationBehavior.CanRequestUserInput
             IsDownloaded   = [bool] $u.IsDownloaded
             SizeBytes      = $(try { [int64] $u.MaxDownloadSize } catch { [int64] 0 })
@@ -559,6 +568,46 @@ function Get-WduAvailableUpdates {
         }
     }
     return , $list
+}
+
+<#
+    Engine 2.1.0: what kind of update this is, for the policy and the report.
+      servicingStack, defenderPlatform, defenderIntelligence, msrt, cumulative, security, dotnet,
+      windowsPreview, dotnetPreview (optional non-security previews), driver, firmware, feature,
+      insider, other
+    Titles are Microsoft's own naming ("2026-11 Cumulative Update Preview for Windows 11 ...",
+    "... Cumulative Update Preview for .NET Framework ...", "Security Intelligence Update for
+    Microsoft Defender Antivirus ...", "Windows Malicious Software Removal Tool ..."); categories
+    and the driver class are used where Windows gives them.
+#>
+function Get-WduUpdateClass {
+    param([hashtable] $U)
+    $t = [string] $U['Title']
+    $cats = @($U['Categories'])
+    if ($U['IsDriver']) {
+        $dc = $(if ($U['Driver'] -is [System.Collections.IDictionary]) { [string] $U['Driver']['class'] } else { '' })
+        if ($dc -match '(?i)firmware' -or $t -match '(?i)\bfirmware\b') { return 'firmware' }
+        return 'driver'
+    }
+    if ($U['IsUpgrade']) { return 'feature' }
+    if ($U['IsInsider']) { return 'insider' }
+    if ($t -match '(?i)\bServicing Stack Update\b') { return 'servicingStack' }
+    if ($t -match '(?i)antimalware platform' -or @($U['Kbs']) -contains 'KB4052623') { return 'defenderPlatform' }
+    if ($t -match '(?i)Security Intelligence Update|Definition Update' -or $cats -contains 'e0789628-ce08-4437-be74-2495b842f43b') { return 'defenderIntelligence' }
+    if ($t -match '(?i)Malicious Software Removal Tool') { return 'msrt' }
+    if ($t -match '(?i)\bPreview\b') { return $(if ($t -match '(?i)\.NET') { 'dotnetPreview' } else { 'windowsPreview' }) }
+    if ($t -match '(?i)\.NET') { return 'dotnet' }
+    if ($t -match '(?i)\bCumulative Update\b') { return 'cumulative' }
+    if ($t -match '(?i)\bSecurity Update\b' -or $cats -contains '0fa1201d-4330-4fa8-8ae9-b877473b6441') { return 'security' }
+    return 'other'
+}
+
+<# Adds Class, IsPreview and IsFirmware to an update (also to simulated ones in the tests). #>
+function Set-WduUpdateClass {
+    param([hashtable] $U)
+    $U.Class = Get-WduUpdateClass $U
+    $U.IsPreview = $U.Class -in 'windowsPreview', 'dotnetPreview'
+    $U.IsFirmware = $U.Class -eq 'firmware'
 }
 
 <# Titles of updates that move Windows to another version, whatever their category. #>
@@ -576,7 +625,7 @@ function Test-WduFeatureTitle {
 #>
 function Get-WduPass {
     param([hashtable] $U)
-    if ($U.IsDriver -or $U.IsOptional) { return 'C' }
+    if ($U.IsDriver -or $U.IsOptional -or $U['IsPreview']) { return 'C' }
     $kbs = @($U.Kbs)
     if ($U.Title -match '(?i)\bServicing Stack Update\b' -or $U.Title -match '(?i)antimalware platform' -or $kbs -contains 'KB4052623') { return 'A' }
     return 'B'
@@ -1006,11 +1055,16 @@ function Get-WduSkipReason {
     param([hashtable] $Update, [hashtable] $Config, [hashtable] $State)
     if ($Update.ContainsKey('IsInsider') -and $Update.IsInsider) { return 'Insider Preview build (never installed)' }
     if ($Update.IsUpgrade -and $Config.featureUpdates -ne 'install') { return 'feature update (policy: skip)' }
+    # Engine 2.1.0: firmware is never installed automatically, whatever the driver policy.
+    if ($Update['IsFirmware']) { return 'firmware (never installed automatically)' }
     if ($Update.IsDriver -and $Config.drivers -ne 'include') { return 'driver (policy: exclude)' }
-    if ($Update.IsOptional -and $Config.optionalUpdates -ne 'install') { return 'optional update (policy: skip)' }
+    # Engine 2.1.0: Windows and .NET Framework previews follow "Install preview updates" only.
+    if ($Update['IsPreview']) {
+        if (-not $Config['previewUpdates']) { return 'preview update (policy: preview updates excluded)' }
+    } elseif ($Update.IsOptional -and $Config.optionalUpdates -ne 'install') { return 'optional update (policy: skip)' }
     # Retry Windows Update: only the chosen kind is retried; the rest stays for another run.
     $sel = $(if ($Config.ContainsKey('selection')) { [string] $Config.selection } else { 'configured' })
-    if ($sel -eq 'normal' -and ($Update.IsDriver -or $Update.IsOptional)) { return 'not selected for this retry (normal updates only)' }
+    if ($sel -eq 'normal' -and $Update.IsDriver) { return 'not selected for this retry (Windows updates only, no drivers)' }
     if ($sel -eq 'drivers' -and -not $Update.IsDriver) { return 'not selected for this retry (drivers only)' }
     foreach ($kb in $Update.Kbs) { if ($Config.excludedKbs -contains $kb.ToUpperInvariant()) { return "excluded by configuration ($kb)" } }
     $a = $State.attempts[$Update.Id]
@@ -1053,7 +1107,7 @@ function Get-WduPlan {
             $plan.Install += $u
             continue
         }
-        $entry = @{ id = $u.Id; title = $u.Title; kbs = @($u.Kbs); reason = $reason; kind = (Get-WduKind $u); pass = (Get-WduPass $u) }
+        $entry = @{ id = $u.Id; title = $u.Title; kbs = @($u.Kbs); reason = $reason; kind = (Get-WduKind $u); pass = (Get-WduPass $u); class = [string] $u['Class'] }
         if ($u.ContainsKey('Driver') -and $u.Driver) { $entry.device = $u.Driver }
         if ($reason -like 'gave up*') {
             $a = $State.attempts[$u.Id]
@@ -1165,7 +1219,7 @@ function Complete-Wdu {
             requiresInteraction = @(if ($Plan -and $Plan.ContainsKey('Interaction')) { $Plan.Interaction }).Count
             skipped           = @(if ($Plan) { $Plan.Skipped }).Count
         }
-        policy        = [ordered]@{ optionalUpdates = $Config.optionalUpdates; drivers = $Config.drivers; featureUpdates = $Config.featureUpdates; maxAttemptsPerUpdate = $Config.maxAttemptsPerUpdate }
+        policy        = [ordered]@{ optionalUpdates = $Config.optionalUpdates; previewUpdates = [bool] $Config['previewUpdates']; drivers = $Config.drivers; featureUpdates = $Config.featureUpdates; maxAttemptsPerUpdate = $Config.maxAttemptsPerUpdate }
     }
     # Engine 2.0.0: why processing stopped, readiness, passes, restarts, engine exceptions, verification.
     $State.stopReason = $Reason
@@ -1183,6 +1237,12 @@ function Complete-Wdu {
     if ($Plan -and $Plan.ContainsKey('Verification')) { $result.verification = $Plan.Verification }
     if ($Plan -and $Plan.ContainsKey('Category')) { $result.category = $Plan.Category }
     if ($Plan -and $Plan.ContainsKey('TechnicianAction')) { $result.technicianAction = $Plan.TechnicianAction }
+    # Engine 2.1.0: the final Settings refresh and the truthful update state with its counts.
+    $result.settingsRefresh = $State['settingsRefresh']
+    $us = Get-WduUpdateState $Status $result
+    $result.updateState = $us.state
+    $result.updateStateText = $us.text
+    $result.summary = $us.summary
     Write-WduJson $Paths.Result $result
     $State.final = $Status
     Save-WduState $State $Paths
@@ -1191,6 +1251,7 @@ function Complete-Wdu {
         Write-WduJson $Paths.Marker ([ordered]@{ status = $Status; finishedUtc = $now; result = $Paths.Result })
     }
     $level = switch ($Status) { 'Succeeded' { 'INFO' } 'CompletedWithFailures' { 'WARN' } 'CompletedWithFollowUp' { 'WARN' } default { 'ERROR' } }
+    Write-WduLog ("UPDATE STATE: {0}. {1}" -f $result.updateState, $result.updateStateText)
     Write-WduLog ("FINISHED: {0}. {1} Installed {2} (optional {3}, drivers {4}), failed {5}, need a person {6}, skipped {7}, reboots {8}." -f $Status, $Reason, @($result.installed).Count, $result.counts.installedOptional, $result.counts.installedDrivers, @($result.failed).Count, @($result.requiresInteraction).Count, @($result.skipped).Count, $State.reboots) $level
     foreach ($f in $result.failed) { Write-WduLog ("  FAILED   {0} {1} ({2} attempts, last {3} {4}) [{5}]" -f ($f.kbs -join ','), $f.title, $f.attempts, $f.lastResult, (Get-WduHResultText ([string] $f.lastHResult)), $f['category']) 'WARN' }
     foreach ($x in @($State.engineExceptions)) { Write-WduLog ("  ENGINE   {0}" -f (Format-WduException $x)) 'WARN' }
@@ -1316,6 +1377,134 @@ function Get-WduVerification {
     }
 }
 
+# ------------------------------------------------------------------------------------------------
+# Engine 2.1.0: final check through the Update Orchestrator (Settings > Windows Update)
+# ------------------------------------------------------------------------------------------------
+<#
+    A search through the Windows Update Agent (Microsoft.Update.Session) does not change what
+    Settings > Windows Update shows ("Last checked", the list of updates). The documented WinRT API
+    Windows.Management.Update.WindowsUpdateManager (Windows 11 24H2 and later) asks the Update
+    Orchestrator, which Settings uses, to scan, and reports its last successful scan time. The engine
+    records the request, whether that time advanced (the scan completed), and never claims that the
+    Settings page itself was seen to refresh. No registry value or timestamp is ever written.
+    Replaceable boundary (the tests simulate it): Get-WduOrchestrator, Get-WduOrchestratorScanTime,
+    Start-WduOrchestratorScan, Test-WduOrchestratorScanning.
+#>
+function Get-WduOrchestrator {
+    try {
+        $null = [Windows.Management.Update.WindowsUpdateManager, Windows.Management.Update, ContentType = WindowsRuntime]
+        return (New-Object Windows.Management.Update.WindowsUpdateManager 'WindowsDeploymentBuilder')
+    } catch { return $null }
+}
+
+function Get-WduOrchestratorScanTime {
+    param($Manager)
+    try { $t = $Manager.LastSuccessfulScanTimestamp; if ($null -ne $t) { return ([DateTimeOffset] $t).UtcDateTime } } catch { }
+    return $null
+}
+
+function Start-WduOrchestratorScan { param($Manager) $Manager.StartScan($true) }
+
+function Test-WduOrchestratorScanning { param($Manager) try { return [bool] $Manager.IsScanning } catch { return $false } }
+
+function Test-WduSettingsRefreshDue {
+    param([hashtable] $Config, [hashtable] $State)
+    if (-not $Config['settingsRefresh']) { return $false }
+    $n = [int] $State['settingsRefreshes']
+    if ($n -eq 0) { return $true }
+    # A second one only when the first made more updates applicable and they were installed.
+    return ($n -lt 2 -and @($State.installed).Count -gt [int] $State['installedAtRefresh'])
+}
+
+function Invoke-WduSettingsRefresh {
+    param([hashtable] $Config, [hashtable] $State)
+    $State.settingsRefreshes = 1 + [int] $State['settingsRefreshes']
+    $State.installedAtRefresh = @($State.installed).Count
+    $rec = [ordered]@{
+        api = 'Windows.Management.Update.WindowsUpdateManager (Update Orchestrator)'; available = $false; requested = $false; completed = $false
+        requestedUtc = $null; completedUtc = $null; lastSuccessfulScanBefore = $null; lastSuccessfulScanAfter = $null
+        settingsDisplayVerified = $false; attempt = [int] $State.settingsRefreshes; message = ''
+    }
+    Set-WduStatus 'RefreshingSettings' 'Asking Windows Update (Settings) to check for updates.' $State
+    $m = Get-WduOrchestrator
+    if (-not $m) {
+        $rec.message = 'Not available on this Windows version (Windows.Management.Update needs Windows 11 24H2 or later). The engine''s own final search is the verification; Settings may show an older "Last checked" time until Windows checks by itself.'
+    } else {
+        $rec.available = $true
+        $before = Get-WduOrchestratorScanTime $m
+        if ($before) { $rec.lastSuccessfulScanBefore = $before.ToString('o') }
+        try {
+            Start-WduOrchestratorScan $m
+            $rec.requested = $true
+            $rec.requestedUtc = (Get-WduNow).ToString('o')
+        } catch { $rec.message = "Windows refused the scan request: $($_.Exception.Message)" }
+        if ($rec.requested) {
+            $polls = [Math]::Max(1, [int] $Config.settingsRefreshMinutes * 6)
+            for ($i = 0; $i -lt $polls; $i++) {
+                Wait-Wdu 10
+                $after = Get-WduOrchestratorScanTime $m
+                if ($after -and (-not $before -or $after -gt $before) -and -not (Test-WduOrchestratorScanning $m)) {
+                    $rec.completed = $true
+                    $rec.completedUtc = (Get-WduNow).ToString('o')
+                    $rec.lastSuccessfulScanAfter = $after.ToString('o')
+                    break
+                }
+            }
+            $rec.message = $(if ($rec.completed) { 'Windows Update (the Update Orchestrator that Settings uses) completed a check for updates; its last successful check time advanced. Whether the Settings page shows it is not observed by the engine.' }
+                             else { "Requested, but Windows did not report a completed check within $($Config.settingsRefreshMinutes) minutes. The engine's own final search is the verification." })
+        }
+    }
+    $State.settingsRefresh = $rec
+    Write-WduLog ("Settings refresh {0}: available {1}, requested {2}, completed {3}. {4}" -f $rec.attempt, $rec.available, $rec.requested, $rec.completed, $rec.message) $(if ($rec.completed -or -not $rec.available) { 'INFO' } else { 'WARN' })
+    Add-WdbActivity $Config.dataRoot 'windowsUpdate' $(if ($rec.completed) { 'Windows Update check for Settings completed; searching once more.' } elseif ($rec.available) { 'Windows Update check for Settings requested; searching once more.' } else { 'Settings refresh not available on this Windows version; final search follows.' }) 'info'
+}
+
+<#
+    Engine 2.1.0: the truthful final state of the computer's updates (never "up to date" just because
+    an installation command finished), and the counts behind it.
+#>
+function Get-WduUpdateState {
+    param([string] $Status, [System.Collections.IDictionary] $Result)
+    $v = $(if ($Result.Contains('verification')) { $Result['verification'] } else { $null })
+    $failed = @(@($Result['failed']) | Where-Object { $_ -is [System.Collections.IDictionary] })
+    $skipped = @(@($Result['skipped']) | Where-Object { $_ -is [System.Collections.IDictionary] })
+    $person = @(@($Result['requiresInteraction']) | Where-Object { $_ })
+    $cat = { param($f) [string] $f['category'] }
+    $previews = @($skipped | Where-Object { [string] $_['reason'] -like 'preview update (policy*' }).Count
+    $summary = [ordered]@{
+        installed        = @($Result['installed'] | Where-Object { $_ }).Count
+        superseded       = $(if ($v) { @(@($v['noLongerOffered']) | Where-Object { $_ }).Count } else { 0 })
+        notApplicable    = @($failed | Where-Object { (& $cat $_) -eq 'NotApplicable' }).Count
+        excluded         = $skipped.Count
+        previewsExcluded = $previews
+        downloadFailed   = @($failed | Where-Object { (& $cat $_) -in 'DownloadFailure', 'TransientNetwork' }).Count
+        installFailed    = @($failed | Where-Object { (& $cat $_) -notin 'NotApplicable', 'DownloadFailure', 'TransientNetwork' }).Count
+        awaitingRestart  = $(if ($v) { [bool] $v['rebootPending'] } else { $false })
+        remaining        = $failed.Count + $person.Count
+        notAttempted     = @($Result['notAttempted'] | Where-Object { $_ }).Count
+    }
+    $state = $(
+        if ($Status -in 'Failed', 'Offline' -or $summary.notAttempted) { 'InstallationIncomplete' }
+        elseif (-not $v) { 'VerificationUnavailable' }
+        elseif ($summary.awaitingRestart) { 'RestartRequired' }
+        elseif ($failed.Count) { 'CompletedWithFailures' }
+        elseif ($person.Count) { 'UpdatesRemaining' }
+        elseif ($previews) { 'PreviewUpdatesExcluded' }
+        elseif ($skipped.Count) { 'UpToDateUnderPolicy' }
+        else { 'UpToDate' })
+    $text = switch ($state) {
+        'UpToDate' { 'Up to date: the final search found nothing applicable left.' }
+        'UpToDateUnderPolicy' { "Up to date under the selected policy: $($skipped.Count) offered update(s) are excluded by policy (see skipped)." }
+        'PreviewUpdatesExcluded' { "Up to date; $previews preview update(s) are offered but intentionally excluded (Install preview updates is off)." }
+        'RestartRequired' { 'A restart is still required to finish installing updates.' }
+        'UpdatesRemaining' { "$($person.Count) selected update(s) remain: Windows reported that they need a signed-in person." }
+        'CompletedWithFailures' { "$($failed.Count) selected update(s) could not be installed." }
+        'InstallationIncomplete' { 'Installation did not finish (stopped by a limit, an engine error or no network); updates may remain.' }
+        default { 'The final verification search did not run, so the update state is not verified.' }
+    }
+    [ordered]@{ state = $state; text = $text; summary = $summary }
+}
+
 <# Ends the stage after a deterministic engine exception (never loops, never resets components). #>
 function Stop-WduForEngineException {
     param([hashtable] $Config, [hashtable] $Paths, [hashtable] $State, [hashtable] $Plan)
@@ -1401,6 +1590,7 @@ function Invoke-WduRun {
         if ($initialising) { $State.readiness.searchAttempts = [int] $State.readiness['searchAttempts'] + 1 }
         try {
             $updates = Invoke-WduOperation 'search: IUpdateSearcher.Search' { Get-WduAvailableUpdates $Config }
+            foreach ($x in @($updates)) { if ($x -is [hashtable] -and -not $x.ContainsKey('Class')) { Set-WduUpdateClass $x } }
             $scanFailures = 0
         } catch {
             $info = $script:LastWduException
@@ -1469,6 +1659,15 @@ function Invoke-WduRun {
                 Write-WduLog "Nothing to install; confirmation scan $emptyScans/$($Config.confirmationScans) after $($Config.confirmationDelaySeconds) s."
                 Set-WduStatus 'Confirming' "$(Get-WduPassName 'D'): confirmation search $emptyScans" $State
                 Wait-Wdu ([int] $Config.confirmationDelaySeconds)
+                continue
+            }
+            # Engine 2.1.0: once nothing selected remains, ask the Update Orchestrator (what Settings >
+            # Windows Update shows) to check for updates, then search again: whatever that check makes
+            # applicable is installed before the final verification. At most twice per run.
+            if (Test-WduSettingsRefreshDue $Config $State) {
+                Invoke-WduSettingsRefresh $Config $State
+                Save-WduState $State $Paths
+                $emptyScans = 0
                 continue
             }
             # Pass D: final verification.
@@ -1587,7 +1786,7 @@ function Invoke-WduRun {
                     $a = $State.attempts[$u.Id]
                     if ($r -and $r.Result -in 'Succeeded', 'SucceededWithErrors') {
                         $a.lastResult = $r.Result; $a.lastHResult = Format-WduHResult $r.HResult; $a.lastCategory = ''
-                        $rec = @{ id = $u.Id; title = $u.Title; kbs = @($u.Kbs); kind = (Get-WduKind $u); optional = [bool] $u.IsOptional; driver = [bool] $u.IsDriver; result = $r.Result; atUtc = (Get-WduNow).ToString('o'); pass = $plan.Pass }
+                        $rec = @{ id = $u.Id; title = $u.Title; kbs = @($u.Kbs); kind = (Get-WduKind $u); optional = [bool] $u.IsOptional; driver = [bool] $u.IsDriver; result = $r.Result; atUtc = (Get-WduNow).ToString('o'); pass = $plan.Pass; class = [string] $u['Class']; preview = [bool] $u['IsPreview'] }
                         if ($u.ContainsKey('Driver') -and $u.Driver) { $rec.device = $u.Driver }
                         $State.installed += $rec
                         Write-WduLog ("  installed {0} ({1})" -f (Get-WduLabel $u), $r.Result)
@@ -1640,6 +1839,8 @@ function Invoke-WduMain {
     param([hashtable] $Config)
     # Engine 2.0.0: a configuration written by an older package (or a test) gets the newer defaults.
     foreach ($k in @($script:ConfigDefaults.Keys)) { if (-not $Config.ContainsKey($k)) { $Config[$k] = $script:ConfigDefaults[$k] } }
+    # Engine 2.1.0: up to schema 9 "optional updates" also covered the Windows and .NET previews.
+    if ($null -eq $Config.previewUpdates) { $Config.previewUpdates = ([string] $Config.optionalUpdates -eq 'install') }
     $paths = Get-WduPaths $Config
     foreach ($d in $paths.Root, $paths.Logs) { if (-not (Test-Path -LiteralPath $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null } }
     $script:LogFile = $paths.Log
@@ -1674,10 +1875,11 @@ function Invoke-WduScan {
     param([hashtable] $Config)
     $state = New-WduState
     $updates = Get-WduAvailableUpdates $Config
+    foreach ($x in @($updates)) { if ($x -is [hashtable] -and -not $x.ContainsKey('Class')) { Set-WduUpdateClass $x } }
     $plan = Get-WduPlan $updates $Config $state
     $rows = @()
-    foreach ($u in @($plan.Install) + @($plan.Later)) { $rows += [pscustomobject]@{ Action = 'Install'; Pass = (Get-WduPass $u); KB = ($u.Kbs -join ','); Title = $u.Title; Reason = $(if ($u.IsDriver -and $u.Driver) { "driver for $($u.Driver['model']) [$($u.Driver['hardwareID'])]" } else { '' }) } }
-    foreach ($s in $plan.Skipped) { $rows += [pscustomobject]@{ Action = 'Skip'; Pass = $s['pass']; KB = ($s.kbs -join ','); Title = $s.title; Reason = $s.reason } }
+    foreach ($u in @($plan.Install) + @($plan.Later)) { $rows += [pscustomobject]@{ Action = 'Install'; Pass = (Get-WduPass $u); Class = [string] $u['Class']; KB = ($u.Kbs -join ','); Title = $u.Title; Reason = $(if ($u.IsDriver -and $u.Driver) { "driver for $($u.Driver['model']) [$($u.Driver['hardwareID'])]" } else { '' }) } }
+    foreach ($s in $plan.Skipped) { $rows += [pscustomobject]@{ Action = 'Skip'; Pass = $s['pass']; Class = [string] $s['class']; KB = ($s.kbs -join ','); Title = $s.title; Reason = $s.reason } }
     $rows = @($rows | Sort-Object Action, Pass, Title)
     [pscustomobject]@{
         Updates       = $rows

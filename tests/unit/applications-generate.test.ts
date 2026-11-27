@@ -90,11 +90,14 @@ describe('earlier milestones are preserved', () => {
     expect(r.profile!.windowsUpdate.optionalUpdates).toBe('skip');
     expect(r.profile!.windowsUpdate.maxAttemptsPerUpdate).toBe(2);
     expect(r.profile!.monitoring.enabled).toBe(false);
+    // Schema 10 migration: previews followed "optional updates" before, so they stay off here.
+    expect(r.profile!.windowsUpdate.previewUpdates).toBe(false);
     expect(generate(r.profile).xml).toBe(generate(profile((p) => {
       noApps(p);
       p.updates.excludeDrivers = true;
       p.health.enabled = false;
       p.windowsUpdate.optionalUpdates = 'skip';
+      p.windowsUpdate.previewUpdates = false;
       p.windowsUpdate.maxAttemptsPerUpdate = 2;
       p.monitoring.enabled = false;
     })).xml);
