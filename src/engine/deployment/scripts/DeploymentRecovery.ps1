@@ -722,8 +722,14 @@ function Invoke-WdrUpdateRetryTool {
     $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $Tool, '-Mode', $Mode, '-DataRoot', $DataRoot)
     if ($Json) { $argList += '-Json' }
     if ($OutputPath) { $argList += @('-OutputPath', $OutputPath) }
-    $text = @(& $ps @argList 2>&1 | ForEach-Object { [string] $_ })
-    @{ Text = $text; Exit = $LASTEXITCODE }
+    # Windows PowerShell 5.1 turns a native stderr line into a terminating error under 'Stop'.
+    $eap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $text = @(& $ps @argList 2>&1 | ForEach-Object { [string] $_ })
+        $code = $LASTEXITCODE
+    } finally { $ErrorActionPreference = $eap }
+    @{ Text = $text; Exit = $code }
 }
 
 function Show-WdrMenu {

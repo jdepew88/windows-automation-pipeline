@@ -187,7 +187,17 @@ function New-WddReport {
                                 installed = $(if ($r) { @($r.installed).Count } else { $null }); skipped = $(if ($r) { @($r.skipped).Count } else { $null }); failedUpdates = $failed
                                 installedOptional = $(if ($counts) { $counts['installedOptional'] } else { $null }); installedDrivers = $(if ($counts) { $counts['installedDrivers'] } else { $null })
                                 requiresInteraction = $person; policy = $(if ($r -and $r.ContainsKey('policy')) { $r.policy } else { $null }) }
-        foreach ($f in $failed) { $remaining += "Windows Update: $((@($f.kbs) -join ', ')) $($f.title) failed after $($f.attempts) attempt(s) ($($f.lastHResult))." }
+        # Engine 2.0.0: engine version, failure categories, engine exceptions (never counted as update
+        # failures), readiness, passes, restarts, drivers with their devices and the final verification.
+        if ($r) {
+            foreach ($k in 'engineVersion', 'category', 'technicianAction', 'stopReason', 'readiness', 'passes', 'restarts', 'failedByCategory', 'drivers', 'verification', 'notAttempted') { if ($r.ContainsKey($k)) { $wuReport[$k] = $r[$k] } }
+            $wuReport.engineExceptions = @(@($r['engineExceptions']) | Where-Object { $_ } | ForEach-Object { [ordered]@{ operation = $_['operation']; type = $_['type']; hresult = $_['hresult']; message = $_['message']; line = $_['line']; statement = $_['statement']; updates = @($_['updates']) } })
+            if ($r['technicianAction']) { $remaining += "Windows Update: $($r['technicianAction'])" }
+            if ($r['verification'] -and $r['verification']['devicesWithProblems']) { $wuReport.devicesAfterUpdates = @($r['verification']['devicesWithProblems']).Count }
+        }
+        $failed = @($failed | ForEach-Object { $f = $_; $src = @(@($r['failed']) | Where-Object { $_ -and $_['title'] -eq $f.title }) | Select-Object -First 1; if ($src -and $src['category']) { $f.category = $src['category'] }; $f })
+        $wuReport.failedUpdates = $failed
+        foreach ($f in $failed) { $remaining += "Windows Update: $((@($f.kbs) -join ', ')) $($f.title) failed after $($f.attempts) attempt(s) ($($f.lastHResult)$(if ($f.Contains('category') -and $f.category) { ", $($f.category)" }))." }
         foreach ($f in $person) { $remaining += "Windows Update: $((@($f.kbs) -join ', ')) $($f.title) needs a person to install it (Settings > Windows Update)." }
         if ($wu.state -ne 'Final') { $incomplete += "Windows Update ($($wu.state))" }
         elseif ($wu.status -eq 'Offline') { $incomplete += 'Windows Update (Offline: no network before its runtime limit)' }
@@ -397,7 +407,17 @@ function Format-WddReport {
         $l.Add("  Result: $($w.status) ($($w.state)). $($w.reason)")
         $l.Add("  Installed: $($w.installed)  Skipped by policy: $($w.skipped)  Restarts: $($w.reboots)")
         if ($w.Contains('installedOptional') -and $null -ne $w.installedOptional) { $l.Add("  Of these: optional updates $($w.installedOptional), drivers $($w.installedDrivers)") }
-        foreach ($f in @($w.failedUpdates)) { $l.Add("  FAILED  $((@($f.kbs) -join ', ')) $($f.title) ($($f.attempts) attempts, $($f.lastHResult))") }
+        foreach ($f in @($w.failedUpdates)) { $l.Add("  FAILED  $((@($f.kbs) -join ', ')) $($f.title) ($($f.attempts) attempts, $($f.lastHResult)$(if ($f.Contains('category') -and $f.category) { ", $($f.category)" }))") }
+        # Engine 2.0.0: version, readiness, passes, categories, engine exceptions, drivers and devices.
+        if ($w.Contains('engineVersion') -and $w.engineVersion) { $l.Add("  Engine: $($w.engineVersion)$(if ($w.Contains('stopReason') -and $w.stopReason) { "; stopped because: $($w.stopReason)" })") }
+        if ($w.Contains('readiness') -and $w.readiness) { $rd = $w.readiness; $l.Add("  Readiness: $($rd['status']) after $($rd['searchAttempts']) search(es); restart before updating: $([bool] $rd['restartDone']); prerequisites installed first: $(@($rd['prerequisites']).Count)") }
+        if ($w.Contains('passes') -and @($w.passes).Count) { $l.Add('  Passes: ' + ((@($w.passes) | ForEach-Object { "$($_['pass']) ($(@($_['updates']).Count))" }) -join ', ')) }
+        if ($w.Contains('failedByCategory') -and $w.failedByCategory -and @($w.failedByCategory.Keys).Count) { $l.Add('  Failures by category: ' + ((@($w.failedByCategory.Keys) | ForEach-Object { "$_ $($w.failedByCategory[$_])" }) -join ', ')) }
+        if ($w.Contains('engineExceptions')) { foreach ($x in @($w.engineExceptions)) { $l.Add("  ENGINE  $($x.operation): $($x.type) $($x.hresult) at line $($x.line) ($(@($x.updates).Count) update(s); not an update failure)") } }
+        if ($w.Contains('notAttempted') -and @($w.notAttempted).Count) { $l.Add("  Not attempted after the engine stopped: $(@($w.notAttempted).Count) update(s)") }
+        if ($w.Contains('drivers')) { foreach ($d in @($w.drivers)) { $dev = $d['device']; $l.Add("  DRIVER  $($d['title'])$(if ($dev) { " -> $($dev['model']) [$($dev['hardwareID'])]" })") } }
+        if ($w.Contains('verification') -and $w.verification) { $v = $w.verification; $l.Add("  Final check: $($v['remainingOffered']) still offered, $(@($v['noLongerOffered']).Count) no longer offered (superseded or no longer applicable), $(@($v['devicesWithProblems']).Count) device(s) with problems, restart pending: $($v['rebootPending'])") }
+        if ($w.Contains('technicianAction') -and $w.technicianAction) { $l.Add("  ACTION  $($w.technicianAction)") }
         if ($w.Contains('requiresInteraction')) { foreach ($f in @($w.requiresInteraction)) { $l.Add("  PERSON  $((@($f.kbs) -join ', ')) $($f.title): needs a person to install it") } }
     } else { $l.Add('  Not part of this deployment.') }
     $l.Add('')

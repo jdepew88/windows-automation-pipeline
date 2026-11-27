@@ -57,6 +57,16 @@ Unit test coverage by acceptance criterion:
   `acl-commands.test.ts` (no recursive `(OI)(CI)` grants, no `/C` on checked calls) and the
   task-registration and recovery scenarios in `Deployment.Tests.ps1`; see
   [bare-metal-package-permissions](bare-metal-package-permissions/root-cause.md).
+- **Windows Update engine 2.0.0 and Retry Windows Update**: `Engine.Tests.ps1` (the 0x80131508
+  root cause with real Windows Update objects, read-only; collection checks; identity mapping; one
+  engine error instead of one failure per update; isolation; readiness; passes A-D; categories;
+  reset only when warranted; retry hooks), `UpdateRetry.Tests.ps1`, the Engine 2.0.0 scenarios in
+  `Deployment.Tests.ps1` (retry tool staged and offered, stderr under `Stop`, report fields),
+  `windows-update-recovery.test.ts` (package and recovery download carry the tested sources),
+  `tests/e2e/update-recovery.spec.ts` and the production spec; see
+  [windows-update-0x80131508](reliability-maintenance/windows-update-0x80131508.md) and
+  [spare-computer-retest](reliability-maintenance/spare-computer-retest.md) (recovery proven on one
+  physical computer; a full deployment with 2.0.0 from the start is the next physical test).
 - **Deployment reliability, automatic updates and remote monitoring**: the new scenarios in
   `Engine.Tests.ps1` (optional updates and drivers, updates that can ask for input, per-update
   download retries, permanent HRESULTs), `Applications.Tests.ps1` (installer exit codes, prompting

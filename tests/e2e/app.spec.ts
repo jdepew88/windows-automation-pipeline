@@ -214,8 +214,8 @@ test('Windows Update automation: on by default, assets downloadable, policy conf
 
   const assets = page.getByTestId('assets');
   await go(page, 'review');
-  // 4 engine files + orchestration.json (the application assets of Core Essentials are a separate group since Phase 4.2).
-  await expect(assets.locator('[data-asset-group="windows-update"] [data-asset]')).toHaveCount(4);
+  // 5 engine files (engine 2.0.0 adds Retry Windows Update) + orchestration.json (the application assets of Core Essentials are a separate group since Phase 4.2).
+  await expect(assets.locator('[data-asset-group="windows-update"] [data-asset]')).toHaveCount(5);
   await expect(assets.locator('[data-asset-group="orchestration"] [data-asset]')).toHaveCount(1);
   const [dl] = await Promise.all([page.waitForEvent('download'), assets.locator('[data-asset="config.json"] [data-action="download-asset"]').click()]);
   expect(dl.suggestedFilename()).toBe('config.json');

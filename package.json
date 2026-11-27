@@ -7,7 +7,7 @@
   "license": "MIT",
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build && vite-node scripts/build-manager.ts",
+    "build": "tsc --noEmit && vite build && vite-node scripts/build-manager.ts && vite-node scripts/build-update-recovery-kit.ts",
     "preview": "vite preview",
     "deploy": "npm run build && wrangler deploy",
     "typecheck": "tsc --noEmit",

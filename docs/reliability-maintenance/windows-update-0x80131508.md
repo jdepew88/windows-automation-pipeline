@@ -93,4 +93,17 @@ search: 4 update(s) offered
   - isolation;
   - restart and resume;
   - verification.
-- **Not yet proven:** a real download and installation by engine 2.0.0. The first real proof is the spare-computer retry described in [`spare-computer-retest.md`](spare-computer-retest.md).
+- **Proven on real hardware (2026-11-27, reported by the owner):** a real download and installation by engine 2.0.0. The spare computer deployed with engine 1.3.0 was recovered with Retry Windows Update, following [`spare-computer-retest.md`](spare-computer-retest.md):
+
+  | | Original deployment | Retry with engine 2.0.0 |
+  |---|---|---|
+  | Engine | 1.3.0 | 2.0.0 |
+  | Status | CompletedWithFailures | finished, 0 failed retries |
+  | Installed | 0 | 1 normal update, 9 drivers |
+  | Failed | 11 (`0x80131508`) | 0 |
+  | Devices with problems | | 0 |
+  | Pending restart afterwards | | False |
+  | Retry task afterwards | | not registered (removed itself) |
+
+  Of the original failures, 9 were recovered (installed) and 0 still fail. The evidence is the diagnostics ZIP `WDB-WindowsUpdate-diagnostics-JOE-COMPUTER-20261127-120916.zip` on that computer; it has not been copied into this repository.
+- **Not yet proven:** a complete deployment with engine 2.0.0 from the start (a fresh installation, with readiness, passes A to D and the restarts in one run). The next physical test is a new deployment package generated from the website.

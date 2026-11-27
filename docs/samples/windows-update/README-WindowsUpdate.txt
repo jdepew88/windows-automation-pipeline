@@ -76,5 +76,7 @@ Retry Windows Update (Invoke-WindowsUpdateRetry.ps1)
   Add -Wait to follow progress. The Deployment Recovery tool offers the same (menu U).
 
 Status: engine 2.0.0's Windows Update calls were checked read-only against the real Windows
-Update Agent (search, collections, assignment); installation is validated by the tests'
-simulations only. Test on a spare computer before relying on it.
+Update Agent (search, collections, assignment). On a physical computer deployed with engine
+1.3.0 (every update failed with 0x80131508), Retry Windows Update with engine 2.0.0 installed 1
+normal update and 9 drivers with no failure, and no device was left with a problem. A full
+deployment with engine 2.0.0 from the start has not been tested on hardware yet.

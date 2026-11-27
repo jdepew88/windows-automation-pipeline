@@ -27,6 +27,9 @@ export const README_FILE = 'README-WindowsUpdate.txt';
 export const RETRY_FILE = 'Invoke-WindowsUpdateRetry.ps1';
 export const RETRY_SOURCE = retrySource;
 export const ENGINE_SOURCE = engineSource;
+/** The standalone Windows Update recovery download (recovery-kit.ts, scripts/build-update-recovery-kit.ts). */
+export const RECOVERY_KIT_FILE = 'windows-update-recovery.zip';
+export const RECOVERY_KIT_DIR = 'WDB-WindowsUpdate';
 /** Files embedded in the answer file (extracted to STAGING_DIR during specialize). Engine 2.0.0 adds Retry Windows Update, so it is on every computer the engine ran on. */
 export const EMBEDDED_UPDATE_FILES: readonly string[] = [ENGINE_FILE, INSTALLER_FILE, CONFIG_FILE, 'Invoke-WindowsUpdateRetry.ps1'];
 
@@ -209,8 +212,10 @@ Retry Windows Update (${RETRY_FILE})
   Add -Wait to follow progress. The Deployment Recovery tool offers the same (menu U).
 
 Status: engine 2.0.0's Windows Update calls were checked read-only against the real Windows
-Update Agent (search, collections, assignment); installation is validated by the tests'
-simulations only. Test on a spare computer before relying on it.
+Update Agent (search, collections, assignment). On a physical computer deployed with engine
+1.3.0 (every update failed with 0x80131508), Retry Windows Update with engine 2.0.0 installed 1
+normal update and 9 drivers with no failure, and no device was left with a problem. A full
+deployment with engine 2.0.0 from the start has not been tested on hardware yet.
 `;
 }
 
