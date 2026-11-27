@@ -94,6 +94,34 @@ export const OVERLAP_GROUPS = {
 } as const satisfies Record<string, { label: string; ids: readonly string[] }>;
 export type OverlapGroup = keyof typeof OVERLAP_GROUPS;
 
+/** A path below one of the roots the engine resolves itself; no other variables, no "..". */
+export const VERIFY_FILE = /^%(ProgramFiles|ProgramFiles\(x86\)|ProgramData|LocalAppData|AppData)%(\\[A-Za-z0-9 ._()+-]{1,80}){1,6}$/;
+export const VERIFY_REGISTRY_KEY = /^HKLM\\SOFTWARE(\\[A-Za-z0-9 ._+-]{1,80}){1,8}$/;
+export const VerifySchema = z
+  .object({
+    uninstall: z.array(z.string().min(3).max(100)).max(10).optional(),
+    appx: z.array(z.string().regex(/^[A-Za-z0-9][A-Za-z0-9.-]{2,99}$/)).max(5).optional(),
+    files: z.array(z.string().regex(VERIFY_FILE)).max(5).optional(),
+    registry: z
+      .array(z.object({ key: z.string().regex(VERIFY_REGISTRY_KEY), name: z.string().regex(/^[A-Za-z0-9 ._-]{1,60}$/), equals: z.string().max(40).optional(), view: z.enum(['64', '32']).default('64') }).strict())
+      .max(3)
+      .optional(),
+    perUser: z.boolean().optional(),
+    after: z.enum(['none', 'signIn', 'restart']).optional(),
+  })
+  .strict();
+export type VerifySpec = z.infer<typeof VerifySchema>;
+
+/** The evidence the engine looks for: the catalog's verify block, with detectNames as uninstall names. */
+export function verifySpec(e: Pick<CatalogEntry, 'verify' | 'detectNames' | 'scope'> | undefined): VerifySpec {
+  if (!e) return {};
+  const v: VerifySpec = { ...(e.verify ?? {}) };
+  const names = [...(v.uninstall ?? []), ...(e.detectNames ?? [])];
+  if (names.length) v.uninstall = [...new Set(names)].slice(0, 10);
+  if (v.perUser === undefined && e.scope === 'user') v.perUser = true;
+  return v;
+}
+
 const CatalogEntrySchema = z
   .object({
     id: z.string().regex(/^[a-z0-9][a-z0-9-]{0,47}$/),
@@ -140,6 +168,18 @@ const CatalogEntrySchema = z
     alternateIds: z.array(z.string().regex(WINGET_ID)).max(5).optional(),
     /** "Apps & features" names from the package manifest, used to recognise installations made outside WinGet. */
     detectNames: z.array(z.string().max(100)).max(10).optional(),
+    /**
+     * Package-aware installation evidence (catalog audit 2026-11). The engine and the health audit
+     * accept an installation as verified only from one of these, never from the installer's exit code:
+     * uninstall: "Apps & features" display-name prefixes (machine, 32-bit and per-user hives);
+     * appx: Store/MSIX package names (registered for a user, or provisioned);
+     * files: executables under a known root (%ProgramFiles%, %ProgramFiles(x86)%, %ProgramData%,
+     *        %LocalAppData% and %AppData% of the deployment user);
+     * registry: an exact value (for example the Visual C++ runtime "Installed" = 1 per architecture);
+     * perUser: installs into the signed-in user's profile (verified in that user's hive and folders);
+     * after: what must happen before the evidence can exist (a sign-in of the user, or a restart).
+     */
+    verify: VerifySchema.optional(),
     validation: z
       .object({
         status: z.enum(['verified', 'unverified', 'unresolved', 'manual']),

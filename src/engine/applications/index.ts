@@ -8,6 +8,7 @@ import { DATA_ROOT, RESULT_FILE as WU_RESULT_FILE, TASK_NAME as WU_TASK_NAME, TA
 import { allProfiles, installable, manualItems, resolveSelection, type PlannedPackage, type SelectionResult } from './selection';
 import { exportWinGetJson } from './winget-json';
 import { exportAppProfiles } from './profiles';
+import { verifySpec, type VerifySpec } from './catalog';
 import { RESULTS_JSON_SCHEMA } from './results';
 import { migrationConfig, restorePlanText, settingsRestoreActive, settingsRestoreConfig, migrationActive } from '../migration/plan';
 import { DRIVER_STAGE } from '../drivers/contract';
@@ -156,6 +157,8 @@ export interface ApplicationsConfig {
     /** Engine 1.1.0: winget | msstore | portable (portable = winget package + Start menu shortcut). */
     method: 'winget' | 'msstore' | 'portable';
     portable?: { executable: string; shortcut: string };
+    /** Engine 1.6.0: installation evidence from the catalog (verifySpec); empty = WinGet's own record only. */
+    verify: VerifySpec;
   }[];
   unresolved: { key: string; packageIdentifier: string; source: string; displayName: string; reason: string }[];
   /** Engine 1.1.0: catalog entries without an unattended installation, reported as manual follow-ups. */
@@ -220,6 +223,7 @@ export function applicationsConfig(p: Profile, sel: SelectionResult = resolveSel
       after: x.after,
       method: x.method === 'portable' ? ('portable' as const) : x.ref.source.toLowerCase() === 'msstore' ? ('msstore' as const) : ('winget' as const),
       ...(x.method === 'portable' && x.catalog?.portable ? { portable: { ...x.catalog.portable } } : {}),
+      verify: verifySpec(x.catalog),
     })),
     unresolved: sel.packages
       .filter((x) => x.resolution === 'unresolved')
