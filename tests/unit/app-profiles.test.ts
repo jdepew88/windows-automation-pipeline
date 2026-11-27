@@ -15,7 +15,7 @@ import {
   methodOf,
 } from '../../src/engine/applications/catalog';
 import { BUILTIN_REFERENCED, UNIVERSAL_PROFILES, builtinProfile as currentBuiltin, builtinProfiles, deviceProfiles, isSelectableProfile } from '../../src/engine/applications/builtin';
-import { MSSTORE_ID, WINGET_ID, packageKey } from '../../src/engine/applications/ids';
+import { packageKey } from '../../src/engine/applications/ids';
 import { removalForCatalogId } from '../../src/engine/applications/catalog';
 import { installable, resolveSelection } from '../../src/engine/applications/selection';
 import {
