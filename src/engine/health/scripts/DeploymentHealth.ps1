@@ -558,8 +558,14 @@ function Get-WdhKbs {
 function ConvertTo-WdhSafeText {
     param([string] $Text)
     $t = $Text -replace '\s*\(key ending [^)]*\)', ''
+    $t = $t -replace '(?i)\bkey ending\s+[A-Z0-9]{5}\b', 'key ending <removed>'
     $t = $t -replace '(?i)\b[A-Z0-9]{5}(-[A-Z0-9]{5}){4}\b', '<key removed>'
     $t = $t -replace '(?i)(KMS\s+(host|server)\s*[:=]?\s*)[A-Za-z0-9.\-]+(:\d+)?', '$1<host removed>'
+    # Any other wording: host/server/address followed by : or =, fully qualified names (two dots or more)
+    # and IPv4 addresses (raw exception text from the activation tools can name the KMS host).
+    $t = $t -replace '(?i)\b(host|server|address)\s*[:=]\s*[^\s,;)]+', '$1: <host removed>'
+    $t = $t -replace '(?i)\b[a-z0-9-]+(\.[a-z0-9-]+)+\.[a-z]{2,}(:\d+)?\b', '<host removed>'
+    $t = $t -replace '\b\d{1,3}(\.\d{1,3}){3}(:\d+)?\b', '<address removed>'
     return $t
 }
 

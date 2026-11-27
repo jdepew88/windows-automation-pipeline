@@ -78,6 +78,8 @@ function Start-WduOrchestratorScan {
     if ($script:Sim.OrchestratorRefuses) { throw 'Simulated refusal' }
     foreach ($u in @($script:Sim.Updates)) { if ($u.ContainsKey('AppearsAfterRefresh')) { $u.AppearsAfterRefresh = $false } }
     if ($script:Sim.OrchestratorCompletes) { $script:Sim.OrchestratorTime = $script:Sim.Now.AddSeconds(30) }
+    # Windows' own installer starts after the check (an unmanaged computer installs by itself).
+    if ($script:Sim.ContainsKey('BusyAfterScan')) { $script:Sim.Busy = $script:Sim.BusyAfterScan }
 }
 function Test-WduOrchestratorScanning { param($Manager) $false }
 
@@ -838,7 +840,7 @@ $tests['engine 2.1.0 retry hooks: selection normal installs every Windows update
     Assert-Equal (Invoke-WduMain $c) 'Finished:Succeeded' 'normal outcome'
     Assert-Equal (@((Get-Result $c).installed | ForEach-Object { $_.kbs[0] } | Sort-Object) -join ',') 'KB5991001,KB5991003,KB5991005' 'every Windows update, no driver'
     Assert-True (@((Get-Result $c).skipped | Where-Object { $_.reason -like 'not selected for this retry (Windows updates only, no drivers)' }).Count -eq 2) 'the drivers reported as not selected'
-    Assert-Equal (Get-Result $c).updateState 'UpToDateUnderPolicy' 'drivers left for another retry: up to date under this selection'
+    Assert-Equal "$((Get-Result $c).updateState) $((Get-Result $c).summary.notSelected) $((Get-Result $c).summary.excluded)" 'UpdatesRemaining 2 0' 'drivers left for another retry: updates remain, never "up to date"'
     Reset-Sim @((New-SimUpdate KB5991001), (New-SimUpdate KB5991002 -Driver), (New-SimUpdate KB5991003 -Optional), (New-SimUpdate KB5991004 -Driver -Optional))
     $c = New-TestConfig @{ drivers = 'include'; optionalUpdates = 'install'; selection = 'drivers' }
     Assert-Equal (Invoke-WduMain $c) 'Finished:Succeeded' 'drivers outcome'
@@ -917,6 +919,13 @@ $tests['engine 2.1.0 Settings refresh: after the last pass the Update Orchestrat
     Assert-True ([DateTime] $sr.lastSuccessfulScanAfter -gt [DateTime] $sr.lastSuccessfulScanBefore) 'the orchestrator time advanced'
     Assert-Equal $script:Sim.OrchestratorScans 1 'one request'
     Assert-True ((Get-Content -LiteralPath (Join-Path $c.dataRoot 'Updates\logs\engine.log') -Raw) -match 'Settings refresh 1: available True, requested True, completed True') 'logged'
+    # Windows installing by itself after the check: the engine waits before searching again.
+    Reset-Sim @((New-SimUpdate KB5990002))
+    $script:Sim.BusyAfterScan = 2
+    $c = New-TestConfig @{}
+    Assert-Equal (Invoke-WduMain $c) 'Finished:Succeeded' 'outcome after waiting'
+    Assert-Equal (Get-Result $c).settingsRefresh.waitedForWindowsInstallerSeconds 60 'waited while Windows installed'
+    Assert-Equal $script:Sim.Busy 0 'the installer was idle before the next search'
 }
 
 $tests['engine 2.1.0 Settings refresh makes a new update applicable: it is installed, a second refresh follows, then verification (bounded)'] = {
@@ -939,6 +948,15 @@ $tests['engine 2.1.0 Settings refresh unavailable or refused: honest message, th
     $sr = (Get-Result $c).settingsRefresh
     Assert-Equal "$($sr.available) $($sr.requested) $($sr.completed)" 'False False False' 'not available'
     Assert-True ($sr.message -like '*Windows 11 24H2*final search is the verification*') 'says why and what verifies instead'
+    # The API exists but cannot be created (for example access denied): the real error, not "needs 24H2".
+    Reset-Sim @((New-SimUpdate KB5990002))
+    function Get-WduOrchestrator { $script:WduOrchestratorError = 'UnauthorizedAccessException: Access is denied.'; return $null }
+    try {
+        $c = New-TestConfig @{}
+        [void] (Invoke-WduMain $c)
+        Assert-True ((Get-Result $c).settingsRefresh.message -like "*could not be used (UnauthorizedAccessException: Access is denied.)*") 'real reason reported'
+    } finally { Remove-Item Function:\Get-WduOrchestrator }
+    Assert-Equal (Get-WduOrchestrator) 'sim-orchestrator' 'simulation restored'
     Reset-Sim @((New-SimUpdate KB5990002))
     $script:Sim.OrchestratorRefuses = $true
     $c = New-TestConfig @{}

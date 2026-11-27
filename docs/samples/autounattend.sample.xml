@@ -608,6 +608,9 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
 $script:EngineVersion = '2.1.0'
+# Engine 2.1.0: why the Update Orchestrator API could not be used, and where the state is saved during a refresh.
+$script:WduOrchestratorError = ''
+$script:WduStatePaths = $null
 $script:UpgradeCategoryId = '3689bdc8-b205-4af4-8d4b-a63924c5e9d5'   # WUA category "Upgrades"
 $script:MicrosoftUpdateServiceId = '7971f918-a847-4430-9279-4a52d1efe18d'
 $script:EventSource = 'WindowsDeploymentBuilder'
@@ -1894,10 +1897,11 @@ function Get-WduVerification {
     Start-WduOrchestratorScan, Test-WduOrchestratorScanning.
 #&gt;
 function Get-WduOrchestrator {
-    try {
-        $null = [Windows.Management.Update.WindowsUpdateManager, Windows.Management.Update, ContentType = WindowsRuntime]
-        return (New-Object Windows.Management.Update.WindowsUpdateManager 'WindowsDeploymentBuilder')
-    } catch { return $null }
+    $script:WduOrchestratorError = ''
+    try { $null = [Windows.Management.Update.WindowsUpdateManager, Windows.Management.Update, ContentType = WindowsRuntime] }
+    catch { $script:WduOrchestratorError = 'missing'; return $null }
+    try { return (New-Object Windows.Management.Update.WindowsUpdateManager 'WindowsDeploymentBuilder') }
+    catch { $script:WduOrchestratorError = "$($_.Exception.GetType().Name): $($_.Exception.Message)"; return $null }
 }
 
 function Get-WduOrchestratorScanTime {
@@ -1906,7 +1910,7 @@ function Get-WduOrchestratorScanTime {
     return $null
 }
 
-function Start-WduOrchestratorScan { param($Manager) $Manager.StartScan($true) }
+function Start-WduOrchestratorScan { param($Manager) $Manager.StartScan($false) }
 
 function Test-WduOrchestratorScanning { param($Manager) try { return [bool] $Manager.IsScanning } catch { return $false } }
 
@@ -1929,9 +1933,12 @@ function Invoke-WduSettingsRefresh {
         settingsDisplayVerified = $false; attempt = [int] $State.settingsRefreshes; message = ''
     }
     Set-WduStatus 'RefreshingSettings' 'Asking Windows Update (Settings) to check for updates.' $State
+    # Saved before the wait: a restart or a stop during it never repeats the request (bounded at two).
+    if ($script:WduStatePaths) { Save-WduState $State $script:WduStatePaths }
     $m = Get-WduOrchestrator
     if (-not $m) {
-        $rec.message = 'Not available on this Windows version (Windows.Management.Update needs Windows 11 24H2 or later). The engine''s own final search is the verification; Settings may show an older "Last checked" time until Windows checks by itself.'
+        $why = $(if ($script:WduOrchestratorError -and $script:WduOrchestratorError -ne 'missing') { "Windows Update's orchestrator API could not be used ($($script:WduOrchestratorError))." } else { 'Not available on this Windows version (Windows.Management.Update needs Windows 11 24H2 or later).' })
+        $rec.message = "$why The engine's own final search is the verification; Settings may show an older ""Last checked"" time until Windows checks by itself."
     } else {
         $rec.available = $true
         $before = Get-WduOrchestratorScanTime $m
@@ -1957,6 +1964,11 @@ function Invoke-WduSettingsRefresh {
                              else { "Requested, but Windows did not report a completed check within $($Config.settingsRefreshMinutes) minutes. The engine's own final search is the verification." })
         }
     }
+    if ($rec.requested) {
+        $busyPolls = 0
+        while ((Test-WduInstallerBusy) -and $busyPolls -lt 120) { $busyPolls++; Set-WduStatus 'WaitingForInstaller' 'Windows Update is installing on its own after the check; waiting before searching again.' $State; Wait-Wdu 30 }
+        if ($busyPolls) { $rec.waitedForWindowsInstallerSeconds = $busyPolls * 30 }
+    }
     $State.settingsRefresh = $rec
     Write-WduLog ("Settings refresh {0}: available {1}, requested {2}, completed {3}. {4}" -f $rec.attempt, $rec.available, $rec.requested, $rec.completed, $rec.message) $(if ($rec.completed -or -not $rec.available) { 'INFO' } else { 'WARN' })
     Add-WdbActivity $Config.dataRoot 'windowsUpdate' $(if ($rec.completed) { 'Windows Update check for Settings completed; searching once more.' } elseif ($rec.available) { 'Windows Update check for Settings requested; searching once more.' } else { 'Settings refresh not available on this Windows version; final search follows.' }) 'info'
@@ -1974,12 +1986,14 @@ function Get-WduUpdateState {
     $person = @(@($Result['requiresInteraction']) | Where-Object { $_ })
     $cat = { param($f) [string] $f['category'] }
     $previews = @($skipped | Where-Object { [string] $_['reason'] -like 'preview update (policy*' }).Count
+    $notSelected = @($skipped | Where-Object { [string] $_['reason'] -like 'not selected for this retry*' }).Count
     $summary = [ordered]@{
         installed        = @($Result['installed'] | Where-Object { $_ }).Count
         superseded       = $(if ($v) { @(@($v['noLongerOffered']) | Where-Object { $_ }).Count } else { 0 })
         notApplicable    = @($failed | Where-Object { (&amp; $cat $_) -eq 'NotApplicable' }).Count
-        excluded         = $skipped.Count
+        excluded         = $skipped.Count - $notSelected
         previewsExcluded = $previews
+        notSelected      = $notSelected
         downloadFailed   = @($failed | Where-Object { (&amp; $cat $_) -in 'DownloadFailure', 'TransientNetwork' }).Count
         installFailed    = @($failed | Where-Object { (&amp; $cat $_) -notin 'NotApplicable', 'DownloadFailure', 'TransientNetwork' }).Count
         awaitingRestart  = $(if ($v) { [bool] $v['rebootPending'] } else { $false })
@@ -1991,16 +2005,16 @@ function Get-WduUpdateState {
         elseif (-not $v) { 'VerificationUnavailable' }
         elseif ($summary.awaitingRestart) { 'RestartRequired' }
         elseif ($failed.Count) { 'CompletedWithFailures' }
-        elseif ($person.Count) { 'UpdatesRemaining' }
+        elseif ($person.Count -or $notSelected) { 'UpdatesRemaining' }
         elseif ($previews) { 'PreviewUpdatesExcluded' }
-        elseif ($skipped.Count) { 'UpToDateUnderPolicy' }
+        elseif ($skipped.Count - $notSelected) { 'UpToDateUnderPolicy' }
         else { 'UpToDate' })
     $text = switch ($state) {
         'UpToDate' { 'Up to date: the final search found nothing applicable left.' }
         'UpToDateUnderPolicy' { "Up to date under the selected policy: $($skipped.Count) offered update(s) are excluded by policy (see skipped)." }
         'PreviewUpdatesExcluded' { "Up to date; $previews preview update(s) are offered but intentionally excluded (Install preview updates is off)." }
         'RestartRequired' { 'A restart is still required to finish installing updates.' }
-        'UpdatesRemaining' { "$($person.Count) selected update(s) remain: Windows reported that they need a signed-in person." }
+        'UpdatesRemaining' { $(if ($person.Count) { "$($person.Count) selected update(s) remain: Windows reported that they need a signed-in person." } else { "$notSelected update(s) of another kind remain offered: this retry did not select them (run the other retry mode or RetryAll)." }) }
         'CompletedWithFailures' { "$($failed.Count) selected update(s) could not be installed." }
         'InstallationIncomplete' { 'Installation did not finish (stopped by a limit, an engine error or no network); updates may remain.' }
         default { 'The final verification search did not run, so the update state is not verified.' }
@@ -2168,6 +2182,7 @@ function Invoke-WduRun {
             # Windows Update shows) to check for updates, then search again: whatever that check makes
             # applicable is installed before the final verification. At most twice per run.
             if (Test-WduSettingsRefreshDue $Config $State) {
+                $script:WduStatePaths = $Paths
                 Invoke-WduSettingsRefresh $Config $State
                 Save-WduState $State $Paths
                 $emptyScans = 0
@@ -2874,7 +2889,7 @@ function Get-WurStatus {
         restartPendingBecause = @($pending)
         installerBusy = Test-WurInstallerBusy
         original = $origSummary
-        retries = @(Get-WurRuns $DataRoot | ForEach-Object { $_.phase = Get-WurRunPhase $_ $task; $_ })
+        retries = (Get-WurRunsWithPhase $DataRoot $task)
         retryTask = $(if ($task) { [string] $task.State } else { 'not registered' })
         devicesWithProblems = Get-WurDevices
         advice = @()
@@ -2890,66 +2905,94 @@ function Get-WurStatus {
 function Get-WurModeName { param([string] $Selection) switch ($Selection) { 'normal' { 'RetryUpdates' } 'drivers' { 'RetryDrivers' } default { 'RetryAll' } } }
 
 &lt;#
-    Tool 1.1.0: where an unfinished run is. Running (the task is running), AwaitingRestart (it asked for a
-    restart and continues after it), Resuming (its task is registered and starts it again), or Stopped
-    (no task left: it will not continue by itself).
+    Tool 1.1.0: where an unfinished run is. Only the newest unfinished run can own the one retry task:
+    Running (the task is running), AwaitingRestart (it asked for a restart and continues after it),
+    Resuming (its task is registered and starts it again), or Stopped (no task, or an older run that
+    a newer one replaced: it will not continue by itself).
 #&gt;
 function Get-WurRunPhase {
-    param($Run, $Task)
+    param($Run, $Task, [bool] $Newest = $true)
     if ($Run.final) { return 'Finished' }
+    if (-not $Task -or -not $Newest) { return 'Stopped' }
     $st = Read-WurJson (Join-Path $Run.path 'status.json')
     $phase = $(if ($st) { [string] $st['phase'] } else { '' })
-    if (-not $Task) { return 'Stopped' }
     if ([string] $Task.State -eq 'Running') { return $(if ($phase -eq 'Rebooting') { 'AwaitingRestart' } else { 'Running' }) }
     if ($phase -eq 'Rebooting') { return 'AwaitingRestart' }
     return 'Resuming'
 }
 
+&lt;# Tool 1.1.0: the runs with their phase (only the newest unfinished one is matched to the task). #&gt;
+function Get-WurRunsWithPhase {
+    param([string] $DataRoot, $Task)
+    $runs = @(Get-WurRuns $DataRoot)
+    $open = @($runs | Where-Object { -not $_.final })
+    $newestOpen = $(if ($open.Count) { $open[-1].runId } else { '' })
+    foreach ($r in $runs) { $r.phase = Get-WurRunPhase $r $Task ($r.runId -eq $newestOpen) }
+    return , $runs
+}
+
 &lt;#
     Tool 1.1.0: advice from what actually happened (tool 1.0.0 kept suggesting RetryUpdates and
-    RetryDrivers after both had succeeded). A completed recovery recommends the health audit.
+    RetryDrivers after both had succeeded). "Recovery complete" only when the latest run of every
+    kind succeeded and no run reports updates still to do; never without a result.
 #&gt;
 function Get-WurAdvice {
     param($Original, [object[]] $Retries, $Task, [string] $DataRoot)
     $out = @()
     $ok = 'Succeeded', 'CompletedWithFollowUp'
-    $open = @($Retries | Where-Object { $_ -and -not $_.final })
+    $all = @($Retries | Where-Object { $_ })
+    # Only the newest run decides while it is unfinished; an older unfinished run that later runs
+    # replaced is listed by Status but gets no advice.
+    $open = @(if ($all.Count -and -not $all[-1].final) { $all[-1] })
     foreach ($r in $open) {
         $mode = Get-WurModeName $r.selection
-        switch (Get-WurRunPhase $r $Task) {
+        switch ([string] $r.phase) {
             'Running' { $out += "Retry $($r.runId) ($mode) is running. Follow it with -Mode $mode -Wait; start nothing else meanwhile." }
             'AwaitingRestart' { $out += "Retry $($r.runId) ($mode) is waiting for a restart and continues by itself after it. Afterwards run -Mode Status." }
             'Resuming' { $out += "Retry $($r.runId) ($mode) is unfinished and continues by itself (its task is registered). Follow it with -Mode $mode -Wait." }
-            default { $out += "Retry $($r.runId) ($mode) stopped before finishing (its task is gone). Run -Mode $mode again to resume it, or add -Fresh for a new run." }
+            default { $out += "Retry $($r.runId) ($mode) stopped before finishing (it will not continue by itself). Run -Mode $mode again to resume it, or add -Fresh for a new run." }
         }
     }
     if ($open.Count) { return , $out }
     $done = @($Retries | Where-Object { $_ -and $_.final })
-    $normalDone = @($done | Where-Object { $_.selection -in 'normal', 'configured' -and $_.final -in $ok }).Count -gt 0
-    $driversDone = @($done | Where-Object { $_.selection -in 'drivers', 'configured' -and $_.final -in $ok }).Count -gt 0
-    $last = $(if ($done.Count) { $done[-1] } else { $null })
+    # The deployment's driver policy: when it excluded drivers, no driver retry is suggested.
+    $base = Get-WurBaseConfig $DataRoot
+    $driversExcluded = [string] $base['drivers'] -eq 'exclude'
+    # The latest finished run that covered each kind (RetryAll covers both).
+    $latest = @{}
+    foreach ($kind in 'normal', 'drivers') {
+        $runs = @($done | Where-Object { $_.selection -eq $kind -or $_.selection -eq 'configured' })
+        $latest[$kind] = $(if ($runs.Count) { $runs[-1] } else { $null })
+    }
+    $kindOk = { param($k) $latest[$k] -and $latest[$k].final -in $ok -and -not ($latest[$k].result -and $latest[$k].result.updateState -in 'CompletedWithFailures', 'InstallationIncomplete', 'VerificationUnavailable') }
+    $normalOk = &amp; $kindOk 'normal'
+    $driversOk = $driversExcluded -or (&amp; $kindOk 'drivers')
     $needsRecovery = $Original -and ($Original.collectionDefect -or $Original.failed -gt 0 -or $Original.status -in 'Failed', 'Offline')
-    if ($needsRecovery -and -not ($normalDone -and $driversDone)) {
-        $why = $(if ($Original.collectionDefect) { "The original deployment used engine $($Original.engineVersion): its $($Original.failed) failure(s) with 0x80131508 are the engine's collection defect (fixed in 2.0.0), not update failures." } else { "The original deployment reported $($Original.failed) failed update(s) ($($Original.status))." })
-        $todo = @()
-        if (-not $normalDone) { $todo += '-Mode RetryUpdates' }
-        if (-not $driversDone) { $todo += '-Mode RetryDrivers' }
-        $out += "$why Run $($todo -join ', then ')$(if ($normalDone -or $driversDone) { ' (the other part already succeeded)' })."
+    $todo = @()
+    if (-not $normalOk -and ($needsRecovery -or $latest['normal'])) { $todo += '-Mode RetryUpdates' }
+    if (-not $driversOk -and ($needsRecovery -or $latest['drivers'])) { $todo += '-Mode RetryDrivers' }
+    if ($todo.Count) {
+        $why = $(
+            if ($Original -and $Original.collectionDefect -and -not $done.Count) { "The original deployment used engine $($Original.engineVersion): its $($Original.failed) failure(s) with 0x80131508 are the engine's collection defect (fixed in 2.0.0), not update failures." }
+            elseif (-not $done.Count) { "The original deployment reported $($Original.failed) failed update(s) ($($Original.status))." }
+            else { 'Not every kind of update has been retried successfully yet: ' + ((@('normal', 'drivers') | Where-Object { $latest[$_] } | ForEach-Object { "$(Get-WurModeName $_) last finished $($latest[$_].final)$(if ($latest[$_].result -and $latest[$_].result.updateState) { " ($($latest[$_].result.updateState))" })" }) -join ', ') + '.' })
+        $out += "$why Run $($todo -join ', then ')$(if ($normalOk -or ($driversOk -and -not $driversExcluded)) { ' (the other part already succeeded)' })."
         return , $out
     }
-    if ($last -and $last.final -notin $ok) {
-        $text = $(if ($last.result -and $last.result.updateStateText) { " $($last.result.updateStateText)" } else { '' })
-        $out += "The last retry $($last.runId) ($(Get-WurModeName $last.selection)) finished $($last.final).$text See its result.json; run -Mode ExportDiagnostics and the health audit (-Mode HealthAudit)."
+    if (-not $done.Count) { return , $out }
+    $last = $done[-1]
+    if ($last.result -and $last.result.updateState -in 'UpdatesRemaining', 'RestartRequired') {
+        $out += "The last retry $($last.runId) ($(Get-WurModeName $last.selection)) finished $($last.final) and reports $($last.result.updateState): $($last.result.updateStateText) Run the health audit (-Mode HealthAudit) to see the current state."
         return , $out
     }
-    if ($last -and $last.result -and $last.result.updateState -in 'UpdatesRemaining', 'RestartRequired', 'VerificationUnavailable', 'InstallationIncomplete') {
-        $out += "The last retry $($last.runId) finished $($last.final) but reports $($last.result.updateState): $($last.result.updateStateText)"
+    if (-not $last.result) {
+        $out += "The last retry $($last.runId) left no result; nothing is confirmed. Run -Mode ExportDiagnostics and the health audit (-Mode HealthAudit)."
+        return , $out
     }
-    if ($done.Count) {
-        $out += "Recovery complete: $(@($done | ForEach-Object { "$(Get-WurModeName $_.selection) $($_.final)" }) -join ', '). No further retry is needed; run the health audit: -Mode HealthAudit (read-only)."
-    }
+    $out += "Recovery complete: $(@($done | ForEach-Object { "$(Get-WurModeName $_.selection) $($_.final)" }) -join ', ')$(if ($driversExcluded) { ' (drivers excluded by the deployment)' }). No further retry is needed; run the health audit: -Mode HealthAudit (read-only)."
     return , $out
 }
+
 
 function Show-WurStatus {
     param($S)
@@ -14552,8 +14595,14 @@ function Get-WdhKbs {
 function ConvertTo-WdhSafeText {
     param([string] $Text)
     $t = $Text -replace '\s*\(key ending [^)]*\)', ''
+    $t = $t -replace '(?i)\bkey ending\s+[A-Z0-9]{5}\b', 'key ending &lt;removed&gt;'
     $t = $t -replace '(?i)\b[A-Z0-9]{5}(-[A-Z0-9]{5}){4}\b', '&lt;key removed&gt;'
     $t = $t -replace '(?i)(KMS\s+(host|server)\s*[:=]?\s*)[A-Za-z0-9.\-]+(:\d+)?', '$1&lt;host removed&gt;'
+    # Any other wording: host/server/address followed by : or =, fully qualified names (two dots or more)
+    # and IPv4 addresses (raw exception text from the activation tools can name the KMS host).
+    $t = $t -replace '(?i)\b(host|server|address)\s*[:=]\s*[^\s,;)]+', '$1: &lt;host removed&gt;'
+    $t = $t -replace '(?i)\b[a-z0-9-]+(\.[a-z0-9-]+)+\.[a-z]{2,}(:\d+)?\b', '&lt;host removed&gt;'
+    $t = $t -replace '\b\d{1,3}(\.\d{1,3}){3}(:\d+)?\b', '&lt;address removed&gt;'
     return $t
 }
 
@@ -16988,7 +17037,7 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
   "format": "windows-deployment-builder/deployment-manifest",
   "manifestVersion": 1,
   "packageVersion": "1.3.0",
-  "packageId": "2848AD41E762D45D",
+  "packageId": "34C085E83AA875E4",
   "scope": "answerFile",
   "generator": {
     "name": "Windows Deployment Builder",
@@ -17505,9 +17554,9 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
     {
       "path": "scripts/windows-update/WindowsUpdateEngine.ps1",
       "role": "engine",
-      "size": 117285,
-      "sha256": "F79379882111E75B7A577703330BBFE90F5AD071E0462550EA0A124AF087B6A3",
-      "textSha256": "E06EE7A38D736C00C34C40976661B29F225E362BFFECE6B94C04649F5EB62D23",
+      "size": 118843,
+      "sha256": "908D5A1299254B7DCCD349C251B32CA024FF7E12486C4AC23C245141B9DEF559",
+      "textSha256": "174E59049F95E61DEA2B29CABA22B4879CFD28360A9EFD769FC1199CA498728C",
       "embedded": "WindowsUpdate\\WindowsUpdateEngine.ps1"
     },
     {
@@ -17529,9 +17578,9 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
     {
       "path": "scripts/windows-update/Invoke-WindowsUpdateRetry.ps1",
       "role": "engine",
-      "size": 37472,
-      "sha256": "2E4F18EF012A76AB9ECFF8EFE426ECBD43D0382540AD997919F2E4EFD8EABA78",
-      "textSha256": "9147824399483363795C631ABA7C30D34DA9100681513EFB046B7BF2AAE04993",
+      "size": 39324,
+      "sha256": "824607F37FCB48E97BF78DF28381F5FEFF5F14ACD693AB0BD8421C3E6A49FC50",
+      "textSha256": "8BC9CDC41A719ECC4AF3A6531CCE6B0E4F6515056E1539B5A124C59BB42C0E03",
       "embedded": "WindowsUpdate\\Invoke-WindowsUpdateRetry.ps1"
     },
     {
@@ -17561,9 +17610,9 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
     {
       "path": "scripts/health/DeploymentHealth.ps1",
       "role": "engine",
-      "size": 221248,
-      "sha256": "9F4594B28C1CAB93B6C69A60C59085EC6B45AD8EEDC8DC509AD7143FD5676E5F",
-      "textSha256": "2CB7EAC61792E5E3AE9140F64E2368F6DF385AD99508E9EE8B1A112670C4B7A8",
+      "size": 221797,
+      "sha256": "1F87282C3F557E97F816B36500CEB581B4FA06791203F5438C5AF98B254EA465",
+      "textSha256": "178482702D691AE05FC73877AD62F0320272AFAF4F6B7CFE4FFFEDC77709CA87",
       "embedded": "Deployment\\scripts\\health\\DeploymentHealth.ps1"
     },
     {

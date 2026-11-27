@@ -79,9 +79,10 @@ Limits that remain:
 A Windows Update Agent search (`Microsoft.Update.Session`) does not change what Settings > Windows Update shows. The engine therefore also uses the documented WinRT API `Windows.Management.Update.WindowsUpdateManager` (Windows 11 24H2 and later). It talks to the Update Orchestrator, which Settings uses:
 
 1. Read `LastSuccessfulScanTimestamp`.
-2. Call `StartScan(true)`, the equivalent of "Check for updates".
+2. Call `StartScan(false)`: a background check, not an interactive "Check for updates" click, so Windows is not pushed into seeker behaviour. The state is saved first, so a restart during the wait never repeats it.
 3. Poll for up to 15 minutes until `IsScanning` is false and the timestamp has advanced.
-4. Search again with the Windows Update Agent and install anything the check made applicable, then run pass D.
+4. If Windows' own installer then starts working (an unmanaged computer installs some updates by itself after a check), wait for it, up to an hour, before searching again. This way the engine's next pass does not collide with it. Windows applies its own driver policy here: with drivers excluded, the profile's `ExcludeWUDriversInQualityUpdate` policy keeps it from installing drivers too.
+5. Search again with the Windows Update Agent and install anything the check made applicable, then run pass D.
 
 `result.json` › `settingsRefresh` records each claim separately:
 
@@ -102,10 +103,10 @@ Earlier than 24H2 the refresh is "not available". The Windows Update Agent verif
 | State | When |
 |---|---|
 | `UpToDate` | the final search found nothing applicable left |
-| `UpToDateUnderPolicy` | only updates excluded by policy remain offered (firmware, drivers when excluded, a retry's other kind) |
+| `UpToDateUnderPolicy` | only updates excluded by policy remain offered (firmware, drivers when excluded) |
 | `PreviewUpdatesExcluded` | previews are offered and intentionally excluded |
 | `RestartRequired` | a restart is still pending |
-| `UpdatesRemaining` | selected updates remain (Windows said they need a person) |
+| `UpdatesRemaining` | selected updates remain (Windows said they need a person), or a retry left another kind of update for the other retry mode (`summary.notSelected`) |
 | `CompletedWithFailures` | selected updates were given up |
 | `InstallationIncomplete` | stopped by a limit, an engine error or no network |
 | `VerificationUnavailable` | the final verification did not run; never reported as up to date |

@@ -303,7 +303,7 @@ function Get-WurStatus {
         restartPendingBecause = @($pending)
         installerBusy = Test-WurInstallerBusy
         original = $origSummary
-        retries = @(Get-WurRuns $DataRoot | ForEach-Object { $_.phase = Get-WurRunPhase $_ $task; $_ })
+        retries = (Get-WurRunsWithPhase $DataRoot $task)
         retryTask = $(if ($task) { [string] $task.State } else { 'not registered' })
         devicesWithProblems = Get-WurDevices
         advice = @()
@@ -319,66 +319,94 @@ function Get-WurStatus {
 function Get-WurModeName { param([string] $Selection) switch ($Selection) { 'normal' { 'RetryUpdates' } 'drivers' { 'RetryDrivers' } default { 'RetryAll' } } }
 
 <#
-    Tool 1.1.0: where an unfinished run is. Running (the task is running), AwaitingRestart (it asked for a
-    restart and continues after it), Resuming (its task is registered and starts it again), or Stopped
-    (no task left: it will not continue by itself).
+    Tool 1.1.0: where an unfinished run is. Only the newest unfinished run can own the one retry task:
+    Running (the task is running), AwaitingRestart (it asked for a restart and continues after it),
+    Resuming (its task is registered and starts it again), or Stopped (no task, or an older run that
+    a newer one replaced: it will not continue by itself).
 #>
 function Get-WurRunPhase {
-    param($Run, $Task)
+    param($Run, $Task, [bool] $Newest = $true)
     if ($Run.final) { return 'Finished' }
+    if (-not $Task -or -not $Newest) { return 'Stopped' }
     $st = Read-WurJson (Join-Path $Run.path 'status.json')
     $phase = $(if ($st) { [string] $st['phase'] } else { '' })
-    if (-not $Task) { return 'Stopped' }
     if ([string] $Task.State -eq 'Running') { return $(if ($phase -eq 'Rebooting') { 'AwaitingRestart' } else { 'Running' }) }
     if ($phase -eq 'Rebooting') { return 'AwaitingRestart' }
     return 'Resuming'
 }
 
+<# Tool 1.1.0: the runs with their phase (only the newest unfinished one is matched to the task). #>
+function Get-WurRunsWithPhase {
+    param([string] $DataRoot, $Task)
+    $runs = @(Get-WurRuns $DataRoot)
+    $open = @($runs | Where-Object { -not $_.final })
+    $newestOpen = $(if ($open.Count) { $open[-1].runId } else { '' })
+    foreach ($r in $runs) { $r.phase = Get-WurRunPhase $r $Task ($r.runId -eq $newestOpen) }
+    return , $runs
+}
+
 <#
     Tool 1.1.0: advice from what actually happened (tool 1.0.0 kept suggesting RetryUpdates and
-    RetryDrivers after both had succeeded). A completed recovery recommends the health audit.
+    RetryDrivers after both had succeeded). "Recovery complete" only when the latest run of every
+    kind succeeded and no run reports updates still to do; never without a result.
 #>
 function Get-WurAdvice {
     param($Original, [object[]] $Retries, $Task, [string] $DataRoot)
     $out = @()
     $ok = 'Succeeded', 'CompletedWithFollowUp'
-    $open = @($Retries | Where-Object { $_ -and -not $_.final })
+    $all = @($Retries | Where-Object { $_ })
+    # Only the newest run decides while it is unfinished; an older unfinished run that later runs
+    # replaced is listed by Status but gets no advice.
+    $open = @(if ($all.Count -and -not $all[-1].final) { $all[-1] })
     foreach ($r in $open) {
         $mode = Get-WurModeName $r.selection
-        switch (Get-WurRunPhase $r $Task) {
+        switch ([string] $r.phase) {
             'Running' { $out += "Retry $($r.runId) ($mode) is running. Follow it with -Mode $mode -Wait; start nothing else meanwhile." }
             'AwaitingRestart' { $out += "Retry $($r.runId) ($mode) is waiting for a restart and continues by itself after it. Afterwards run -Mode Status." }
             'Resuming' { $out += "Retry $($r.runId) ($mode) is unfinished and continues by itself (its task is registered). Follow it with -Mode $mode -Wait." }
-            default { $out += "Retry $($r.runId) ($mode) stopped before finishing (its task is gone). Run -Mode $mode again to resume it, or add -Fresh for a new run." }
+            default { $out += "Retry $($r.runId) ($mode) stopped before finishing (it will not continue by itself). Run -Mode $mode again to resume it, or add -Fresh for a new run." }
         }
     }
     if ($open.Count) { return , $out }
     $done = @($Retries | Where-Object { $_ -and $_.final })
-    $normalDone = @($done | Where-Object { $_.selection -in 'normal', 'configured' -and $_.final -in $ok }).Count -gt 0
-    $driversDone = @($done | Where-Object { $_.selection -in 'drivers', 'configured' -and $_.final -in $ok }).Count -gt 0
-    $last = $(if ($done.Count) { $done[-1] } else { $null })
+    # The deployment's driver policy: when it excluded drivers, no driver retry is suggested.
+    $base = Get-WurBaseConfig $DataRoot
+    $driversExcluded = [string] $base['drivers'] -eq 'exclude'
+    # The latest finished run that covered each kind (RetryAll covers both).
+    $latest = @{}
+    foreach ($kind in 'normal', 'drivers') {
+        $runs = @($done | Where-Object { $_.selection -eq $kind -or $_.selection -eq 'configured' })
+        $latest[$kind] = $(if ($runs.Count) { $runs[-1] } else { $null })
+    }
+    $kindOk = { param($k) $latest[$k] -and $latest[$k].final -in $ok -and -not ($latest[$k].result -and $latest[$k].result.updateState -in 'CompletedWithFailures', 'InstallationIncomplete', 'VerificationUnavailable') }
+    $normalOk = & $kindOk 'normal'
+    $driversOk = $driversExcluded -or (& $kindOk 'drivers')
     $needsRecovery = $Original -and ($Original.collectionDefect -or $Original.failed -gt 0 -or $Original.status -in 'Failed', 'Offline')
-    if ($needsRecovery -and -not ($normalDone -and $driversDone)) {
-        $why = $(if ($Original.collectionDefect) { "The original deployment used engine $($Original.engineVersion): its $($Original.failed) failure(s) with 0x80131508 are the engine's collection defect (fixed in 2.0.0), not update failures." } else { "The original deployment reported $($Original.failed) failed update(s) ($($Original.status))." })
-        $todo = @()
-        if (-not $normalDone) { $todo += '-Mode RetryUpdates' }
-        if (-not $driversDone) { $todo += '-Mode RetryDrivers' }
-        $out += "$why Run $($todo -join ', then ')$(if ($normalDone -or $driversDone) { ' (the other part already succeeded)' })."
+    $todo = @()
+    if (-not $normalOk -and ($needsRecovery -or $latest['normal'])) { $todo += '-Mode RetryUpdates' }
+    if (-not $driversOk -and ($needsRecovery -or $latest['drivers'])) { $todo += '-Mode RetryDrivers' }
+    if ($todo.Count) {
+        $why = $(
+            if ($Original -and $Original.collectionDefect -and -not $done.Count) { "The original deployment used engine $($Original.engineVersion): its $($Original.failed) failure(s) with 0x80131508 are the engine's collection defect (fixed in 2.0.0), not update failures." }
+            elseif (-not $done.Count) { "The original deployment reported $($Original.failed) failed update(s) ($($Original.status))." }
+            else { 'Not every kind of update has been retried successfully yet: ' + ((@('normal', 'drivers') | Where-Object { $latest[$_] } | ForEach-Object { "$(Get-WurModeName $_) last finished $($latest[$_].final)$(if ($latest[$_].result -and $latest[$_].result.updateState) { " ($($latest[$_].result.updateState))" })" }) -join ', ') + '.' })
+        $out += "$why Run $($todo -join ', then ')$(if ($normalOk -or ($driversOk -and -not $driversExcluded)) { ' (the other part already succeeded)' })."
         return , $out
     }
-    if ($last -and $last.final -notin $ok) {
-        $text = $(if ($last.result -and $last.result.updateStateText) { " $($last.result.updateStateText)" } else { '' })
-        $out += "The last retry $($last.runId) ($(Get-WurModeName $last.selection)) finished $($last.final).$text See its result.json; run -Mode ExportDiagnostics and the health audit (-Mode HealthAudit)."
+    if (-not $done.Count) { return , $out }
+    $last = $done[-1]
+    if ($last.result -and $last.result.updateState -in 'UpdatesRemaining', 'RestartRequired') {
+        $out += "The last retry $($last.runId) ($(Get-WurModeName $last.selection)) finished $($last.final) and reports $($last.result.updateState): $($last.result.updateStateText) Run the health audit (-Mode HealthAudit) to see the current state."
         return , $out
     }
-    if ($last -and $last.result -and $last.result.updateState -in 'UpdatesRemaining', 'RestartRequired', 'VerificationUnavailable', 'InstallationIncomplete') {
-        $out += "The last retry $($last.runId) finished $($last.final) but reports $($last.result.updateState): $($last.result.updateStateText)"
+    if (-not $last.result) {
+        $out += "The last retry $($last.runId) left no result; nothing is confirmed. Run -Mode ExportDiagnostics and the health audit (-Mode HealthAudit)."
+        return , $out
     }
-    if ($done.Count) {
-        $out += "Recovery complete: $(@($done | ForEach-Object { "$(Get-WurModeName $_.selection) $($_.final)" }) -join ', '). No further retry is needed; run the health audit: -Mode HealthAudit (read-only)."
-    }
+    $out += "Recovery complete: $(@($done | ForEach-Object { "$(Get-WurModeName $_.selection) $($_.final)" }) -join ', ')$(if ($driversExcluded) { ' (drivers excluded by the deployment)' }). No further retry is needed; run the health audit: -Mode HealthAudit (read-only)."
     return , $out
 }
+
 
 function Show-WurStatus {
     param($S)

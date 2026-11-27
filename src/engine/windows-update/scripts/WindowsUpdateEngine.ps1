@@ -105,6 +105,9 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
 $script:EngineVersion = '2.1.0'
+# Engine 2.1.0: why the Update Orchestrator API could not be used, and where the state is saved during a refresh.
+$script:WduOrchestratorError = ''
+$script:WduStatePaths = $null
 $script:UpgradeCategoryId = '3689bdc8-b205-4af4-8d4b-a63924c5e9d5'   # WUA category "Upgrades"
 $script:MicrosoftUpdateServiceId = '7971f918-a847-4430-9279-4a52d1efe18d'
 $script:EventSource = 'WindowsDeploymentBuilder'
@@ -1391,10 +1394,11 @@ function Get-WduVerification {
     Start-WduOrchestratorScan, Test-WduOrchestratorScanning.
 #>
 function Get-WduOrchestrator {
-    try {
-        $null = [Windows.Management.Update.WindowsUpdateManager, Windows.Management.Update, ContentType = WindowsRuntime]
-        return (New-Object Windows.Management.Update.WindowsUpdateManager 'WindowsDeploymentBuilder')
-    } catch { return $null }
+    $script:WduOrchestratorError = ''
+    try { $null = [Windows.Management.Update.WindowsUpdateManager, Windows.Management.Update, ContentType = WindowsRuntime] }
+    catch { $script:WduOrchestratorError = 'missing'; return $null }
+    try { return (New-Object Windows.Management.Update.WindowsUpdateManager 'WindowsDeploymentBuilder') }
+    catch { $script:WduOrchestratorError = "$($_.Exception.GetType().Name): $($_.Exception.Message)"; return $null }
 }
 
 function Get-WduOrchestratorScanTime {
@@ -1403,7 +1407,7 @@ function Get-WduOrchestratorScanTime {
     return $null
 }
 
-function Start-WduOrchestratorScan { param($Manager) $Manager.StartScan($true) }
+function Start-WduOrchestratorScan { param($Manager) $Manager.StartScan($false) }
 
 function Test-WduOrchestratorScanning { param($Manager) try { return [bool] $Manager.IsScanning } catch { return $false } }
 
@@ -1426,9 +1430,12 @@ function Invoke-WduSettingsRefresh {
         settingsDisplayVerified = $false; attempt = [int] $State.settingsRefreshes; message = ''
     }
     Set-WduStatus 'RefreshingSettings' 'Asking Windows Update (Settings) to check for updates.' $State
+    # Saved before the wait: a restart or a stop during it never repeats the request (bounded at two).
+    if ($script:WduStatePaths) { Save-WduState $State $script:WduStatePaths }
     $m = Get-WduOrchestrator
     if (-not $m) {
-        $rec.message = 'Not available on this Windows version (Windows.Management.Update needs Windows 11 24H2 or later). The engine''s own final search is the verification; Settings may show an older "Last checked" time until Windows checks by itself.'
+        $why = $(if ($script:WduOrchestratorError -and $script:WduOrchestratorError -ne 'missing') { "Windows Update's orchestrator API could not be used ($($script:WduOrchestratorError))." } else { 'Not available on this Windows version (Windows.Management.Update needs Windows 11 24H2 or later).' })
+        $rec.message = "$why The engine's own final search is the verification; Settings may show an older ""Last checked"" time until Windows checks by itself."
     } else {
         $rec.available = $true
         $before = Get-WduOrchestratorScanTime $m
@@ -1454,6 +1461,11 @@ function Invoke-WduSettingsRefresh {
                              else { "Requested, but Windows did not report a completed check within $($Config.settingsRefreshMinutes) minutes. The engine's own final search is the verification." })
         }
     }
+    if ($rec.requested) {
+        $busyPolls = 0
+        while ((Test-WduInstallerBusy) -and $busyPolls -lt 120) { $busyPolls++; Set-WduStatus 'WaitingForInstaller' 'Windows Update is installing on its own after the check; waiting before searching again.' $State; Wait-Wdu 30 }
+        if ($busyPolls) { $rec.waitedForWindowsInstallerSeconds = $busyPolls * 30 }
+    }
     $State.settingsRefresh = $rec
     Write-WduLog ("Settings refresh {0}: available {1}, requested {2}, completed {3}. {4}" -f $rec.attempt, $rec.available, $rec.requested, $rec.completed, $rec.message) $(if ($rec.completed -or -not $rec.available) { 'INFO' } else { 'WARN' })
     Add-WdbActivity $Config.dataRoot 'windowsUpdate' $(if ($rec.completed) { 'Windows Update check for Settings completed; searching once more.' } elseif ($rec.available) { 'Windows Update check for Settings requested; searching once more.' } else { 'Settings refresh not available on this Windows version; final search follows.' }) 'info'
@@ -1471,12 +1483,14 @@ function Get-WduUpdateState {
     $person = @(@($Result['requiresInteraction']) | Where-Object { $_ })
     $cat = { param($f) [string] $f['category'] }
     $previews = @($skipped | Where-Object { [string] $_['reason'] -like 'preview update (policy*' }).Count
+    $notSelected = @($skipped | Where-Object { [string] $_['reason'] -like 'not selected for this retry*' }).Count
     $summary = [ordered]@{
         installed        = @($Result['installed'] | Where-Object { $_ }).Count
         superseded       = $(if ($v) { @(@($v['noLongerOffered']) | Where-Object { $_ }).Count } else { 0 })
         notApplicable    = @($failed | Where-Object { (& $cat $_) -eq 'NotApplicable' }).Count
-        excluded         = $skipped.Count
+        excluded         = $skipped.Count - $notSelected
         previewsExcluded = $previews
+        notSelected      = $notSelected
         downloadFailed   = @($failed | Where-Object { (& $cat $_) -in 'DownloadFailure', 'TransientNetwork' }).Count
         installFailed    = @($failed | Where-Object { (& $cat $_) -notin 'NotApplicable', 'DownloadFailure', 'TransientNetwork' }).Count
         awaitingRestart  = $(if ($v) { [bool] $v['rebootPending'] } else { $false })
@@ -1488,16 +1502,16 @@ function Get-WduUpdateState {
         elseif (-not $v) { 'VerificationUnavailable' }
         elseif ($summary.awaitingRestart) { 'RestartRequired' }
         elseif ($failed.Count) { 'CompletedWithFailures' }
-        elseif ($person.Count) { 'UpdatesRemaining' }
+        elseif ($person.Count -or $notSelected) { 'UpdatesRemaining' }
         elseif ($previews) { 'PreviewUpdatesExcluded' }
-        elseif ($skipped.Count) { 'UpToDateUnderPolicy' }
+        elseif ($skipped.Count - $notSelected) { 'UpToDateUnderPolicy' }
         else { 'UpToDate' })
     $text = switch ($state) {
         'UpToDate' { 'Up to date: the final search found nothing applicable left.' }
         'UpToDateUnderPolicy' { "Up to date under the selected policy: $($skipped.Count) offered update(s) are excluded by policy (see skipped)." }
         'PreviewUpdatesExcluded' { "Up to date; $previews preview update(s) are offered but intentionally excluded (Install preview updates is off)." }
         'RestartRequired' { 'A restart is still required to finish installing updates.' }
-        'UpdatesRemaining' { "$($person.Count) selected update(s) remain: Windows reported that they need a signed-in person." }
+        'UpdatesRemaining' { $(if ($person.Count) { "$($person.Count) selected update(s) remain: Windows reported that they need a signed-in person." } else { "$notSelected update(s) of another kind remain offered: this retry did not select them (run the other retry mode or RetryAll)." }) }
         'CompletedWithFailures' { "$($failed.Count) selected update(s) could not be installed." }
         'InstallationIncomplete' { 'Installation did not finish (stopped by a limit, an engine error or no network); updates may remain.' }
         default { 'The final verification search did not run, so the update state is not verified.' }
@@ -1665,6 +1679,7 @@ function Invoke-WduRun {
             # Windows Update shows) to check for updates, then search again: whatever that check makes
             # applicable is installed before the final verification. At most twice per run.
             if (Test-WduSettingsRefreshDue $Config $State) {
+                $script:WduStatePaths = $Paths
                 Invoke-WduSettingsRefresh $Config $State
                 Save-WduState $State $Paths
                 $emptyScans = 0

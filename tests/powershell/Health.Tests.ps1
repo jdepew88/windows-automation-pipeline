@@ -1047,6 +1047,12 @@ Test-HealthScenario 'W12. the full audit in one report (schema-validated by the 
     Save-Out 'W'
 }
 
+Test-HealthScenario 'W13. activation text in reports: product-key fragments, KMS hosts in any wording and addresses are removed; file names stay' {
+    $t = ConvertTo-WdhSafeText 'Activation failed: 0xC004F074 contacting kms01.corp.contoso.com:1688 (server=kms01) at 10.0.0.5; KMS host kms02.contoso.local; see OSPP.VBS and Activation.ps1, key ending 7H2XK (key ending ABCDE) VK7JG-NPHTM-C97JM-9MPGT-3V66T'
+    foreach ($secret in 'kms01', 'kms02', 'contoso', '10.0.0.5', '7H2XK', 'ABCDE', 'VK7JG') { Assert-True (-not $t.Contains($secret)) "removed: $secret ($t)" }
+    foreach ($kept in '0xC004F074', 'OSPP.VBS', 'Activation.ps1') { Assert-True $t.Contains($kept) "kept: $kept" }
+}
+
 Write-Output ''
 Write-Output "$($script:Passed) passed, $($script:Failures) failed"
 if ($script:Failures -gt 0) { exit 1 }
