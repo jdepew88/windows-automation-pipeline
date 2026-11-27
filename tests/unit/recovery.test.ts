@@ -170,7 +170,7 @@ describe('Phase 5 scripts: static safety checks', () => {
       expect(s).toContain('[System.IO.File]::Replace($tmp, $Path');
     }
     // Engine 1.6.0: Save-WdaState derives each operation's outcome first, then writes atomically with a backup.
-    expect(engineSource).toMatch(/function Save-WdaState \{\s+param\(\[hashtable\] \$State, \[hashtable\] \$Paths\)[\s\S]{0,400}?\n    Write-WdaJson \$Paths\.State \$State -Backup\n\}/);
+    expect(engineSource).toMatch(/function Save-WdaState \{\s+param\(\[hashtable\] \$State, \[hashtable\] \$Paths\)[\s\S]{0,400}?\n {4}Write-WdaJson \$Paths\.State \$State -Backup\n\}/);
     expect(commonSource).toContain('function Save-WddState { param([hashtable] $Paths, [hashtable] $State) Write-WddJson $Paths.State $State -Backup }');
   });
 });
