@@ -1129,7 +1129,7 @@ function Resolve-WdhAppVerdict {
       InstallerSucceededUnverified  the installer reported success, but Windows lists nothing that matches
       Missing / Failed              not found; the installation failed, or there is no result at all
       ManualActionRequired          no unattended installation, or the installer needs a person
-      NotSelected                   deselected for this deployment (not listed)
+      NotSelected                   deselected for this deployment (listed, never counted as missing)
       Pending / Deferred            still running or waiting for a restart / the user's own profile is not available
 #>
 function Get-WdhAppVerification {
@@ -1208,8 +1208,7 @@ function Test-WdhApplications {
         $status = $v[0]
         if ($status -eq 'Fail' -and -not $required) { $sev = 'Warning' }
         Add-WdhFinding $C $fid 'applications' $name $status $sev $(if ([string] $it['kind'] -eq 'manual') { 'Installed (manual follow-up)' } elseif ($it['version']) { "Installed, version $($it['version'])" } else { 'Installed' }) $v[2] $method $evidence $v[3] -Required ($required -and [string] $it['kind'] -ne 'manual') -AutomaticRecovery ($status -eq 'Pending') -TechnicianRequired ($status -in 'Fail', 'Warning', 'Deferred') -RecoveryAction $(if ($status -eq 'Fail') { $recovery } else { '' }) | Out-Null
-        # Deselected for this deployment: not listed with the applications (its finding says so).
-        if ($verdict.Verification -eq 'NotSelected') { continue }
+        # Deselected for this deployment: listed as NotSelected (as before 1.1.0), never counted as missing.
         $C.Apps.Add([ordered]@{ key = $key; name = $name; source = [string] $it['source']; packageIdentifier = [string] $it['packageIdentifier']; method = [string] $it['method']; kind = [string] $it['kind']; required = $required
                                 scope = $scope; engineStatus = $eng; lifecycle = $life; attempts = $attempts; detection = $det; independent = $indep; foundIn = $(if ($hit.found) { [string] $hit.scope } else { '' }); version = [string] $hit.version; result = $v[1]
                                 verification = $verdict.Verification; findingId = $fid })
