@@ -57,6 +57,15 @@ Unit test coverage by acceptance criterion:
   `acl-commands.test.ts` (no recursive `(OI)(CI)` grants, no `/C` on checked calls) and the
   task-registration and recovery scenarios in `Deployment.Tests.ps1`; see
   [bare-metal-package-permissions](bare-metal-package-permissions/root-cause.md).
+- **Windows Update engine 2.1.0, preview updates, Settings refresh, Retry Windows Update 1.1.0 and the
+  health audit**: the 2.1.0 scenarios in `Engine.Tests.ps1` (classes, standard and previews-off
+  coverage, firmware never, schema-9 configurations, Settings refresh completed / unavailable /
+  refused / timed out / finding new updates, update states; the Update Orchestrator is simulated
+  and a guard test proves the suite never reaches the real one), `UpdateRetry.Tests.ps1` (advice
+  from history, run phases, health audit location), `Health.Tests.ps1`, `preview-updates.test.ts`
+  (schema 10 setting, migration, config, import/export), `windows-update-recovery.test.ts` and the
+  browser and production specs; see [windows-update-automation](windows-update-automation/README.md)
+  and the [physical test](windows-update-automation/physical-test.md).
 - **Windows Update engine 2.0.0 and Retry Windows Update**: `Engine.Tests.ps1` (the 0x80131508
   root cause with real Windows Update objects, read-only; collection checks; identity mapping; one
   engine error instead of one failure per update; isolation; readiness; passes A-D; categories;

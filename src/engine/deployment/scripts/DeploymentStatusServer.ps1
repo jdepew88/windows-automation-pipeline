@@ -280,13 +280,20 @@ function Get-WddMonitorStatus {
 function Get-WddMonitorFinal {
     param([hashtable] $Paths, $Model)
     $r = Read-WddJson $Paths.ReportJson
-    $f = [ordered]@{ overall = [string] $Model.overall; completed = @(); failed = @(); unresolvedDevices = @($Model.drivers.unresolvedDevices); followUp = @() }
+    $f = [ordered]@{ overall = [string] $Model.overall; completed = @(); failed = @(); unresolvedDevices = @($Model.drivers.unresolvedDevices); followUp = @(); health = $null }
+    # Engine 2.1.0: the latest read-only health audit (current state), kept apart from the deployment's
+    # own result, which is history and is never rewritten.
+    $h = Read-WddJson (Join-Path $Paths.Root 'reports\health\deployment-health.json')
+    if ($h -is [hashtable] -and $h['overall'] -is [hashtable]) {
+        $f.health = [ordered]@{ status = [string] $h['overall']['status']; summary = Protect-WddText ([string] $h['overall']['summary']); generatedUtc = [string] $h['generatedUtc'] }
+    }
     if ($r -isnot [hashtable]) { return $f }
     $f.overall = [string] $r['overall']
     $w = $r['windowsUpdate']
     if ($w -is [hashtable]) {
         $f.completed += "Windows Update: $([int] $w['installed']) update(s) installed$(if ($null -ne $w['installedOptional']) { " ($([int] $w['installedOptional']) optional, $([int] $w['installedDrivers']) drivers)" }); result $($w['status'])."
         foreach ($x in @($w['failedUpdates']) | Where-Object { $_ -is [hashtable] }) { $f.failed += Protect-WddText "Windows Update $((@($x['kbs']) -join ', ')) $($x['title']): failed after $($x['attempts']) attempt(s) ($($x['lastHResult']))" }
+        if ($w['updateState']) { $f.completed += Protect-WddText "Windows Update state at the end: $($w['updateState']). $($w['updateStateText'])" }
     }
     $a = $r['applications']
     if ($a -is [hashtable]) {
@@ -595,7 +602,12 @@ $script:DashboardJs = @'
     var fc = $('finalCard'), f = $('final'); clear(f);
     if (s.final) {
       fc.hidden = false;
-      text(f, 'Overall result: ' + s.final.overall);
+      text(f, 'Deployment result (recorded when the deployment finished; never rewritten): ' + s.final.overall);
+      if (s.final.health) {
+        text(f, 'Current health (latest read-only audit, ' + when(s.final.health.generatedUtc) + '): ' + s.final.health.status + '. ' + s.final.health.summary);
+      } else {
+        text(f, 'Current health: no audit yet. On the computer: Deployment recovery > 9, or DeploymentHealth.ps1 -Mode Verify.');
+      }
       [['Completed', s.final.completed], ['Failed', s.final.failed], ['Technician follow-up', s.final.followUp]].forEach(function (g) {
         if (!g[1] || !g[1].length) { return; }
         f.appendChild(el('h3', null, g[0]));

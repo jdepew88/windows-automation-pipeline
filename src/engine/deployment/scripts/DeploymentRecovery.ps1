@@ -40,7 +40,7 @@
                                  backups are never included (every entry is checked afterwards)
       -Action Verify             Phase 9: verifies the deployment against Windows itself
                                  (DeploymentHealth.ps1, read-only) and writes the health reports
-      -Action RetryWindowsUpdate [-UpdateMode Status|Scan|RetryUpdates|RetryDrivers|RetryAll|ExportDiagnostics]
+      -Action RetryWindowsUpdate [-UpdateMode Status|Scan|RetryUpdates|RetryDrivers|RetryAll|ExportDiagnostics|HealthAudit]
                                  Retry Windows Update with the corrected engine 2.0.0
                                  (scripts\windows-update\Invoke-WindowsUpdateRetry.ps1): a separate
                                  run that never changes the original update records
@@ -65,7 +65,7 @@
 param(
     [ValidateSet('Menu', 'Status', 'PendingActions', 'RetryFailed', 'Retry', 'Resume', 'RestoreSettings', 'AddDrivers', 'ExportDiagnostics', 'Verify', 'Activate', 'CheckActivation', 'RetryWindowsUpdate')]
     [string] $Action = 'Menu',
-    [ValidateSet('Status', 'Scan', 'RetryUpdates', 'RetryDrivers', 'RetryAll', 'ExportDiagnostics')]
+    [ValidateSet('Status', 'Scan', 'RetryUpdates', 'RetryDrivers', 'RetryAll', 'ExportDiagnostics', 'HealthAudit')]
     [string] $UpdateMode = 'Status',
     [ValidateSet('', 'Windows', 'Office')]
     [string] $Target = '',
@@ -744,8 +744,8 @@ function Show-WdrMenu {
         Write-Output '  3  View pending actions      6  Export diagnostic report'
         Write-Output '  7  Restore application settings from a backup folder'
         Write-Output '  8  Add driver packages from a folder (for example a network driver)'
-        Write-Output '  9  Verify the deployment (health report; read-only)'
-        Write-Output '  U  Retry Windows Update (status, scan, updates, drivers, diagnostics)'
+        Write-Output '  9  Health audit: verify the computer now (read-only; writes only its report)'
+        Write-Output '  U  Windows Update: status, check, retry updates or drivers, diagnostics'
         if ($Manifest.ContainsKey('activation') -and $Manifest.activation) { Write-Output '  A  Activation: check the licensing state, or activate Windows or Office' }
         Write-Output '  0  Exit'
         $c = Read-Host 'Choose'
@@ -764,8 +764,10 @@ function Show-WdrMenu {
             '8' { Invoke-WdrAction $Manifest $Paths 'AddDrivers' -DriverPath (Read-Host 'Folder with INF driver packages (for example E:\Drivers\Network)') }
             '9' { Invoke-WdrAction $Manifest $Paths 'Verify' }
             { $_ -ieq 'U' } {
-                Write-Output '  S Status (read-only)   C Scan (read-only)   N Retry normal updates   D Retry drivers   A Retry all   E Export diagnostics'
-                $m = switch -regex (Read-Host 'Choose') { '^[Ss]' { 'Status' } '^[Cc]' { 'Scan' } '^[Nn]' { 'RetryUpdates' } '^[Dd]' { 'RetryDrivers' } '^[Aa]' { 'RetryAll' } '^[Ee]' { 'ExportDiagnostics' } default { '' } }
+                Write-Output '  Read-only:  S Status, recovery history and hardware problems   C Check for updates (search only)'
+                Write-Output '              H Health audit   E Export diagnostics'
+                Write-Output '  Installs (may restart the computer):  N Windows updates (no drivers)   D Optional drivers   A All selected updates'
+                $m = switch -regex (Read-Host 'Choose') { '^[Ss]' { 'Status' } '^[Cc]' { 'Scan' } '^[Hh]' { 'HealthAudit' } '^[Nn]' { 'RetryUpdates' } '^[Dd]' { 'RetryDrivers' } '^[Aa]' { 'RetryAll' } '^[Ee]' { 'ExportDiagnostics' } default { '' } }
                 if ($m) { Invoke-WdrAction $Manifest $Paths 'RetryWindowsUpdate' -UpdateMode $m } else { @{ Text = 'Nothing chosen.'; Exit = 0 } }
             }
             { $_ -ieq 'A' -and $Manifest.ContainsKey('activation') -and $Manifest.activation } {

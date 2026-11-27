@@ -180,6 +180,12 @@ Test-Scenario 'after the deployment: final results (read-only), then the monitor
     Assert-Equal @($m.final.unresolvedDevices).Count 1 'unresolved device'
     Assert-Equal $m.final.unresolvedDevices[0].hardwareId 'ACPI\VEN_INT&DEV_33A1' 'hardware ID'
     Assert-True (@($m.final.followUp).Count -ge 1) 'technician follow-up'
+    Assert-Equal $m.final.health.status 'NeedsAttention' 'the audit run at the end of the deployment is shown as the current health'
+    # Engine 2.1.0: the latest read-only health audit is the current state, shown apart from the
+    # deployment's own result (history, never rewritten).
+    Write-WddJson (Join-Path $script:Paths.Root 'reports\health\deployment-health.json') ([ordered]@{ generatedUtc = '2026-11-27T12:00:00Z'; overall = [ordered]@{ status = 'Ready'; summary = '41 of 41 check(s) verified'; title = 'Ready' } })
+    $m = (Get-Api).Body | ConvertFrom-Json
+    Assert-Equal "$($m.final.overall) $($m.final.health.status) $($m.final.health.generatedUtc)" 'CompletedWithFailures Ready 2026-11-27T12:00:00Z' 'history and current health side by side'
     $settings = Get-WddMonitorSettings $script:Manifest
     $script:SimNow = $script:SimNow.AddHours(1)
     Assert-True (-not (Test-WddMonitorExpired $script:Paths $settings)) 'still shown after 1 hour'

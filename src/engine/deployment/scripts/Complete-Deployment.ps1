@@ -190,7 +190,7 @@ function New-WddReport {
         # Engine 2.0.0: engine version, failure categories, engine exceptions (never counted as update
         # failures), readiness, passes, restarts, drivers with their devices and the final verification.
         if ($r) {
-            foreach ($k in 'engineVersion', 'category', 'technicianAction', 'stopReason', 'readiness', 'passes', 'restarts', 'failedByCategory', 'drivers', 'verification', 'notAttempted') { if ($r.ContainsKey($k)) { $wuReport[$k] = $r[$k] } }
+            foreach ($k in 'engineVersion', 'category', 'technicianAction', 'stopReason', 'readiness', 'passes', 'restarts', 'failedByCategory', 'drivers', 'verification', 'notAttempted', 'updateState', 'updateStateText', 'summary', 'settingsRefresh') { if ($r.ContainsKey($k)) { $wuReport[$k] = $r[$k] } }
             $wuReport.engineExceptions = @(@($r['engineExceptions']) | Where-Object { $_ } | ForEach-Object { [ordered]@{ operation = $_['operation']; type = $_['type']; hresult = $_['hresult']; message = $_['message']; line = $_['line']; statement = $_['statement']; updates = @($_['updates']) } })
             if ($r['technicianAction']) { $remaining += "Windows Update: $($r['technicianAction'])" }
             if ($r['verification'] -and $r['verification']['devicesWithProblems']) { $wuReport.devicesAfterUpdates = @($r['verification']['devicesWithProblems']).Count }
@@ -418,6 +418,10 @@ function Format-WddReport {
         if ($w.Contains('drivers')) { foreach ($d in @($w.drivers)) { $dev = $d['device']; $l.Add("  DRIVER  $($d['title'])$(if ($dev) { " -> $($dev['model']) [$($dev['hardwareID'])]" })") } }
         if ($w.Contains('verification') -and $w.verification) { $v = $w.verification; $l.Add("  Final check: $($v['remainingOffered']) still offered, $(@($v['noLongerOffered']).Count) no longer offered (superseded or no longer applicable), $(@($v['devicesWithProblems']).Count) device(s) with problems, restart pending: $($v['rebootPending'])") }
         if ($w.Contains('technicianAction') -and $w.technicianAction) { $l.Add("  ACTION  $($w.technicianAction)") }
+        # Engine 2.1.0: the truthful final state and the Settings refresh (never claimed as seen in Settings).
+        if ($w.Contains('updateState') -and $w.updateState) { $l.Add("  Update state: $($w.updateState). $($w.updateStateText)") }
+        if ($w.Contains('summary') -and $w.summary) { $sm = $w.summary; $l.Add("  Counts: installed $($sm['installed']), superseded $($sm['superseded']), not applicable $($sm['notApplicable']), excluded by policy $($sm['excluded']) (previews $($sm['previewsExcluded'])), download failed $($sm['downloadFailed']), install failed $($sm['installFailed']), remaining $($sm['remaining'])") }
+        if ($w.Contains('settingsRefresh') -and $w.settingsRefresh) { $sr = $w.settingsRefresh; $l.Add("  Settings refresh: available $($sr['available']), requested $($sr['requested']), completed $($sr['completed']); Settings page display not verified. $($sr['message'])") }
         if ($w.Contains('requiresInteraction')) { foreach ($f in @($w.requiresInteraction)) { $l.Add("  PERSON  $((@($f.kbs) -join ', ')) $($f.title): needs a person to install it") } }
     } else { $l.Add('  Not part of this deployment.') }
     $l.Add('')
