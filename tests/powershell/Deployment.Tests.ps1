@@ -1299,6 +1299,23 @@ Test-Scenario 'Phase 5 status: idle user stage is PausedAwaitingUser (32); Statu
     Assert-True ($p -match 'Manufacturer drivers') 'report follow-ups listed'
 }
 
+Test-Scenario 'Engine 2.0.0: Retry Windows Update is staged with the package and offered by the recovery tool (separate process, mode passed through)' {
+    Reset-AppSim @{}
+    $emb = Invoke-SimExtraction
+    Invoke-WddInitialize $script:Manifest (Join-Path $emb 'Deployment\deployment-manifest.json') 'Embedded' (Join-Path $emb 'Deployment') $emb $script:Paths -NoConsole | Out-Null
+    $tool = Join-Path $script:Paths.Package 'scripts\windows-update\Invoke-WindowsUpdateRetry.ps1'
+    Assert-True (Test-Path -LiteralPath $tool) 'retry tool staged on the computer'
+    $script:RetryCalls = @()
+    function Invoke-WdrUpdateRetryTool { param([string] $Tool, [string] $Mode, [string] $DataRoot, [bool] $Json, [string] $OutputPath) $script:RetryCalls += , @($Tool, $Mode, $DataRoot); @{ Text = @("simulated $Mode"); Exit = 0 } }
+    $r = Invoke-WdrAction $script:Manifest $script:Paths 'RetryWindowsUpdate' -UpdateMode 'RetryDrivers'
+    Assert-Equal "$($r.Text) $($r.Exit)" 'simulated RetryDrivers 0' 'tool output returned'
+    Assert-Equal "$($script:RetryCalls[0][0]) $($script:RetryCalls[0][1]) $($script:RetryCalls[0][2])" "$tool RetryDrivers $($script:Paths.Root)" 'package tool, mode and data root'
+    Remove-Item -LiteralPath $tool -Force
+    $r = Invoke-WdrAction $script:Manifest $script:Paths 'RetryWindowsUpdate' -UpdateMode 'Status'
+    Assert-True ($r.Exit -eq 1 -and $r.Text -match 'not part of this deployment package') 'a package without the tool says so'
+    Remove-Item Function:\Invoke-WdrUpdateRetryTool -ErrorAction SilentlyContinue
+}
+
 Test-Scenario 'Phase 5 diagnostics: one ZIP with logs, states and report; passwords redacted; answer files and Wi-Fi profiles never included' {
     Reset-AppSim @{ 'Git.Git' = 'fail' }
     $emb = Invoke-SimExtraction

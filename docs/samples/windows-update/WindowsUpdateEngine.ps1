@@ -58,6 +58,41 @@
         exception), and the next attempt uses a new WUA session.
       - An update whose last attempt fails while Windows has a restart pending is retried once
         after the restart (the engine restarts for it); a second failure is final.
+
+    Engine 2.0.0 (0x80131508 repair, readiness, passes):
+      - ROOT CAUSE of the field failures "0x80131508 IndexOutOfRangeException: Index was outside
+        the bounds of the array" on every update: New-WduCollection returned its
+        Microsoft.Update.UpdateColl through the PowerShell pipeline, which enumerates COM
+        collections. The caller therefore received the bare IUpdate (one update), an Object[]
+        (several) or $null (none) instead of the collection, and PowerShell's COM property setter
+        `$downloader.Updates = ...` / `$installer.Updates = ...` throws IndexOutOfRangeException for
+        any value that is not an IUpdateCollection. Reproduced read-only on Windows 11 / PowerShell
+        5.1. Every download and installation since engine 1.0.0 failed this way before Windows
+        Update was called, so the engine itself never installed anything; Windows' own automatic
+        updates installed what was installed, and optional drivers (which Windows does not install
+        automatically) were all reported as failed. Retries and component resets could not help.
+        Fixed by returning the collection with the unary comma, verifying its type and count
+        before every assignment (Assert-WduCollection), and mapping results by update identity.
+      - Every Windows Update call runs as a named operation; an exception records the operation,
+        exception type, HRESULT, message, script line and stack trace (engineExceptions in
+        state.json and result.json). An exception in the engine's own code is ONE engine error,
+        not one installer failure per update: the updates' attempts are not used up by it, a batch
+        is retried one update at a time to isolate it, and the same exception at the same line
+        twice stops the stage (EngineException, technician action) instead of looping, resetting
+        components or holding the applications back.
+      - Failure categories (category on every failed/attempted update, see Get-WduCategory).
+      - First-start readiness (readiness in result.json): network, service start types, Windows
+        Update agent enabled, installer/servicing busy, restart already pending (one restart
+        before installing anything), a successful search as the proof that the agent is ready
+        (bounded retries, never an arbitrary wait), prerequisite classification.
+      - Ordered passes: A servicing prerequisites (servicing stack, Defender platform) alone
+        first, restart if required, new session, search again; B normal updates (cumulative,
+        security, .NET, Defender intelligence, MSRT); C optional updates and drivers, each driver
+        on its own with the device it is for (hardware ID, model, class); D verification: search
+        again, installed updates must no longer be offered, updates that disappeared are recorded
+        as no longer offered (superseded or no longer applicable), devices with problems listed.
+      - Components are reset only when the failures point at the update data store or download
+        cache (Test-WduResetWarranted), never for engine exceptions, network or not-applicable.
 #>
 [CmdletBinding()]
 param(
@@ -69,7 +104,7 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-$script:EngineVersion = '1.3.0'
+$script:EngineVersion = '2.0.0'
 $script:UpgradeCategoryId = '3689bdc8-b205-4af4-8d4b-a63924c5e9d5'   # WUA category "Upgrades"
 $script:MicrosoftUpdateServiceId = '7971f918-a847-4430-9279-4a52d1efe18d'
 $script:EventSource = 'WindowsDeploymentBuilder'
@@ -85,28 +120,61 @@ $script:Activity = @{}
     update is not applicable, or it can only be finished by a person.
 #>
 $script:HResults = @{
-    '0x80240016' = @('WU_E_INSTALL_NOT_ALLOWED', 'another installation is in progress or a restart is pending', $false)
-    '0x80240017' = @('WU_E_NOT_APPLICABLE', 'the update is not applicable to this computer', $true)
-    '0x80240020' = @('WU_E_NO_INTERACTIVE_USER', 'the update needs a signed-in user to finish', $true)
-    '0x80240022' = @('WU_E_ALL_UPDATES_FAILED', 'every update in the operation failed', $false)
-    '0x8024000B' = @('WU_E_CALL_CANCELLED', 'the operation was cancelled', $false)
-    '0x8024200D' = @('WU_E_UH_NEEDANOTHERDOWNLOAD', 'more content must be downloaded', $false)
-    '0x8024402C' = @('WU_E_PT_WINHTTP_NAME_NOT_RESOLVED', 'the update server name could not be resolved', $false)
-    '0x80244022' = @('WU_E_PT_HTTP_STATUS_SERVICE_UNAVAIL', 'the update service was temporarily unavailable (HTTP 503)', $false)
-    '0x80246007' = @('WU_E_DM_NOTDOWNLOADED', 'the update has not been downloaded', $false)
-    '0x80246008' = @('WU_E_DM_FAILTOCONNECTTOBITS', 'the Background Intelligent Transfer Service could not be reached', $false)
-    '0x80070422' = @('ERROR_SERVICE_DISABLED', 'a required service is disabled', $false)
-    '0x80072EE2' = @('ERROR_INTERNET_TIMEOUT', 'the connection timed out', $false)
-    '0x80072EFD' = @('ERROR_INTERNET_CANNOT_CONNECT', 'the server could not be reached', $false)
-    '0x80072F8F' = @('ERROR_INTERNET_SECURE_FAILURE', 'the secure connection failed (check the date and time)', $false)
-    '0x800F0922' = @('CBS_E_INSTALLERS_FAILED', 'the servicing stack could not apply the update', $false)
-    '0x80073701' = @('ERROR_SXS_ASSEMBLY_MISSING', 'a component the update needs is missing', $false)
-    # .NET errors (facility 0x13) are raised by code, not by Windows Update's own result: either the
-    # update's installer (command-line updates such as KB890830 and KB4052623 report their own
-    # exit code) or the calling script. Engine 1.3.0 records which of the two it was.
-    '0x80131508' = @('COR_E_INDEXOUTOFRANGE', '.NET "index out of range" error raised while installing (the update''s installer or the calling code), not a Windows Update result', $false)
-    '0x80131509' = @('COR_E_INVALIDOPERATION', '.NET "invalid operation" error raised while installing, not a Windows Update result', $false)
+    # name, meaning, permanent (never retried), category (engine 2.0.0, see Get-WduCategory)
+    '0x80240016' = @('WU_E_INSTALL_NOT_ALLOWED', 'another installation is in progress or a restart is pending', $false, 'ServicingBusy')
+    '0x80240017' = @('WU_E_NOT_APPLICABLE', 'the update is not applicable to this computer', $true, 'NotApplicable')
+    '0x80240020' = @('WU_E_NO_INTERACTIVE_USER', 'the update needs a signed-in user to finish', $true, 'TechnicianRequired')
+    '0x80240022' = @('WU_E_ALL_UPDATES_FAILED', 'every update in the operation failed', $false, 'InstallerFailure')
+    '0x8024000B' = @('WU_E_CALL_CANCELLED', 'the operation was cancelled', $false, 'ComApiException')
+    '0x8024001E' = @('WU_E_SERVICE_STOP', 'the operation stopped because the service or Windows was shutting down', $false, 'NotReady')
+    '0x8024001F' = @('WU_E_NO_CONNECTION', 'there is no network connection', $false, 'TransientNetwork')
+    '0x8024200D' = @('WU_E_UH_NEEDANOTHERDOWNLOAD', 'more content must be downloaded', $false, 'DownloadFailure')
+    '0x8024401C' = @('WU_E_PT_HTTP_STATUS_REQUEST_TIMEOUT', 'the update server did not answer in time', $false, 'TransientNetwork')
+    '0x8024402C' = @('WU_E_PT_WINHTTP_NAME_NOT_RESOLVED', 'the update server name could not be resolved', $false, 'TransientNetwork')
+    '0x80244022' = @('WU_E_PT_HTTP_STATUS_SERVICE_UNAVAIL', 'the update service was temporarily unavailable (HTTP 503)', $false, 'TransientNetwork')
+    '0x80246007' = @('WU_E_DM_NOTDOWNLOADED', 'the update has not been downloaded', $false, 'DownloadFailure')
+    '0x80246008' = @('WU_E_DM_FAILTOCONNECTTOBITS', 'the Background Intelligent Transfer Service could not be reached', $false, 'DownloadFailure')
+    '0x80070422' = @('ERROR_SERVICE_DISABLED', 'a required service is disabled', $false, 'NotReady')
+    '0x80070BC9' = @('ERROR_FAIL_REBOOT_REQUIRED', 'a restart is required before the update can be installed', $false, 'RebootRequired')
+    '0x80072EE2' = @('ERROR_INTERNET_TIMEOUT', 'the connection timed out', $false, 'TransientNetwork')
+    '0x80072EFD' = @('ERROR_INTERNET_CANNOT_CONNECT', 'the server could not be reached', $false, 'TransientNetwork')
+    '0x80072F8F' = @('ERROR_INTERNET_SECURE_FAILURE', 'the secure connection failed (check the date and time)', $false, 'TransientNetwork')
+    '0x80092004' = @('CRYPT_E_NOT_FOUND', 'a signature catalog entry was not found (catalog database)', $false, 'DownloadFailure')
+    '0x800F0922' = @('CBS_E_INSTALLERS_FAILED', 'the servicing stack could not apply the update', $false, 'InstallerFailure')
+    '0x800F081F' = @('CBS_E_SOURCE_MISSING', 'the servicing stack could not find source files (component store repair: DISM /RestoreHealth)', $false, 'InstallerFailure')
+    '0x80073701' = @('ERROR_SXS_ASSEMBLY_MISSING', 'a component the update needs is missing (component store repair: DISM /RestoreHealth)', $false, 'InstallerFailure')
+    '0x80073712' = @('ERROR_SXS_COMPONENT_STORE_CORRUPT', 'the component store is damaged (component store repair: DISM /RestoreHealth)', $false, 'InstallerFailure')
+    # .NET errors (facility 0x13) are raised by code, never by Windows Update's own result. Engine
+    # 2.0.0: up to 1.3.0 every 0x80131508 came from the engine itself (see the header); a .NET code
+    # in a per-update result would come from that update's own command-line installer.
+    '0x80131508' = @('COR_E_INDEXOUTOFRANGE', '.NET "index out of range" exception: raised by code, not a Windows Update result', $false, 'EngineException')
+    '0x80131509' = @('COR_E_INVALIDOPERATION', '.NET "invalid operation" exception: raised by code, not a Windows Update result', $false, 'EngineException')
+    '0x80004003' = @('E_POINTER', 'null reference raised by code, not a Windows Update result', $false, 'EngineException')
 }
+
+<#
+    Failure categories (engine 2.0.0). Every failure is recorded with exactly one:
+      EngineException     an exception in this engine's own PowerShell code around a WUA call
+      ComApiException     the WUA COM call itself raised an error (COMException, WU_E_* code)
+      NativeResultFailure Windows Update returned Failed/Aborted for the update (not otherwise known)
+      NotApplicable       Windows says the update does not apply (never retried)
+      Superseded          offered earlier, no longer offered and not installed (superseded or no
+                          longer applicable; WUA does not say which)
+      TransientNetwork    the network or the update service was temporarily unavailable
+      DownloadFailure     the download failed (BITS, download cache, catalog database)
+      InstallerFailure    the update's installer or the servicing stack failed
+      RebootRequired      Windows needs a restart before it can install it
+      ServicingBusy       another installation or servicing operation is running
+      NotReady            the Windows Update service is disabled, stopping or not initialised
+      SearchFailure       searching for updates failed
+      TechnicianRequired  Windows says a signed-in person is needed
+#>
+$script:Categories = @('EngineException', 'ComApiException', 'NativeResultFailure', 'NotApplicable', 'Superseded', 'TransientNetwork', 'DownloadFailure', 'InstallerFailure', 'RebootRequired', 'ServicingBusy', 'NotReady', 'SearchFailure', 'TechnicianRequired')
+
+# Categories whose repeated failures point at the data store / download cache, the only problems a
+# reset of SoftwareDistribution and catroot2 can fix.
+$script:ResetCategories = @('DownloadFailure')
+$script:ResetHResultPrefixes = @('0x80246', '0x80248')
 
 # ------------------------------------------------------------------------------------------------
 # Small helpers (time, waiting, JSON) - kept as functions so tests can replace them.
@@ -142,6 +210,86 @@ function Test-WduPermanentHResult {
     param([string] $Hex)
     $m = $script:HResults[$Hex]
     return [bool] ($m -and $m[2])
+}
+
+<#
+    Engine 2.0.0: one category for a failure.
+      Step       'download', 'install' or 'search'
+      Source     'engine' (an exception in this engine's call) or 'windowsUpdate' (WUA's own result)
+      Exception  the recorded exception (hashtable from ConvertFrom-WduError), if any
+#>
+function Get-WduCategory {
+    param([string] $Hex, [string] $Step = 'install', [string] $Source = 'windowsUpdate', $Exception = $null, [string] $Result = '')
+    if ($Source -eq 'engine') {
+        # A COMException carrying a WUA/Win32 code is the API's answer; any other .NET exception is ours.
+        $isCom = $Exception -is [System.Collections.IDictionary] -and [string] $Exception['type'] -match 'COMException$'
+        if (-not $isCom) { return 'EngineException' }
+        $m = $script:HResults[$Hex]
+        if ($m -and $m[3] -notin 'EngineException', 'InstallerFailure', 'NativeResultFailure') { return $m[3] }
+        if ($Step -eq 'search') { return 'SearchFailure' }
+        return 'ComApiException'
+    }
+    $m = $script:HResults[$Hex]
+    if ($m) {
+        # A .NET code in a per-update result comes from that update's own command-line installer.
+        if ($m[3] -eq 'EngineException') { return 'InstallerFailure' }
+        return $m[3]
+    }
+    if ($Step -eq 'search') { return 'SearchFailure' }
+    if ($Step -eq 'download') { return 'DownloadFailure' }
+    if ($Result -eq 'Aborted') { return 'TechnicianRequired' }
+    return 'NativeResultFailure'
+}
+
+<#
+    Engine 2.0.0: everything known about an exception, for the log and state.json: the operation
+    that was running, exception type, HRESULT, message, inner exceptions, script line and stack.
+#>
+function ConvertFrom-WduError {
+    param($ErrorRecord, [string] $Operation)
+    $ex = $ErrorRecord
+    $inv = $null
+    $stack = ''
+    if ($ErrorRecord -is [System.Management.Automation.ErrorRecord]) {
+        $ex = $ErrorRecord.Exception
+        $inv = $ErrorRecord.InvocationInfo
+        $stack = [string] $ErrorRecord.ScriptStackTrace
+    }
+    # PowerShell wraps exceptions raised by a COM property setter or method call; report the real one.
+    $root = $ex
+    $wrappers = @('System.Management.Automation.MethodInvocationException', 'System.Management.Automation.SetValueInvocationException',
+                  'System.Management.Automation.GetValueInvocationException', 'System.Reflection.TargetInvocationException', 'System.Management.Automation.RuntimeException')
+    while ($root -and $root.InnerException -and ($wrappers -contains $root.GetType().FullName)) { $root = $root.InnerException }
+    $chain = @()
+    $e = $ex
+    while ($e) { $chain += ('{0} ({1}): {2}' -f $e.GetType().FullName, (Format-WduHResult $e.HResult), $e.Message); $e = $e.InnerException }
+    [ordered]@{
+        operation  = $Operation
+        type       = $(if ($root) { $root.GetType().FullName } else { '' })
+        hresult    = $(if ($root) { Format-WduHResult $root.HResult } else { '' })
+        message    = $(if ($root) { [string] $root.Message } else { '' })
+        chain      = @($chain)
+        line       = $(if ($inv) { [int] $inv.ScriptLineNumber } else { 0 })
+        statement  = $(if ($inv -and $inv.Line) { ([string] $inv.Line).Trim() } else { '' })
+        script     = $(if ($inv -and $inv.ScriptName) { Split-Path -Leaf $inv.ScriptName } else { '' })
+        stack      = $stack
+        engineVersion = $script:EngineVersion
+        atUtc      = (Get-WduNow).ToString('o')
+    }
+}
+
+<# Identity of an exception for "the same failure again": operation, type and line. #>
+function Get-WduExceptionSignature {
+    param($Info)
+    if (-not $Info) { return '' }
+    '{0}|{1}|{2}' -f $Info['operation'], $Info['type'], $Info['line']
+}
+
+function Format-WduException {
+    param($Info)
+    if (-not $Info) { return '' }
+    $where = $(if ([int] $Info['line'] -gt 0) { " at $($Info['script']) line $($Info['line']): $($Info['statement'])" } else { '' })
+    "$($Info['operation']) raised $($Info['type']) $($Info['hresult']): $($Info['message'])$where"
 }
 
 function ConvertTo-WduHashtable {
@@ -181,34 +329,48 @@ function Read-WduJson {
 # Configuration, paths, logging, status
 # ------------------------------------------------------------------------------------------------
 
+# Every configuration value and its default (engine 2.0.0: also applied by Invoke-WduMain).
+$script:ConfigDefaults = @{
+    dataRoot             = 'C:\ProgramData\WindowsDeploymentBuilder'
+    taskPath             = '\WindowsDeploymentBuilder\'
+    taskName             = 'WindowsUpdate'
+    mutexName            = 'Global\WindowsDeploymentBuilder-WindowsUpdate'
+    drivers              = 'exclude'
+    featureUpdates       = 'skip'
+    optionalUpdates      = 'skip'
+    microsoftUpdate      = $false
+    maxReboots           = 10
+    maxAttemptsPerUpdate = 3
+    retryDelaySeconds    = 120
+    maxRuntimeHours      = 6
+    maxErrors            = 5
+    networkWaitMinutes   = 15
+    confirmationScans    = 1
+    confirmationDelaySeconds = 60
+    resetComponentsOnce  = $true
+    rebootWarningSeconds = 60
+    initialDelaySeconds  = 60
+    lockWaitMinutes      = 60
+    excludedKbs          = @()
+    # Engine 2.0.0
+    readinessSearchAttempts     = 4     # searches that may fail while the agent initialises
+    readinessSearchDelaySeconds = 90    # between them (bounded; readiness = a search succeeding)
+    readinessRestart            = $true # restart once before installing when a restart is already pending
+    maxEngineExceptions         = 2     # the same engine exception this often stops the stage
+    verifyDevices               = $true # pass D lists devices with problems
+    # Retry Windows Update (Invoke-WindowsUpdateRetry.ps1) runs the same engine with its own folder,
+    # marker and task, so the original deployment's records are never overwritten.
+    workFolder                  = 'Updates'              # below dataRoot
+    markerName                  = 'windows-update.done'  # in dataRoot\state
+    selection                   = 'configured'           # configured | normal (no drivers/optional) | drivers
+}
+
 function Get-WduConfig {
     param([string] $Path)
     if (-not $Path) { $Path = Join-Path $PSScriptRoot 'config.json' }
     $raw = Read-WduJson $Path
     if (-not $raw) { throw "Configuration file not found: $Path" }
-    $defaults = @{
-        dataRoot             = 'C:\ProgramData\WindowsDeploymentBuilder'
-        taskPath             = '\WindowsDeploymentBuilder\'
-        taskName             = 'WindowsUpdate'
-        mutexName            = 'Global\WindowsDeploymentBuilder-WindowsUpdate'
-        drivers              = 'exclude'
-        featureUpdates       = 'skip'
-        optionalUpdates      = 'skip'
-        microsoftUpdate      = $false
-        maxReboots           = 10
-        maxAttemptsPerUpdate = 3
-        retryDelaySeconds    = 120
-        maxRuntimeHours      = 6
-        maxErrors            = 5
-        networkWaitMinutes   = 15
-        confirmationScans    = 1
-        confirmationDelaySeconds = 60
-        resetComponentsOnce  = $true
-        rebootWarningSeconds = 60
-        initialDelaySeconds  = 60
-        lockWaitMinutes      = 60
-        excludedKbs          = @()
-    }
+    $defaults = $script:ConfigDefaults
     foreach ($k in @($defaults.Keys)) { if (-not $raw.ContainsKey($k)) { $raw[$k] = $defaults[$k] } }
     $raw.excludedKbs = @($raw.excludedKbs | Where-Object { $_ } | ForEach-Object { ([string] $_).ToUpperInvariant() })
     return $raw
@@ -216,7 +378,9 @@ function Get-WduConfig {
 
 function Get-WduPaths {
     param([hashtable] $Config)
-    $root = Join-Path $Config.dataRoot 'Updates'
+    $folder = $(if ($Config.ContainsKey('workFolder') -and $Config.workFolder) { [string] $Config.workFolder } else { 'Updates' })
+    $marker = $(if ($Config.ContainsKey('markerName') -and $Config.markerName) { [string] $Config.markerName } else { 'windows-update.done' })
+    $root = Join-Path $Config.dataRoot $folder
     @{
         Root     = $root
         Logs     = Join-Path $root 'logs'
@@ -225,7 +389,7 @@ function Get-WduPaths {
         Status   = Join-Path $root 'status.json'
         Result   = Join-Path $root 'result.json'
         MarkerDir = Join-Path $Config.dataRoot 'state'
-        Marker   = Join-Path (Join-Path $Config.dataRoot 'state') 'windows-update.done'
+        Marker   = Join-Path (Join-Path $Config.dataRoot 'state') $marker
     }
 }
 
@@ -299,6 +463,14 @@ function New-WduState {
         attempts        = @{}
         installed       = @()
         final           = $null
+        # Engine 2.0.0
+        readiness       = $null   # first-start readiness checks (Get-WduReadiness)
+        pass            = ''      # A, B, C or D: the pass the last installation belonged to
+        passes          = @()     # history: { pass, startedUtc, updates }
+        engineExceptions = @()    # every exception in the engine's own calls, with line and stack
+        offered         = @{}     # every update ever offered: id -> { title, kbs, kind, pass, firstSeenUtc }
+        restarts        = @()     # restart history: { atUtc, reason, pass }
+        stopReason      = ''      # why processing stopped
     }
 }
 
@@ -314,7 +486,9 @@ function Read-WduState {
     if (-not $s) { return $fresh }
     foreach ($k in @($fresh.Keys)) { if (-not $s.ContainsKey($k)) { $s[$k] = $fresh[$k] } }
     if ($null -eq $s.attempts) { $s.attempts = @{} }
+    if ($null -eq $s.offered -or $s.offered -isnot [hashtable]) { $s.offered = @{} }
     $s.installed = @($s.installed | Where-Object { $_ })
+    foreach ($k in 'passes', 'engineExceptions', 'restarts') { $s[$k] = @($s[$k] | Where-Object { $_ }) }
     return $s
 }
 
@@ -356,12 +530,24 @@ function Get-WduAvailableUpdates {
         $kbs = @()
         foreach ($k in $u.KBArticleIDs) { $kbs += "KB$k" }
         $title = [string] $u.Title
+        $isDriver = ([int] $u.Type -eq 2)
+        # Engine 2.0.0: which device a driver update is for (IWindowsDriverUpdate), when Windows says.
+        $driver = $null
+        if ($isDriver) {
+            $driver = [ordered]@{}
+            foreach ($p in 'DriverHardwareID', 'DriverModel', 'DriverManufacturer', 'DriverClass', 'DriverProvider') {
+                try { $v = $u.$p; if ($null -ne $v -and "$v") { $driver[$p.Substring(6, 1).ToLowerInvariant() + $p.Substring(7)] = [string] $v } } catch { }
+            }
+            try { if ($u.DriverVerDate) { $driver.verDate = ([DateTime] $u.DriverVerDate).ToString('yyyy-MM-dd') } } catch { }
+        }
         $list += @{
             Id             = [string] $u.Identity.UpdateID
             Revision       = [int] $u.Identity.RevisionNumber
             Title          = $title
             Kbs            = $kbs
-            IsDriver       = ([int] $u.Type -eq 2)
+            IsDriver       = $isDriver
+            Driver         = $driver
+            Categories     = $cats
             # A feature update by category, or an enablement package that switches the Windows version.
             IsUpgrade      = ($cats -contains $script:UpgradeCategoryId) -or (Test-WduFeatureTitle $title)
             IsInsider      = ($title -match '(?i)\bInsider Preview\b')
@@ -381,19 +567,184 @@ function Test-WduFeatureTitle {
     return ($Title -match '(?i)^\s*(Feature update to Windows|Upgrade to Windows)\b')
 }
 
+<#
+    Engine 2.0.0: the pass an update belongs to.
+      A  servicing prerequisites installed on their own first: servicing stack updates and the
+         Microsoft Defender antimalware platform (KB4052623, needed before security intelligence)
+      B  normal updates: cumulative, security, .NET, Defender intelligence, MSRT, other software
+      C  optional updates (BrowseOnly: optional cumulative previews) and every driver
+#>
+function Get-WduPass {
+    param([hashtable] $U)
+    if ($U.IsDriver -or $U.IsOptional) { return 'C' }
+    $kbs = @($U.Kbs)
+    if ($U.Title -match '(?i)\bServicing Stack Update\b' -or $U.Title -match '(?i)antimalware platform' -or $kbs -contains 'KB4052623') { return 'A' }
+    return 'B'
+}
+
+function Get-WduPassName {
+    param([string] $Pass)
+    switch ($Pass) { 'A' { 'Pass A - servicing prerequisites' } 'B' { 'Pass B - normal updates' } 'C' { 'Pass C - optional updates and drivers' } 'D' { 'Pass D - final verification' } default { '' } }
+}
+
+<# Why an update is a prerequisite (pass A), for the readiness record. #>
+function Get-WduPrerequisiteReason {
+    param([hashtable] $U)
+    if ($U.Title -match '(?i)\bServicing Stack Update\b') { return 'servicing stack update: installed before other updates' }
+    return 'Microsoft Defender antimalware platform: installed before security intelligence updates'
+}
+
+<# Start type and status of the services Windows Update needs (read-only). #>
+function Get-WduServiceStates {
+    $out = [ordered]@{}
+    foreach ($n in 'wuauserv', 'bits', 'cryptsvc', 'TrustedInstaller') {
+        try {
+            $s = Get-Service -Name $n -ErrorAction Stop
+            $out[$n] = [ordered]@{ status = [string] $s.Status; startType = $(try { [string] $s.StartType } catch { 'Unknown' }) }
+        } catch { $out[$n] = [ordered]@{ status = 'Missing'; startType = 'Missing' } }
+    }
+    $out
+}
+
+<# IAutomaticUpdates2.ServiceEnabled: whether the components Windows Update needs are available. #>
+function Test-WduAgentEnabled {
+    try { return [bool] (New-Object -ComObject 'Microsoft.Update.AutoUpdate').ServiceEnabled } catch { return $null }
+}
+
+<# Devices Device Manager reports a problem for (ConfigManagerErrorCode other than 0), read-only. #>
+function Get-WduDeviceProblems {
+    $list = @()
+    try {
+        foreach ($d in @(Get-CimInstance -ClassName Win32_PnPEntity -ErrorAction Stop)) {
+            $code = 0
+            try { $code = [int] $d.ConfigManagerErrorCode } catch { }
+            if ($code -ne 0) { $list += [ordered]@{ name = [string] $d.Name; deviceId = [string] $d.DeviceID; problemCode = $code; hardwareIds = @($d.HardwareID | Where-Object { $_ }) } }
+        }
+    } catch { Write-WduLog "Device check failed: $($_.Exception.Message)" 'WARN' }
+    return , $list
+}
+
+<#
+    Engine 2.0.0: records one exception raised in the engine's own call. Returns $true when the
+    same exception (operation, type, line) has now happened maxEngineExceptions times: it is
+    deterministic and the stage stops instead of looping.
+#>
+function Register-WduEngineException {
+    param([hashtable] $State, $Info, [object[]] $Updates, [hashtable] $Config)
+    $sig = Get-WduExceptionSignature $Info
+    $entry = [ordered]@{}
+    foreach ($k in $Info.Keys) { $entry[$k] = $Info[$k] }
+    $entry.signature = $sig
+    $entry.category = 'EngineException'
+    $entry.updates = @($Updates | ForEach-Object { Get-WduLabel $_ })
+    $entry.pass = $State.pass
+    $State.engineExceptions = @(@($State.engineExceptions) + @($entry) | Select-Object -Last 50)
+    $same = @($State.engineExceptions | Where-Object { $_ -and [string] $_['signature'] -eq $sig }).Count
+    $msg = "Engine exception ($same of at most $($Config.maxEngineExceptions)): $(Format-WduException $Info). This is an error in the update engine's own call, not an update installation failure; it is recorded once for $(@($Updates).Count) update(s)."
+    $script:Activity.lastError = $msg
+    $script:Activity.lastErrorUtc = (Get-WduNow).ToString('o')
+    Write-WduLog "  $msg" 'ERROR'
+    Add-WdbActivity $Config.dataRoot 'windowsUpdate' $msg 'error'
+    return ($same -ge [int] $Config.maxEngineExceptions)
+}
+
+<#
+    Engine 2.0.0: a reset of SoftwareDistribution and catroot2 is done only when the failures point
+    at what it repairs: the download cache / update data store (WU_E_DM_*, WU_E_DS_*) or the
+    signature catalog database. Never for engine exceptions, network, not-applicable or busy.
+#>
+function Test-WduResetWarranted {
+    param([string[]] $HResults, [string[]] $Categories)
+    foreach ($h in @($HResults)) {
+        if (-not $h) { continue }
+        foreach ($p in $script:ResetHResultPrefixes) { if ($h.StartsWith($p, [StringComparison]::OrdinalIgnoreCase)) { return $true } }
+        if ($h -eq '0x80092004') { return $true }
+    }
+    foreach ($c in @($Categories)) { if ($script:ResetCategories -contains $c) { return $true } }
+    return $false
+}
+
 function ConvertTo-WduResultCode {
     param([int] $Code)
     switch ($Code) { 0 { 'NotStarted' } 1 { 'InProgress' } 2 { 'Succeeded' } 3 { 'SucceededWithErrors' } 4 { 'Failed' } 5 { 'Aborted' } default { "Unknown$Code" } }
 }
 
+<#
+    Builds the Microsoft.Update.UpdateColl for a download or installation.
+
+    Engine 2.0.0: the collection is returned with the unary comma. Without it PowerShell enumerates
+    the COM collection on output and the caller receives the bare IUpdate (one update), Object[]
+    (several) or $null (none); assigning that to IUpdateDownloader.Updates / IUpdateInstaller.Updates
+    throws IndexOutOfRangeException 0x80131508 inside PowerShell's COM binder. That was the field
+    failure of engines 1.0.0-1.3.0 (header). Do not remove the comma.
+#>
 function New-WduCollection {
     param([object[]] $Updates)
     $coll = New-Object -ComObject 'Microsoft.Update.UpdateColl'
-    foreach ($u in $Updates) {
+    foreach ($u in @($Updates)) {
         if (-not $u.Native.EulaAccepted) { $u.Native.AcceptEula() }
         [void] $coll.Add($u.Native)
     }
-    $coll
+    return , $coll
+}
+
+<#
+    Engine 2.0.0: proves that $Collection is a real update collection holding $Expected updates
+    before it is handed to WUA. Anything else is an engine defect and is reported as one, with the
+    type that was received, instead of surfacing as an IndexOutOfRangeException from the setter.
+#>
+function Assert-WduCollection {
+    param($Collection, [int] $Expected)
+    if ($null -eq $Collection) { throw (New-Object System.InvalidOperationException("Engine defect: the update collection is null (expected $Expected update(s)).")) }
+    if ($Collection -is [array]) { throw (New-Object System.InvalidOperationException("Engine defect: the update collection was unrolled into $($Collection.GetType().FullName) with $(@($Collection).Count) item(s).")) }
+    $count = $null
+    try { $count = [int] $Collection.Count } catch { }
+    $isColl = $false
+    try { $isColl = [bool] ($Collection.PSObject.Methods['Add'] -and $Collection.PSObject.Methods['Item'] -and $null -ne $count) } catch { }
+    if (-not $isColl) { throw (New-Object System.InvalidOperationException("Engine defect: expected an update collection, received $($Collection.GetType().FullName).")) }
+    if ($count -ne $Expected) { throw (New-Object System.InvalidOperationException("Engine defect: the update collection holds $count update(s), expected $Expected.")) }
+}
+
+<# Update identity of item $Index of a WUA update collection (results are mapped by identity, not position). #>
+function Get-WduCollectionId {
+    param($Collection, [int] $Index)
+    [string] $Collection.Item($Index).Identity.UpdateID
+}
+
+<#
+    Engine 2.0.0: runs one named WUA operation. An exception is recorded with everything known
+    about it (ConvertFrom-WduError) and rethrown as the operation's failure; the session is renewed.
+#>
+function Invoke-WduOperation {
+    param([string] $Operation, [scriptblock] $Action)
+    try {
+        $value = & $Action
+        # The comma keeps a collection (or any enumerable COM object) intact through the return.
+        return , $value
+    } catch {
+        $info = ConvertFrom-WduError $_ $Operation
+        $script:LastWduException = $info
+        Write-WduLog ("{0}`r`n    chain: {1}`r`n    stack: {2}" -f (Format-WduException $info), ($info.chain -join ' <- '), ($info.stack -replace "`r?`n", ' | ')) 'ERROR'
+        $script:Session = $null
+        throw
+    }
+}
+
+<# Per-update results of a download or installation, keyed by update identity. #>
+function Read-WduResults {
+    param($Collection, $OperationResult, [object[]] $Updates)
+    $map = @{}
+    $n = [int] $Collection.Count
+    for ($i = 0; $i -lt $n; $i++) {
+        $ur = $OperationResult.GetUpdateResult($i)
+        $id = Get-WduCollectionId $Collection $i
+        $map[$id] = @{ Result = (ConvertTo-WduResultCode $ur.ResultCode); HResult = $ur.HResult }
+    }
+    foreach ($u in @($Updates)) {
+        # Never invent a result: an update without one is reported as missing.
+        if (-not $map.ContainsKey($u.Id)) { $map[$u.Id] = @{ Result = 'Missing'; HResult = $null; Source = 'engine'; Category = 'EngineException'; Exception = 'Windows Update returned no result for this update' } }
+    }
+    $map
 }
 
 function Invoke-WduDownload {
@@ -402,21 +753,20 @@ function Invoke-WduDownload {
     $pending = @($Updates | Where-Object { -not $_.IsDownloaded })
     foreach ($u in $Updates) { if ($u.IsDownloaded) { $out[$u.Id] = @{ Result = 'Succeeded'; HResult = 0 } } }
     if ($pending.Count -eq 0) { return $out }
+    $script:LastWduException = $null
     try {
-        $coll = New-WduCollection $pending
-        $dl = (Get-WduSession).CreateUpdateDownloader()
-        $dl.Updates = $coll
-        $r = $dl.Download()
-        for ($i = 0; $i -lt $pending.Count; $i++) {
-            $ur = $r.GetUpdateResult($i)
-            $out[$pending[$i].Id] = @{ Result = (ConvertTo-WduResultCode $ur.ResultCode); HResult = $ur.HResult }
-        }
+        $coll = Invoke-WduOperation 'download: build update collection' { New-WduCollection $pending }
+        $null = Invoke-WduOperation 'download: verify update collection' { Assert-WduCollection $coll $pending.Count }
+        $dl = Invoke-WduOperation 'download: create downloader' { (Get-WduSession).CreateUpdateDownloader() }
+        $null = Invoke-WduOperation 'download: assign updates to downloader' { $dl.Updates = $coll }
+        $r = Invoke-WduOperation 'download: IUpdateDownloader.Download' { $dl.Download() }
+        $res = Invoke-WduOperation 'download: read per-update results' { Read-WduResults $coll $r $pending }
+        foreach ($k in $res.Keys) { $out[$k] = $res[$k] }
     } catch {
-        # Engine 1.3.0: the call itself failed (not a per-update result): kept apart, with its message,
-        # and the next attempt uses a new Windows Update session.
-        $err = $_
-        foreach ($u in $pending) { $out[$u.Id] = @{ Result = 'Failed'; HResult = $err.Exception.HResult; Source = 'engine'; Exception = "$($err.Exception.GetType().Name): $($err.Exception.Message)" } }
-        Write-WduLog "Download call failed: $($err.Exception.GetType().FullName): $($err.Exception.Message)`r`n$($err.ScriptStackTrace)" 'ERROR'
+        # The call itself failed (not a per-update result): one engine/API error for the operation.
+        $info = $script:LastWduException
+        if (-not $info) { $info = ConvertFrom-WduError $_ 'download' }
+        foreach ($u in $pending) { $out[$u.Id] = @{ Result = 'Failed'; HResult = $_.Exception.HResult; Source = 'engine'; Exception = (Format-WduException $info); ExceptionInfo = $info } }
         $script:Session = $null
     }
     return $out
@@ -425,21 +775,21 @@ function Invoke-WduDownload {
 function Invoke-WduInstall {
     param([object[]] $Updates)
     $out = @{ RebootRequired = $false; Results = @{} }
+    $script:LastWduException = $null
     try {
-        $coll = New-WduCollection $Updates
-        $inst = (Get-WduSession).CreateUpdateInstaller()
+        $coll = Invoke-WduOperation 'install: build update collection' { New-WduCollection $Updates }
+        $null = Invoke-WduOperation 'install: verify update collection' { Assert-WduCollection $coll @($Updates).Count }
+        $inst = Invoke-WduOperation 'install: create installer' { (Get-WduSession).CreateUpdateInstaller() }
         try { $inst.ForceQuiet = $true } catch { }
-        $inst.Updates = $coll
-        $r = $inst.Install()
+        $null = Invoke-WduOperation 'install: assign updates to installer' { $inst.Updates = $coll }
+        $r = Invoke-WduOperation 'install: IUpdateInstaller.Install' { $inst.Install() }
         $out.RebootRequired = [bool] $r.RebootRequired
-        for ($i = 0; $i -lt $Updates.Count; $i++) {
-            $ur = $r.GetUpdateResult($i)
-            $out.Results[$Updates[$i].Id] = @{ Result = (ConvertTo-WduResultCode $ur.ResultCode); HResult = $ur.HResult }
-        }
+        $out.Results = Invoke-WduOperation 'install: read per-update results' { Read-WduResults $coll $r $Updates }
     } catch {
-        $err = $_
-        foreach ($u in $Updates) { $out.Results[$u.Id] = @{ Result = 'Failed'; HResult = $err.Exception.HResult; Source = 'engine'; Exception = "$($err.Exception.GetType().Name): $($err.Exception.Message)" } }
-        Write-WduLog "Install call failed: $($err.Exception.GetType().FullName): $($err.Exception.Message)`r`n$($err.ScriptStackTrace)" 'ERROR'
+        $info = $script:LastWduException
+        if (-not $info) { $info = ConvertFrom-WduError $_ 'install' }
+        foreach ($u in $Updates) { $out.Results[$u.Id] = @{ Result = 'Failed'; HResult = $_.Exception.HResult; Source = 'engine'; Exception = (Format-WduException $info); ExceptionInfo = $info } }
+        $out.CallFailed = $true
         $script:Session = $null
     }
     return $out
@@ -658,6 +1008,10 @@ function Get-WduSkipReason {
     if ($Update.IsUpgrade -and $Config.featureUpdates -ne 'install') { return 'feature update (policy: skip)' }
     if ($Update.IsDriver -and $Config.drivers -ne 'include') { return 'driver (policy: exclude)' }
     if ($Update.IsOptional -and $Config.optionalUpdates -ne 'install') { return 'optional update (policy: skip)' }
+    # Retry Windows Update: only the chosen kind is retried; the rest stays for another run.
+    $sel = $(if ($Config.ContainsKey('selection')) { [string] $Config.selection } else { 'configured' })
+    if ($sel -eq 'normal' -and ($Update.IsDriver -or $Update.IsOptional)) { return 'not selected for this retry (normal updates only)' }
+    if ($sel -eq 'drivers' -and -not $Update.IsDriver) { return 'not selected for this retry (drivers only)' }
     foreach ($kb in $Update.Kbs) { if ($Config.excludedKbs -contains $kb.ToUpperInvariant()) { return "excluded by configuration ($kb)" } }
     $a = $State.attempts[$Update.Id]
     if ($a -and $a['interaction']) { return 'gave up: Windows reported that it needs a signed-in person to install it' }
@@ -699,7 +1053,8 @@ function Get-WduPlan {
             $plan.Install += $u
             continue
         }
-        $entry = @{ id = $u.Id; title = $u.Title; kbs = @($u.Kbs); reason = $reason; kind = (Get-WduKind $u) }
+        $entry = @{ id = $u.Id; title = $u.Title; kbs = @($u.Kbs); reason = $reason; kind = (Get-WduKind $u); pass = (Get-WduPass $u) }
+        if ($u.ContainsKey('Driver') -and $u.Driver) { $entry.device = $u.Driver }
         if ($reason -like 'gave up*') {
             $a = $State.attempts[$u.Id]
             $entry.attempts = $a.count; $entry.lastResult = $a.lastResult; $entry.lastHResult = $a.lastHResult
@@ -708,10 +1063,20 @@ function Get-WduPlan {
             $entry.errorSource = $(if ($a['lastErrorSource']) { [string] $a['lastErrorSource'] } else { 'windowsUpdate' })
             if ($a['lastException']) { $entry.exception = [string] $a['lastException'] }
             if ($a['restartChance'] -eq 'used') { $entry.retriedAfterRestart = $true }
+            $entry.category = $(if ($a['lastCategory']) { [string] $a['lastCategory'] } else { Get-WduCategory ([string] $a.lastHResult) 'install' $entry.errorSource })
             if ($a['interaction']) { $plan.Interaction += $entry } else { $plan.GaveUp += $entry }
         } else {
             $plan.Skipped += $entry
         }
+    }
+    # Engine 2.0.0: install one pass at a time, in order (A prerequisites, B normal, C optional and
+    # drivers). The others wait for the next scan, which follows any restart the pass needs.
+    $plan.Pass = ''
+    $plan.Later = @()
+    if (@($plan.Install).Count) {
+        $plan.Pass = @($plan.Install | ForEach-Object { Get-WduPass $_ } | Sort-Object)[0]
+        $plan.Later = @($plan.Install | Where-Object { (Get-WduPass $_) -ne $plan.Pass })
+        $plan.Install = @($plan.Install | Where-Object { (Get-WduPass $_) -eq $plan.Pass })
     }
     $plan
 }
@@ -734,10 +1099,13 @@ function Register-WduFailure {
     # Engine 1.3.0: who reported the error: Windows Update for this update, or an exception in the call.
     $A.lastErrorSource = $(if ($Raw -is [hashtable] -and $Raw['Source'] -eq 'engine') { 'engine' } else { 'windowsUpdate' })
     $A.lastException = $(if ($Raw -is [hashtable] -and $Raw['Exception']) { [string] $Raw['Exception'] } else { '' })
+    # Engine 2.0.0: one category per failure (Get-WduCategory).
+    $A.lastCategory = Get-WduCategory $hex $Step $A.lastErrorSource $(if ($Raw -is [hashtable]) { $Raw['ExceptionInfo'] } else { $null }) $Result
+    if ($A.lastCategory -eq 'TechnicianRequired' -and -not $A['interaction'] -and $hex -eq '0x80240020') { $A.interaction = $true }
     $max = [int] $Config.maxAttemptsPerUpdate
     $what = $(if ($Step -eq 'download') { 'download' } else { 'install' })
     $why = $(if ($hex) { Get-WduHResultText $hex } else { $Result })
-    if ($A.lastErrorSource -eq 'engine') { $why = "the Windows Update call failed in the engine ($why; $($A.lastException))" }
+    if ($A.lastErrorSource -eq 'engine') { $why = "the Windows Update call failed ($($A.lastCategory): $why; $($A.lastException))" } else { $why = "$why [$($A.lastCategory)]" }
     $label = Get-WduLabel $U
     # Engine 1.3.0: an update failing while Windows waits for a restart often installs after it.
     # Its last attempt is not used up now: it is retried once after the restart.
@@ -772,6 +1140,8 @@ function Register-WduFailure {
 
 function Complete-Wdu {
     param([hashtable] $Config, [hashtable] $Paths, [hashtable] $State, [string] $Status, [string] $Reason, $Plan = $null)
+    # Engine 2.0.0: a plan built for one purpose (readiness, engine stop) may lack the lists.
+    if ($Plan -is [hashtable]) { foreach ($k in 'GaveUp', 'Skipped', 'Interaction', 'AfterRestart') { if (-not $Plan.ContainsKey($k) -or $null -eq $Plan[$k]) { $Plan[$k] = @() } } }
     $now = (Get-WduNow).ToString('o')
     $result = [ordered]@{
         status        = $Status
@@ -797,6 +1167,22 @@ function Complete-Wdu {
         }
         policy        = [ordered]@{ optionalUpdates = $Config.optionalUpdates; drivers = $Config.drivers; featureUpdates = $Config.featureUpdates; maxAttemptsPerUpdate = $Config.maxAttemptsPerUpdate }
     }
+    # Engine 2.0.0: why processing stopped, readiness, passes, restarts, engine exceptions, verification.
+    $State.stopReason = $Reason
+    $result.stopReason = $Reason
+    $result.readiness = $State.readiness
+    $result.passes = @($State.passes)
+    $result.restarts = @($State.restarts)
+    $result.engineExceptions = @($State.engineExceptions | ForEach-Object { $e = [ordered]@{}; foreach ($k in $_.Keys) { if ($k -ne 'stack') { $e[$k] = $_[$k] } }; $e })
+    $result.counts.engineExceptions = @($State.engineExceptions).Count
+    $byCategory = [ordered]@{}
+    foreach ($f in $result.failed) { $c = $(if ($f -is [System.Collections.IDictionary] -and $f['category']) { [string] $f['category'] } else { 'NativeResultFailure' }); $byCategory[$c] = 1 + [int] $byCategory[$c] }
+    $result.failedByCategory = $byCategory
+    $result.drivers = @($State.installed | Where-Object { $_ -is [hashtable] -and $_['driver'] } | ForEach-Object { [ordered]@{ title = $_.title; device = $_['device']; result = $_.result } })
+    if ($Plan -and $Plan.ContainsKey('NotAttempted')) { $result.notAttempted = @($Plan.NotAttempted) }
+    if ($Plan -and $Plan.ContainsKey('Verification')) { $result.verification = $Plan.Verification }
+    if ($Plan -and $Plan.ContainsKey('Category')) { $result.category = $Plan.Category }
+    if ($Plan -and $Plan.ContainsKey('TechnicianAction')) { $result.technicianAction = $Plan.TechnicianAction }
     Write-WduJson $Paths.Result $result
     $State.final = $Status
     Save-WduState $State $Paths
@@ -806,7 +1192,8 @@ function Complete-Wdu {
     }
     $level = switch ($Status) { 'Succeeded' { 'INFO' } 'CompletedWithFailures' { 'WARN' } 'CompletedWithFollowUp' { 'WARN' } default { 'ERROR' } }
     Write-WduLog ("FINISHED: {0}. {1} Installed {2} (optional {3}, drivers {4}), failed {5}, need a person {6}, skipped {7}, reboots {8}." -f $Status, $Reason, @($result.installed).Count, $result.counts.installedOptional, $result.counts.installedDrivers, @($result.failed).Count, @($result.requiresInteraction).Count, @($result.skipped).Count, $State.reboots) $level
-    foreach ($f in $result.failed) { Write-WduLog ("  FAILED   {0} {1} ({2} attempts, last {3} {4})" -f ($f.kbs -join ','), $f.title, $f.attempts, $f.lastResult, (Get-WduHResultText ([string] $f.lastHResult))) 'WARN' }
+    foreach ($f in $result.failed) { Write-WduLog ("  FAILED   {0} {1} ({2} attempts, last {3} {4}) [{5}]" -f ($f.kbs -join ','), $f.title, $f.attempts, $f.lastResult, (Get-WduHResultText ([string] $f.lastHResult)), $f['category']) 'WARN' }
+    foreach ($x in @($State.engineExceptions)) { Write-WduLog ("  ENGINE   {0}" -f (Format-WduException $x)) 'WARN' }
     foreach ($f in $result.requiresInteraction) { Write-WduLog ("  PERSON   {0} {1}: {2}" -f ($f.kbs -join ','), $f.title, $f.reason) 'WARN' }
     foreach ($s in $result.skipped) { Write-WduLog ("  SKIPPED  {0} {1}: {2}" -f ($s.kbs -join ','), $s.title, $s.reason) }
     $eventId = switch ($Status) { 'Succeeded' { 1100 } 'CompletedWithFailures' { 1101 } 'CompletedWithFollowUp' { 1104 } 'Failed' { 1102 } default { 1103 } }
@@ -832,6 +1219,7 @@ function Request-WduReboot {
     }
     try {
         $State.reboots = [int] $State.reboots + 1
+        $State.restarts = @(@($State.restarts) + @([ordered]@{ atUtc = (Get-WduNow).ToString('o'); reason = $Reason; pass = $State.pass; number = $State.reboots }))
         Save-WduState $State $Paths
         Write-WduLog "Restart $($State.reboots)/$($Config.maxReboots): $Reason. Resuming after boot."
         Set-WduStatus 'Rebooting' $Reason $State
@@ -856,6 +1244,90 @@ function Test-WduDeadline {
 # Main loop
 # ------------------------------------------------------------------------------------------------
 
+<#
+    Engine 2.0.0: first-start readiness. Checks what can be checked without waiting (services,
+    agent, pending restart); the proof that Windows Update is ready is the first successful search
+    in the main loop (bounded by readinessSearchAttempts), never an arbitrary wait. Returns 'Ready'
+    or the outcome that ends this start (a readiness restart, or a final state).
+#>
+function Invoke-WduReadiness {
+    param([hashtable] $Config, [hashtable] $Paths, [hashtable] $State)
+    if (-not $State.readiness) {
+        $State.readiness = [ordered]@{ startedUtc = (Get-WduNow).ToString('o'); status = 'Checking'; services = $null; agentEnabled = $null
+            rebootPendingAtStart = $null; restartDone = $false; installerBusySeconds = 0; searchSucceeded = $false; searchAttempts = 0
+            lastSearchError = ''; prerequisites = @(); bootstrapNeeded = $null; readyUtc = $null }
+    }
+    $r = $State.readiness
+    if ($r['status'] -eq 'Ready') { return 'Ready' }
+    Set-WduStatus 'CheckingReadiness' 'Checking that Windows Update is ready (services, pending restart, first search).' $State
+    $r.services = Get-WduServiceStates
+    $r.agentEnabled = Test-WduAgentEnabled
+    foreach ($n in 'wuauserv', 'bits') {
+        $svc = $r.services[$n]
+        if ($svc -and ($svc['startType'] -eq 'Disabled' -or $svc['status'] -eq 'Missing')) {
+            $r.status = 'NotReady'
+            Save-WduState $State $Paths
+            $plan = @{ Category = 'NotReady'; TechnicianAction = "The $n service is $($svc['startType']). Set it back to Manual (the Windows default) or remove the policy or tool that disabled it, then run Retry Windows Update." }
+            return Complete-Wdu $Config $Paths $State 'Failed' "Windows Update cannot run: the $n service is $($svc['startType'])." $plan
+        }
+    }
+    $pending = [bool] (Test-WduRebootPending)
+    if ($null -eq $r['rebootPendingAtStart']) { $r.rebootPendingAtStart = $pending }
+    if ($pending -and $Config.readinessRestart -and -not $r['restartDone'] -and @($State.installed).Count -eq 0) {
+        $r.restartDone = $true
+        Save-WduState $State $Paths
+        Write-WduLog 'Readiness: Windows already has a restart pending; restarting once before installing anything.'
+        return Request-WduReboot $Config $Paths $State 'a restart was already pending before updating (readiness check)'
+    }
+    $r.status = 'WaitingForSearch'
+    Save-WduState $State $Paths
+    return 'Ready'
+}
+
+<#
+    Engine 2.0.0, pass D: what the final search shows. Installed updates must no longer be offered;
+    updates offered earlier that are neither offered nor installed by this engine are reported as no
+    longer offered (WUA does not say whether they were superseded, became inapplicable, or were
+    installed by Windows' own automatic updates); devices with problems are listed.
+#>
+function Get-WduVerification {
+    param([hashtable] $State, [object[]] $Updates, [hashtable] $Config)
+    $now = @{}
+    foreach ($u in @($Updates)) { $now[$u.Id] = $u }
+    $installedIds = @($State.installed | Where-Object { $_ -is [hashtable] } | ForEach-Object { [string] $_['id'] })
+    $still = @($State.installed | Where-Object { $_ -is [hashtable] -and $now.ContainsKey([string] $_['id']) } | ForEach-Object { [ordered]@{ title = $_['title']; kbs = @($_['kbs']) } })
+    $gone = @()
+    foreach ($id in @($State.offered.Keys)) {
+        if ($now.ContainsKey($id) -or $installedIds -contains $id) { continue }
+        $o = $State.offered[$id]
+        $a = $State.attempts[$id]
+        $gone += [ordered]@{ title = $o['title']; kbs = @($o['kbs']); kind = $o['kind']; category = 'Superseded'; attempted = [bool] $a
+            reason = 'offered earlier, no longer offered and not installed by this engine (superseded, no longer applicable, or installed by Windows itself)' }
+    }
+    $devices = @()
+    if ($Config.verifyDevices) { $devices = @(Get-WduDeviceProblems) }
+    [ordered]@{
+        atUtc = (Get-WduNow).ToString('o')
+        remainingOffered = @($Updates).Count
+        installedStillOffered = @($still)
+        noLongerOffered = @($gone)
+        rebootPending = [bool] (Test-WduRebootPending)
+        devicesWithProblems = @($devices)
+    }
+}
+
+<# Ends the stage after a deterministic engine exception (never loops, never resets components). #>
+function Stop-WduForEngineException {
+    param([hashtable] $Config, [hashtable] $Paths, [hashtable] $State, [hashtable] $Plan)
+    $last = @($State.engineExceptions)[-1]
+    $n = @($State.engineExceptions | Where-Object { $_ -and [string] $_['signature'] -eq [string] $last['signature'] }).Count
+    $installedIds = @($State.installed | Where-Object { $_ -is [hashtable] } | ForEach-Object { [string] $_['id'] })
+    $Plan.NotAttempted = @(@($Plan.Install) + @($Plan.Later) | Where-Object { $_ -and $installedIds -notcontains $_.Id } | ForEach-Object { Get-WduLabel $_ })
+    $Plan.Category = 'EngineException'
+    $Plan.TechnicianAction = "The update engine stopped because the same exception happened $n times ($(Format-WduException $last)). It is an error in the engine's own call, so the updates were not reported as failed installations and Windows Update components were not reset. Install the remaining updates from Settings > Windows Update, or run Retry Windows Update with a corrected engine; send $($Paths.Result) and $($Paths.Log) with the report."
+    return Complete-Wdu $Config $Paths $State 'Failed' "Stopped after the same engine exception $n times: $(Format-WduException $last). $(@($Plan.NotAttempted).Count) update(s) not attempted." $Plan
+}
+
 function Invoke-WduRun {
     param([hashtable] $Config, [hashtable] $Paths)
     $State = Read-WduState $Paths
@@ -873,6 +1345,7 @@ function Invoke-WduRun {
     if ($first) {
         Write-WduEvent 1000 'Windows Update automation started.'
         Write-WduLog ("Policy: drivers={0}, feature updates={1}, optional={2}, Microsoft Update={3}; limits: {4} reboots, {5} attempts/update, {6} h." -f $Config.drivers, $Config.featureUpdates, $Config.optionalUpdates, $Config.microsoftUpdate, $Config.maxReboots, $Config.maxAttemptsPerUpdate, $Config.maxRuntimeHours)
+        # Lets the first sign-in settle. Not readiness: readiness is checked below.
         Wait-Wdu ([int] $Config.initialDelaySeconds)
     }
 
@@ -904,11 +1377,16 @@ function Invoke-WduRun {
     if (-not $State.everOnline) { $State.everOnline = $true; Save-WduState $State $Paths }
     Write-WduLog 'Network available.'
 
+    # Engine 2.0.0: readiness (services, pending restart); the first successful search completes it.
+    $ready = Invoke-WduReadiness $Config $Paths $State
+    if ($ready -ne 'Ready') { return $ready }
+
     # Another update operation (for example Windows' own automatic updates) may be installing.
     for ($i = 0; $i -lt 60 -and (Test-WduInstallerBusy); $i++) {
         if ($i -eq 0) { Write-WduLog 'Windows Update installer is busy; waiting (max 30 min).' }
         Set-WduStatus 'WaitingForInstaller' 'Windows is already installing updates (for example its own automatic updates); waiting for it to finish.' $State
         Wait-Wdu 30
+        if ($State.readiness) { $State.readiness.installerBusySeconds = [int] $State.readiness['installerBusySeconds'] + 30 }
     }
 
     $emptyScans = 0
@@ -916,30 +1394,62 @@ function Invoke-WduRun {
     for ($pass = 1; $pass -le 50; $pass++) {
         if (Test-WduDeadline $Config $State) { return Complete-Wdu $Config $Paths $State 'Failed' "Runtime limit ($($Config.maxRuntimeHours) h) reached." }
 
-        Set-WduStatus 'Scanning' "Pass $pass" $State
+        $initialising = [bool] ($State.readiness -and -not $State.readiness['searchSucceeded'])
+        Set-WduStatus 'Scanning' $(if ($initialising) { "Readiness: first search for updates (attempt $([int] $State.readiness['searchAttempts'] + 1))" } else { "Search $pass" }) $State
         Write-WduLog "Scan pass $pass."
+        $script:LastWduException = $null
+        if ($initialising) { $State.readiness.searchAttempts = [int] $State.readiness['searchAttempts'] + 1 }
         try {
-            $updates = Get-WduAvailableUpdates $Config
+            $updates = Invoke-WduOperation 'search: IUpdateSearcher.Search' { Get-WduAvailableUpdates $Config }
             $scanFailures = 0
         } catch {
+            $info = $script:LastWduException
+            if (-not $info) { $info = ConvertFrom-WduError $_ 'search' }
+            $cat = Get-WduCategory ([string] $info['hresult']) 'search' 'engine' $info
             $scanFailures++
-            $hr = Format-WduHResult $_.Exception.HResult
-            Write-WduLog "Scan failed ($scanFailures/3): $($_.Exception.Message) $hr" 'ERROR'
-            if ($scanFailures -lt 3) { Wait-Wdu 60; continue }
-            if ($Config.resetComponentsOnce -and -not $State.componentReset) {
-                Write-WduLog 'Resetting Windows Update components once after repeated scan failures.' 'WARN'
-                Set-WduStatus 'ResettingComponents' 'Scan failures' $State
+            $limit = $(if ($initialising) { [int] $Config.readinessSearchAttempts } else { 3 })
+            $delay = $(if ($initialising) { [int] $Config.readinessSearchDelaySeconds } else { 60 })
+            Write-WduLog "Scan failed ($scanFailures/$limit) [$cat]: $(Format-WduException $info)" 'ERROR'
+            if ($initialising) { $State.readiness.lastSearchError = "[$cat] $(Format-WduException $info)" }
+            if ($cat -eq 'EngineException') {
+                $stop = Register-WduEngineException $State $info @() $Config
+                Save-WduState $State $Paths
+                if ($stop) { return Stop-WduForEngineException $Config $Paths $State @{ Install = @(); Later = @() } }
+            }
+            Save-WduState $State $Paths
+            if ($scanFailures -lt $limit) { Wait-Wdu $delay; continue }
+            if ($cat -ne 'EngineException' -and $Config.resetComponentsOnce -and -not $State.componentReset -and (Test-WduResetWarranted @([string] $info['hresult']) @($cat))) {
+                Write-WduLog "Resetting Windows Update components once: repeated search failures point at the update data store ($($info['hresult']))." 'WARN'
+                Set-WduStatus 'ResettingComponents' 'Search failures (update data store)' $State
                 Reset-WduComponents
                 $State.componentReset = $true
                 Save-WduState $State $Paths
                 $scanFailures = 0
                 continue
             }
-            return Complete-Wdu $Config $Paths $State 'Failed' "Windows Update scan keeps failing: $($_.Exception.Message) $hr"
+            $reason = $(if ($initialising) { "Windows Update did not become ready: $limit searches failed [$cat]: $(Format-WduException $info)" } else { "Windows Update search keeps failing [$cat]: $(Format-WduException $info)" })
+            return Complete-Wdu $Config $Paths $State 'Failed' $reason @{ Category = $(if ($initialising -and $cat -ne 'EngineException') { 'NotReady' } else { $cat }); TechnicianAction = 'Check the network, the date and time and the Windows Update services, then run Retry Windows Update (-Mode Status first).' }
         }
 
+        # Every update ever offered (pass D reports those that disappear).
+        foreach ($u in @($updates)) {
+            if (-not $State.offered.ContainsKey($u.Id)) {
+                $State.offered[$u.Id] = [ordered]@{ title = $u.Title; kbs = @($u.Kbs); kind = (Get-WduKind $u); pass = (Get-WduPass $u); firstSeenUtc = (Get-WduNow).ToString('o') }
+            }
+        }
+        if ($initialising) {
+            $r = $State.readiness
+            $r.searchSucceeded = $true; $r.status = 'Ready'; $r.readyUtc = (Get-WduNow).ToString('o')
+            $pre = @($updates | Where-Object { (Get-WduPass $_) -eq 'A' -and -not (Get-WduSkipReason $_ $Config $State) })
+            $r.prerequisites = @($pre | ForEach-Object { [ordered]@{ title = $_.Title; kbs = @($_.Kbs); reason = (Get-WduPrerequisiteReason $_) } })
+            $r.bootstrapNeeded = [bool] $pre.Count
+            Write-WduLog ("Readiness: Windows Update answered after {0} search(es); {1} prerequisite update(s) to install first." -f $r.searchAttempts, $pre.Count)
+            Add-WdbActivity $Config.dataRoot 'windowsUpdate' ("Windows Update is ready ({0} update(s) offered; {1} servicing prerequisite(s) installed first)." -f @($updates).Count, $pre.Count) 'info'
+        }
+        Save-WduState $State $Paths
+
         $plan = Get-WduPlan $updates $Config $State
-        Write-WduLog ("Found {0} update(s): {1} to install, {2} skipped by policy, {3} given up, {4} need a person, {5} waiting to retry." -f @($updates).Count, @($plan.Install).Count, @($plan.Skipped).Count, @($plan.GaveUp).Count, @($plan.Interaction).Count, @($plan.Deferred).Count)
+        Write-WduLog ("Found {0} update(s): {1} to install now ({2}), {3} in later passes, {4} skipped by policy, {5} given up, {6} need a person, {7} waiting to retry." -f @($updates).Count, @($plan.Install).Count, $(if ($plan.Pass) { Get-WduPassName $plan.Pass } else { 'none' }), @($plan.Later).Count, @($plan.Skipped).Count, @($plan.GaveUp).Count, @($plan.Interaction).Count, @($plan.Deferred).Count)
 
         if (@($plan.Install).Count -eq 0) {
             if (@($plan.Deferred).Count -gt 0) {
@@ -957,10 +1467,17 @@ function Invoke-WduRun {
             $emptyScans++
             if ($emptyScans -le [int] $Config.confirmationScans) {
                 Write-WduLog "Nothing to install; confirmation scan $emptyScans/$($Config.confirmationScans) after $($Config.confirmationDelaySeconds) s."
-                Set-WduStatus 'Confirming' "Confirmation scan $emptyScans" $State
+                Set-WduStatus 'Confirming' "$(Get-WduPassName 'D'): confirmation search $emptyScans" $State
                 Wait-Wdu ([int] $Config.confirmationDelaySeconds)
                 continue
             }
+            # Pass D: final verification.
+            Set-WduStatus 'Verifying' "$(Get-WduPassName 'D'): checking installed updates and devices." $State
+            $State.pass = 'D'
+            $plan.Verification = Get-WduVerification $State $updates $Config
+            $State.passes = @(@($State.passes) + @([ordered]@{ pass = 'D'; name = (Get-WduPassName 'D'); startedUtc = (Get-WduNow).ToString('o'); updates = @() }))
+            $v = $plan.Verification
+            Write-WduLog ("Verification: {0} still offered, {1} installed update(s) offered again, {2} no longer offered, {3} device(s) with problems, restart pending: {4}." -f $v.remainingOffered, @($v.installedStillOffered).Count, @($v.noLongerOffered).Count, @($v.devicesWithProblems).Count, $v.rebootPending)
             if (@($plan.GaveUp).Count -gt 0) {
                 return Complete-Wdu $Config $Paths $State 'CompletedWithFailures' "$(@($plan.GaveUp).Count) update(s) could not be installed and were given up.$(if (@($plan.Interaction).Count) { " $(@($plan.Interaction).Count) update(s) need a person to install them." })" $plan
             }
@@ -971,6 +1488,14 @@ function Invoke-WduRun {
         }
         $emptyScans = 0
 
+        if ($State.pass -ne $plan.Pass) {
+            $State.pass = $plan.Pass
+            $State.passes = @(@($State.passes) + @([ordered]@{ pass = $plan.Pass; name = (Get-WduPassName $plan.Pass); startedUtc = (Get-WduNow).ToString('o'); updates = @($plan.Install | ForEach-Object { Get-WduLabel $_ }) }))
+            Write-WduLog "Starting $(Get-WduPassName $plan.Pass) with $(@($plan.Install).Count) update(s)."
+            Add-WdbActivity $Config.dataRoot 'windowsUpdate' "$(Get-WduPassName $plan.Pass): $(@($plan.Install).Count) update(s)." 'info'
+        }
+        $script:Activity.pass = Get-WduPassName $plan.Pass
+
         # Coordination: no update installation while an application is being installed.
         $lock = Enter-WdbInstallLock $Config.dataRoot 'WindowsUpdate' ([int] $Config.lockWaitMinutes * 60)
         if (-not $lock) {
@@ -979,6 +1504,7 @@ function Invoke-WduRun {
             return 'WaitingForLock'
         }
         $rebootRequired = $false
+        $stopForEngine = $false
         try {
             $max = [int] $Config.maxAttemptsPerUpdate
             $ready = @()
@@ -990,36 +1516,80 @@ function Invoke-WduRun {
                 if (-not $a) { $a = @{ count = 0; title = $u.Title; kbs = @($u.Kbs); kind = (Get-WduKind $u); lastResult = ''; lastHResult = '' }; $State.attempts[$u.Id] = $a }
                 $a.count = [int] $a.count + 1
                 $a.nextAttemptUtc = $null
+                $a.pass = $plan.Pass
                 $label = Get-WduLabel $u
-                Write-WduLog ("  queued   {0} [{1}] (attempt {2}/{3})" -f $label, (Get-WduKind $u), $a.count, $max)
+                Write-WduLog ("  queued   {0} [{1}, pass {2}] (attempt {3}/{4})" -f $label, (Get-WduKind $u), $plan.Pass, $a.count, $max)
                 Save-WduState $State $Paths
                 $script:Activity.current = $label; $script:Activity.attempt = [int] $a.count; $script:Activity.maxAttempts = $max; $script:Activity.queued = @($plan.Install).Count
                 $size = $(if ($u.ContainsKey('SizeBytes') -and [int64] $u.SizeBytes -gt 0) { " ($([Math]::Round([double] $u.SizeBytes / 1MB, 1)) MB)" } else { '' })
-                Set-WduStatus 'Downloading' "Downloading $label$size, update $i of $(@($plan.Install).Count), attempt $($a.count) of $max. Progress unavailable." $State
+                Set-WduStatus 'Downloading' "$(Get-WduPassName $plan.Pass): downloading $label$size, update $i of $(@($plan.Install).Count), attempt $($a.count) of $max. Progress unavailable." $State
                 # One update per call: a failed download never holds back the others.
                 $r = (Invoke-WduDownload @($u))[$u.Id]
                 if ($r -and $r.Result -in 'Succeeded', 'SucceededWithErrors') { $ready += $u; continue }
+                if ($r -and $r['Source'] -eq 'engine' -and (Get-WduCategory (Format-WduHResult $r.HResult) 'download' 'engine' $r['ExceptionInfo']) -eq 'EngineException') {
+                    # An exception in the engine's own call: not this update's failure; its attempt is not used up.
+                    $a.count = [Math]::Max(0, [int] $a.count - 1)
+                    $a.lastErrorSource = 'engine'; $a.lastCategory = 'EngineException'; $a.lastException = [string] $r['Exception']
+                    $a.nextAttemptUtc = (Get-WduNow).AddSeconds([int] $Config.retryDelaySeconds).ToString('o')
+                    if (Register-WduEngineException $State $r['ExceptionInfo'] @($u) $Config) { $stopForEngine = $true; break }
+                    continue
+                }
                 Register-WduFailure $u $a $Config 'download' $(if ($r) { "Download$($r.Result)" } else { 'DownloadMissing' }) $(if ($r) { $r.HResult } else { $null }) $r
             }
             Save-WduState $State $Paths
 
-            # Ordinary updates are installed together; one that can ask for input is installed on its own, quietly.
-            $batches = @()
-            $normal = @($ready | Where-Object { -not $_.NeedsUserInput })
-            if ($normal.Count) { $batches += , $normal }
-            foreach ($u in @($ready | Where-Object { $_.NeedsUserInput })) { $batches += , @($u) }
-            foreach ($batch in $batches) {
+            # Ordinary updates are installed together; one that can ask for input, and (pass C) every
+            # driver, is installed on its own so its result belongs to one update and one device.
+            $queue = New-Object System.Collections.ArrayList
+            if (-not $stopForEngine) {
+                $normal = @($ready | Where-Object { -not $_.NeedsUserInput -and -not $_.IsDriver })
+                if ($normal.Count) { [void] $queue.Add(@($normal)) }
+                foreach ($u in @($ready | Where-Object { $_.NeedsUserInput -or $_.IsDriver })) { [void] $queue.Add(@($u)) }
+            }
+            $isolated = $false
+            $recount = @{}   # isolated updates whose attempt is counted again only when actually tried
+            for ($q = 0; $q -lt $queue.Count -and -not $stopForEngine; $q++) {
+                $batch = @($queue[$q])
+                foreach ($u in $batch) {
+                    if ($recount.ContainsKey($u.Id)) { $recount.Remove($u.Id); $State.attempts[$u.Id].count = [int] $State.attempts[$u.Id].count + 1; $State.attempts[$u.Id].nextAttemptUtc = $null }
+                }
                 $labels = @($batch | ForEach-Object { Get-WduLabel $_ })
                 $script:Activity.current = ($labels -join '; ')
-                Set-WduStatus 'Installing' "Installing $(@($batch).Count) update(s): $($labels -join '; ')" $State
+                Set-WduStatus 'Installing' "$(Get-WduPassName $plan.Pass): installing $(@($batch).Count) update(s): $($labels -join '; ')" $State
                 $in = Invoke-WduInstall $batch
                 if ($in.RebootRequired) { $rebootRequired = $true }
+                if ($in.ContainsKey('CallFailed') -and $in.CallFailed) {
+                    $first0 = $in.Results[$batch[0].Id]
+                    $info = $first0['ExceptionInfo']
+                    $cat = Get-WduCategory (Format-WduHResult $first0.HResult) 'install' 'engine' $info
+                    if ($cat -eq 'EngineException') {
+                        foreach ($u in $batch) {
+                            $a = $State.attempts[$u.Id]
+                            $a.count = [Math]::Max(0, [int] $a.count - 1)
+                            $a.lastErrorSource = 'engine'; $a.lastCategory = 'EngineException'; $a.lastException = [string] $first0['Exception']
+                            $a.nextAttemptUtc = (Get-WduNow).AddSeconds([int] $Config.retryDelaySeconds).ToString('o')
+                        }
+                        if (Register-WduEngineException $State $info $batch $Config) { $stopForEngine = $true; break }
+                    }
+                    if ($batch.Count -gt 1 -and -not $isolated) {
+                        # The call failed for the whole batch: isolate it, one update at a time, once.
+                        $isolated = $true
+                        Write-WduLog "  The installation call failed for $($batch.Count) update(s) together [$cat]; installing them one at a time to isolate the failure." 'WARN'
+                        if ($cat -eq 'EngineException') { foreach ($u in $batch) { $recount[$u.Id] = $true } }
+                        foreach ($u in $batch) { [void] $queue.Add(@($u)) }
+                        Save-WduState $State $Paths
+                        continue
+                    }
+                    if ($cat -eq 'EngineException') { Save-WduState $State $Paths; continue }
+                }
                 foreach ($u in $batch) {
                     $r = $in.Results[$u.Id]
                     $a = $State.attempts[$u.Id]
                     if ($r -and $r.Result -in 'Succeeded', 'SucceededWithErrors') {
-                        $a.lastResult = $r.Result; $a.lastHResult = Format-WduHResult $r.HResult
-                        $State.installed += @{ id = $u.Id; title = $u.Title; kbs = @($u.Kbs); kind = (Get-WduKind $u); optional = [bool] $u.IsOptional; driver = [bool] $u.IsDriver; result = $r.Result; atUtc = (Get-WduNow).ToString('o') }
+                        $a.lastResult = $r.Result; $a.lastHResult = Format-WduHResult $r.HResult; $a.lastCategory = ''
+                        $rec = @{ id = $u.Id; title = $u.Title; kbs = @($u.Kbs); kind = (Get-WduKind $u); optional = [bool] $u.IsOptional; driver = [bool] $u.IsDriver; result = $r.Result; atUtc = (Get-WduNow).ToString('o'); pass = $plan.Pass }
+                        if ($u.ContainsKey('Driver') -and $u.Driver) { $rec.device = $u.Driver }
+                        $State.installed += $rec
                         Write-WduLog ("  installed {0} ({1})" -f (Get-WduLabel $u), $r.Result)
                         continue
                     }
@@ -1034,15 +1604,22 @@ function Invoke-WduRun {
         } finally {
             Exit-WdbInstallLock $lock
         }
+        Save-WduState $State $Paths
+        if ($stopForEngine) { return Stop-WduForEngineException $Config $Paths $State $plan }
 
-        # An update about to be given up gets one more chance after a component reset (not a permanent failure).
+        # An update about to be given up gets one more chance after a component reset, but only when
+        # its failures point at what a reset repairs (Test-WduResetWarranted).
         $exhausted = @($plan.Install | Where-Object {
             $a = $State.attempts[$_.Id]
             $a['gaveUp'] -and -not $a['permanent'] -and -not $a['interaction'] -and $a.lastResult -notin 'Succeeded', 'SucceededWithErrors'
         })
-        if ($exhausted.Count -gt 0 -and $Config.resetComponentsOnce -and -not $State.componentReset) {
-            Write-WduLog "$($exhausted.Count) update(s) keep failing; resetting Windows Update components once." 'WARN'
-            Set-WduStatus 'ResettingComponents' 'Repeated update failures' $State
+        $warranted = $exhausted.Count -gt 0 -and (Test-WduResetWarranted @($exhausted | ForEach-Object { [string] $State.attempts[$_.Id].lastHResult }) @($exhausted | ForEach-Object { [string] $State.attempts[$_.Id]['lastCategory'] }))
+        if ($exhausted.Count -gt 0 -and -not $warranted -and -not $State.componentReset) {
+            Write-WduLog "$($exhausted.Count) update(s) given up; their failures do not point at the update data store, so Windows Update components are not reset." 'WARN'
+        }
+        if ($warranted -and $Config.resetComponentsOnce -and -not $State.componentReset) {
+            Write-WduLog "$($exhausted.Count) update(s) keep failing with download/data-store errors; resetting Windows Update components once." 'WARN'
+            Set-WduStatus 'ResettingComponents' 'Repeated download or data-store failures' $State
             Reset-WduComponents
             $State.componentReset = $true
             foreach ($u in $exhausted) { $a = $State.attempts[$u.Id]; $a.count = [int] $Config.maxAttemptsPerUpdate - 1; $a.gaveUp = $false; $a.nextAttemptUtc = $null }
@@ -1051,14 +1628,18 @@ function Invoke-WduRun {
         }
 
         if ($rebootRequired -or (Test-WduRebootPending)) {
-            return Request-WduReboot $Config $Paths $State 'installed updates require a restart'
+            return Request-WduReboot $Config $Paths $State "installed updates require a restart ($(Get-WduPassName $plan.Pass))"
         }
+        # Next scan: a new session, so the next pass sees what this one installed.
+        $script:Session = $null
     }
     return Complete-Wdu $Config $Paths $State 'Failed' 'Safety limit of 50 passes without a restart reached.'
 }
 
 function Invoke-WduMain {
     param([hashtable] $Config)
+    # Engine 2.0.0: a configuration written by an older package (or a test) gets the newer defaults.
+    foreach ($k in @($script:ConfigDefaults.Keys)) { if (-not $Config.ContainsKey($k)) { $Config[$k] = $script:ConfigDefaults[$k] } }
     $paths = Get-WduPaths $Config
     foreach ($d in $paths.Root, $paths.Logs) { if (-not (Test-Path -LiteralPath $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null } }
     $script:LogFile = $paths.Log
@@ -1095,8 +1676,9 @@ function Invoke-WduScan {
     $updates = Get-WduAvailableUpdates $Config
     $plan = Get-WduPlan $updates $Config $state
     $rows = @()
-    foreach ($u in $plan.Install) { $rows += [pscustomobject]@{ Action = 'Install'; KB = ($u.Kbs -join ','); Title = $u.Title; Reason = '' } }
-    foreach ($s in $plan.Skipped) { $rows += [pscustomobject]@{ Action = 'Skip'; KB = ($s.kbs -join ','); Title = $s.title; Reason = $s.reason } }
+    foreach ($u in @($plan.Install) + @($plan.Later)) { $rows += [pscustomobject]@{ Action = 'Install'; Pass = (Get-WduPass $u); KB = ($u.Kbs -join ','); Title = $u.Title; Reason = $(if ($u.IsDriver -and $u.Driver) { "driver for $($u.Driver['model']) [$($u.Driver['hardwareID'])]" } else { '' }) } }
+    foreach ($s in $plan.Skipped) { $rows += [pscustomobject]@{ Action = 'Skip'; Pass = $s['pass']; KB = ($s.kbs -join ','); Title = $s.title; Reason = $s.reason } }
+    $rows = @($rows | Sort-Object Action, Pass, Title)
     [pscustomobject]@{
         Updates       = $rows
         RebootPending = Test-WduRebootPending
