@@ -51,7 +51,7 @@ a { color: var(--accent); }
 .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); }
 .cat { display: block; text-decoration: none; color: inherit; border-top: 4px solid var(--c, var(--line)); }
 .cat:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
-.cat .row { display: flex; justify-content: space-between; gap: 8px; align-items: center; }
+.cat .row { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; align-items: center; }
 .list { list-style: none; margin: 0; padding: 0; }
 .list li { padding: 10px 0; border-top: 1px solid var(--line); display: flex; gap: 10px; align-items: flex-start; }
 .list li:first-child { border-top: 0; }

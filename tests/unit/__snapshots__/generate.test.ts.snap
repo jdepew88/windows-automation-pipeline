@@ -16697,7 +16697,7 @@ a { color: var(--accent); }
 .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); }
 .cat { display: block; text-decoration: none; color: inherit; border-top: 4px solid var(--c, var(--line)); }
 .cat:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
-.cat .row { display: flex; justify-content: space-between; gap: 8px; align-items: center; }
+.cat .row { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; align-items: center; }
 .list { list-style: none; margin: 0; padding: 0; }
 .list li { padding: 10px 0; border-top: 1px solid var(--line); display: flex; gap: 10px; align-items: flex-start; }
 .list li:first-child { border-top: 0; }
@@ -17039,7 +17039,7 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
   "format": "windows-deployment-builder/deployment-manifest",
   "manifestVersion": 1,
   "packageVersion": "1.3.0",
-  "packageId": "17E2AE4936EAD12B",
+  "packageId": "34F772349A3F60C7",
   "scope": "answerFile",
   "generator": {
     "name": "Windows Deployment Builder",
@@ -17628,9 +17628,9 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
     {
       "path": "scripts/health/HealthReport.html",
       "role": "documentation",
-      "size": 24107,
-      "sha256": "815C4A4091AECB948134A66396874BB60DE1639AC4371E02BC89A9CE3F4532C3",
-      "textSha256": "51A1F285043040CA9CAD13327C78453D684B97FF79F424FB7A37E43524382D2A",
+      "size": 24124,
+      "sha256": "063B9528BE83EB1ADDD94A54D1FD5FC965EF7C0DDA2B2670FD4103D06EF3D96F",
+      "textSha256": "4465F5EED586111805C30B794C3FD0FE6E8FFA3B111AC90418DA5650D5415D00",
       "embedded": "Deployment\\\\scripts\\\\health\\\\HealthReport.html"
     },
     {
@@ -34516,7 +34516,7 @@ a { color: var(--accent); }
 .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); }
 .cat { display: block; text-decoration: none; color: inherit; border-top: 4px solid var(--c, var(--line)); }
 .cat:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
-.cat .row { display: flex; justify-content: space-between; gap: 8px; align-items: center; }
+.cat .row { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; align-items: center; }
 .list { list-style: none; margin: 0; padding: 0; }
 .list li { padding: 10px 0; border-top: 1px solid var(--line); display: flex; gap: 10px; align-items: flex-start; }
 .list li:first-child { border-top: 0; }
@@ -34858,7 +34858,7 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
   "format": "windows-deployment-builder/deployment-manifest",
   "manifestVersion": 1,
   "packageVersion": "1.3.0",
-  "packageId": "1B02135B7ACA4B99",
+  "packageId": "64A74800DF0CB7F9",
   "scope": "answerFile",
   "generator": {
     "name": "Windows Deployment Builder",
@@ -35448,9 +35448,9 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
     {
       "path": "scripts/health/HealthReport.html",
       "role": "documentation",
-      "size": 24107,
-      "sha256": "815C4A4091AECB948134A66396874BB60DE1639AC4371E02BC89A9CE3F4532C3",
-      "textSha256": "51A1F285043040CA9CAD13327C78453D684B97FF79F424FB7A37E43524382D2A",
+      "size": 24124,
+      "sha256": "063B9528BE83EB1ADDD94A54D1FD5FC965EF7C0DDA2B2670FD4103D06EF3D96F",
+      "textSha256": "4465F5EED586111805C30B794C3FD0FE6E8FFA3B111AC90418DA5650D5415D00",
       "embedded": "Deployment\\\\scripts\\\\health\\\\HealthReport.html"
     },
     {
