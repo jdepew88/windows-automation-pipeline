@@ -75,6 +75,16 @@ function Reset-HealthSim {
         updateHistory  = @()
         HistoryQueries = 0
         orchestrator   = @{ lastSuccessfulScanUtc = '2026-10-20T09:41:00.0000000Z'; isScanning = $false; isWorking = $false }
+        # Health engine 1.2.0 probes (package-aware verification): the deployment user's profile folder,
+        # files (path -> file version), Store packages registered for the user beyond the simulated
+        # installs, provisioned packages, the machine folders and a read-only "winget upgrade" listing.
+        profilePaths   = @{ $sid = "C:\Users\$user" }
+        files          = @{}
+        extraAppx      = @()
+        provisioned    = @()
+        machineFolders = @{ ProgramFiles = 'C:\Program Files'; ProgramFilesX86 = 'C:\Program Files (x86)'; ProgramData = 'C:\ProgramData' }
+        wingetUpgrade  = @{ available = $true; exitCode = 0; text = "Name   Id      Version Available Source`n--------------------------------------`n0 upgrades available." }
+        WinGetCalls    = 0
     }
 }
 
@@ -130,18 +140,39 @@ function Get-SimHealthItems { $c = Read-WddJson (Join-Path $script:Paths.Package
     would register it (display name plus a version; per-user scope in the user's hive; WinGet's
     "<id>_<source>" key for portable packages), plus $script:M.extraUninstall.
 #>
+<#
+    Health engine 1.2.0: the selected items the simulated WinGet installed (and that a scenario did
+    not remove with $script:M.missing). A simulated installer leaves the evidence its catalog entry's
+    verify block names: an uninstall record starting with its first prefix, its Store package, its
+    files (version 1.2.3.0) and its registry values, so both engines check the same computer.
+#>
+function Get-SimInstalledItems {
+    $installed = $(if (Get-Variable -Name AppSim -Scope Script -ErrorAction SilentlyContinue) { $script:AppSim.Installed } else { @{} })
+    @(Get-SimHealthItems | Where-Object { [string] $_.packageIdentifier -and $installed[[string] $_.packageIdentifier] -and $script:M.missing -notcontains [string] $_.packageIdentifier })
+}
+function Get-SimVerify { param($Item) if ($Item -is [hashtable] -and $Item.ContainsKey('verify') -and $Item.verify -is [hashtable]) { $Item.verify } else { @{} } }
+function Resolve-SimPath {
+    param([string] $Path)
+    $prof = $(if ($script:M.profilePaths.ContainsKey($script:SimUserSid)) { [string] $script:M.profilePaths[$script:SimUserSid] } else { '' })
+    $f = $script:M.machineFolders
+    $Path.Replace('%ProgramFiles(x86)%', [string] $f.ProgramFilesX86).Replace('%ProgramFiles%', [string] $f.ProgramFiles).Replace('%ProgramData%', [string] $f.ProgramData).Replace('%LocalAppData%', "$prof\AppData\Local").Replace('%AppData%', "$prof\AppData\Roaming")
+}
+
 function Get-WdhUninstallEntries {
     param([string] $Sid = '')
     Assert-SimProbe 'uninstall'
     $out = @()
-    $installed = $(if (Get-Variable -Name AppSim -Scope Script -ErrorAction SilentlyContinue) { $script:AppSim.Installed } else { @{} })
-    foreach ($it in Get-SimHealthItems) {
+    foreach ($it in Get-SimInstalledItems) {
         $pkgId = [string] $it.packageIdentifier
-        if (-not $pkgId -or -not $installed[$pkgId] -or $script:M.missing -contains $pkgId -or [string] $it.source -eq 'msstore') { continue }
-        $scope = $(if ([string] $it.scope -eq 'user' -or $script:M.userScoped -contains $pkgId) { 'user' } else { 'machine' })
+        if ([string] $it.source -eq 'msstore') { continue }
+        $vf = Get-SimVerify $it
+        $scope = $(if ([string] $it.scope -eq 'user' -or $script:M.userScoped -contains $pkgId -or ($vf.ContainsKey('perUser') -and $vf.perUser)) { 'user' } else { 'machine' })
         if ($scope -eq 'user' -and -not $Sid) { continue }
         $key = $(if ([string] $it.method -eq 'portable') { "$($pkgId)_Microsoft.Winget.Source_8wekyb3d8bbwe" } else { "{$([guid]::NewGuid().ToString().ToUpperInvariant())}" })
-        $out += , @{ scope = $scope; keyName = $key; displayName = "$($it.name) 1.2.3"; displayVersion = '1.2.3'; publisher = 'Sim' }
+        # The Visual C++ redistributables register as Microsoft names them (32-bit view), not by the catalog's display name.
+        if ($pkgId -match '^Microsoft\.VCRedist\.2015\+\.(x64|x86)$') { $out += , @{ scope = 'machine'; view = '32'; keyName = $key; displayName = "Microsoft Visual C++ 2015-2022 Redistributable ($($Matches[1])) - 14.40.33810"; displayVersion = '14.40.33810.0'; publisher = 'Microsoft Corporation' }; continue }
+        $dn = $(if ($vf.ContainsKey('uninstall') -and @($vf.uninstall).Count) { "$(@($vf.uninstall)[0]) 1.2.3" } else { "$($it.name) 1.2.3" })
+        $out += , @{ scope = $scope; view = $(if ($scope -eq 'user') { 'user' } else { '64' }); keyName = $key; displayName = $dn; displayVersion = '1.2.3'; publisher = 'Sim' }
     }
     foreach ($e in @($script:M.extraUninstall)) { if ($e -and ($e.scope -ne 'user' -or $Sid)) { $out += , $e } }
     return $out
@@ -150,12 +181,66 @@ function Get-WdhUninstallEntries {
 function Get-WdhAppxPackages {
     param([string] $Sid = '')
     Assert-SimProbe 'appx'
-    $installed = $(if (Get-Variable -Name AppSim -Scope Script -ErrorAction SilentlyContinue) { $script:AppSim.Installed } else { @{} })
-    @(Get-SimHealthItems | Where-Object { [string] $_.source -eq 'msstore' -and $installed[[string] $_.packageIdentifier] -and $script:M.missing -notcontains [string] $_.packageIdentifier } | ForEach-Object {
-        $flat = ([string] $_.name) -replace '[^A-Za-z0-9]', ''
-        @{ name = "SimPublisher.$flat"; family = "SimPublisher.$($flat)_8wekyb3d8bbwe"; version = '1.0.0.0' }
-    })
+    $out = @()
+    foreach ($it in Get-SimInstalledItems) {
+        if ([string] $it.source -eq 'msstore') {
+            $flat = ([string] $it.name) -replace '[^A-Za-z0-9]', ''
+            $out += , @{ name = "SimPublisher.$flat"; family = "SimPublisher.$($flat)_8wekyb3d8bbwe"; version = '1.0.0.0' }
+        }
+        $vf = Get-SimVerify $it
+        if ($vf.ContainsKey('appx')) { foreach ($n in @($vf.appx)) { if ($n) { $out += , @{ name = [string] $n; family = "$($n)_8wekyb3d8bbwe"; version = '1.2.3.0' } } } }
+    }
+    return @($out) + @(@($script:M.extraAppx) | Where-Object { $_ })
 }
+
+function Get-WdhProvisionedAppx { Assert-SimProbe 'appxProvisioned'; @($script:M.provisioned) }
+function Get-WdhUserProfilePath { param([string] $Sid) if ($Sid -and $script:M.profilePaths.ContainsKey($Sid)) { [string] $script:M.profilePaths[$Sid] } else { '' } }
+function Get-WdhMachineFolders { $script:M.machineFolders }
+function Get-WdhFileEvidence {
+    param([string] $Path)
+    Assert-SimProbe 'files'
+    if ($script:M.files.ContainsKey($Path)) { return @{ exists = $true; version = [string] $script:M.files[$Path] } }
+    foreach ($it in Get-SimInstalledItems) { $vf = Get-SimVerify $it; if ($vf.ContainsKey('files')) { foreach ($f in @($vf.files)) { if ((Resolve-SimPath ([string] $f)) -eq $Path) { return @{ exists = $true; version = '1.2.3.0' } } } } }
+    @{ exists = $false; version = '' }
+}
+<# HKLM values by view: "HKLM\<key>\<name>" (64-bit) or "HKLM32\<key>\<name>" in $script:M.reg, or those a simulated installer wrote. #>
+function Get-WdhRegValueView {
+    param([string] $SubKey, [string] $Name, [string] $View = '64')
+    $k = "HKLM$(if ($View -eq '32') { '32' })\$SubKey\$Name"
+    if ($script:M.reg.ContainsKey($k)) { return $script:M.reg[$k] }
+    foreach ($it in Get-SimInstalledItems) {
+        $vf = Get-SimVerify $it
+        if (-not $vf.ContainsKey('registry')) { continue }
+        foreach ($r in @($vf.registry)) { if ($r -and "HKLM\$SubKey" -eq [string] $r.key -and $Name -eq [string] $r.name -and $View -eq $(if ([string] $r.view -eq '32') { '32' } else { '64' })) { return $(if ($r.ContainsKey('equals') -and $null -ne $r.equals) { [string] $r.equals } else { '1' }) } }
+    }
+    return $null
+}
+
+<#
+    The application engine's (1.6.0) evidence probes answer from the same simulated computer, so the
+    engine run by the scenario never reads the real one (its user, uninstall records, Store packages,
+    files or registry) and both engines agree on what is installed.
+#>
+function Get-WdaDeploymentUser {
+    $isSystem = [bool] $script:SimIdentity.IsSystem
+    $name = $(if ($isSystem) { "PC\$(@($script:M.users)[0].name)" } else { [string] $script:SimIdentity.Name })
+    $leaf = $name.Split('\')[-1].ToLowerInvariant()
+    $sid = $(if ($script:M.sids.ContainsKey($leaf)) { [string] $script:M.sids[$leaf] } else { '' })
+    $prof = $(if ($sid -and $script:M.profilePaths.ContainsKey($sid)) { [string] $script:M.profilePaths[$sid] } else { '' })
+    @{ Name = $name; Sid = $sid; ProfilePath = $prof; LocalAppData = $(if ($prof) { "$prof\AppData\Local" } else { '' }); AppData = $(if ($prof) { "$prof\AppData\Roaming" } else { '' }); HiveLoaded = [bool] ($sid -and $script:M.hives -contains $sid); IsEngineAccount = (-not $isSystem) }
+}
+function Get-WdaMachineRoots { @{ ProgramFiles = [string] $script:M.machineFolders.ProgramFiles; 'ProgramFiles(x86)' = [string] $script:M.machineFolders.ProgramFilesX86; ProgramData = [string] $script:M.machineFolders.ProgramData } }
+function Get-WdaUninstallEntries {
+    param([string] $Hive, [string] $Sid = '')
+    if ($Hive -eq 'User' -and -not ($Sid -and $script:M.hives -contains $Sid)) { return , @() }
+    $all = @(Get-WdhUninstallEntries $(if ($Hive -eq 'User') { $Sid } else { '' }))
+    , @($all | Where-Object { if ($Hive -eq 'User') { $_.scope -eq 'user' } elseif ($Hive -eq 'Machine32') { $_.scope -ne 'user' -and [string] $_['view'] -eq '32' } else { $_.scope -ne 'user' -and [string] $_['view'] -ne '32' } } | ForEach-Object { @{ DisplayName = [string] $_.displayName; DisplayVersion = [string] $_.displayVersion; Publisher = [string] $_.publisher; KeyName = [string] $_.keyName } })
+}
+function Get-WdaAppxRegistered { param([string] $Name, [hashtable] $User) , @(@(Get-WdhAppxPackages ([string] $User['Sid'])) | Where-Object { $_ -and [string] $_.name -eq $Name } | ForEach-Object { @{ Name = [string] $_.name; Version = [string] $_.version } }) }
+function Get-WdaAppxProvisioned { param([string] $Name) , @(@($script:M.provisioned) | Where-Object { $_ -and [string] $_.name -eq $Name } | ForEach-Object { @{ Name = [string] $_.name; Version = [string] $_.version } }) }
+function Get-WdaFileEvidence { param([string] $Path) $r = Get-WdhFileEvidence $Path; if ($r.exists) { @{ Path = $Path; Version = [string] $r.version } } else { $null } }
+function Get-WdaRegistryValue { param([string] $Key, [string] $Name, [string] $View = '64') $v = Get-WdhRegValueView $Key.Substring(5) $Name $View; @{ Found = ($null -ne $v); Value = $v } }
+function Get-WdhWinGetUpgrades { Assert-SimProbe 'winget'; $script:M.WinGetCalls++; $script:M.wingetUpgrade }
 
 <# The portable shortcuts the REAL application engine created in the simulated Start menu. #>
 function Get-WdhPortableShortcuts {

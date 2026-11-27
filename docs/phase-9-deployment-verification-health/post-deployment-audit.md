@@ -1,4 +1,4 @@
-# Post-deployment audit (health engine 1.1.0)
+# Post-deployment audit (health engine 1.1.0, applications 1.2.0)
 
 Health engine 1.1.0 extends the Phase 9 verification (`DeploymentHealth.ps1`). The audit is still
 **read-only**: it writes only its own report files. It never installs, removes, restarts, cleans
@@ -137,24 +137,103 @@ deployment report's `windowsUpdate.verification`.
 Zero device problems is a hardware-health result. It is not proof that every optional driver was
 installed, and the `drivers.devices` finding says so.
 
-### Applications
+### Applications (health engine 1.2.0: package-aware verification)
 
-`Find-WdhInstalled` is the detection: it looks in Windows. `Resolve-WdhAppVerdict` is the
-verdict: it weighs that detection against the engine's own record. The two are separate functions
-so a later catalog can extend either one. Each application carries a `verification` status:
+Detection and verdict are separate functions, so a later catalog can extend either one:
 
-| Status | Meaning |
-|---|---|
-| InstalledAndVerified | Windows lists the application. |
-| InstallerSucceededUnverified | The installer reported success, but Windows lists nothing that matches. Reported as a Warning, never a Pass. |
-| Missing | The application is not found. |
-| Failed | The installation failed. |
-| ManualActionRequired | A person has to install or finish it. |
-| Pending | The installation is still running or waiting. |
-| Deferred | The verdict waits for the user context. |
-| NotSelected | The application was not selected for this deployment. It is not listed in `applications`. |
+- `Find-WdhAppEvidence` (detection) looks in Windows **now**. It uses the application's `verify`
+  block from health-config.json. That block is the same `verifySpec()` of the catalog entry that the
+  application engine 1.6.0 receives in applications-config.json, so both engines check the same
+  evidence. It also uses the 1.1.0 name match (`Find-WdhInstalled`), which older plans without a
+  `verify` block rely on.
+- `Resolve-WdhAppVerdict` (verdict) weighs that evidence against the engine's record in
+  `Applications\result.json`. The record is history: its `status`, and from engine 1.6.0 its
+  `outcome`, `verification`, `verificationEvidence`, `verificationNote` and `failureClass`. Every
+  one of these fields is optional.
 
-An installer exit code alone never makes an application "installed".
+The evidence the engine looks for:
+
+| Kind | Where | Notes |
+|---|---|---|
+| `uninstall` | Machine-wide records (64-bit, and 32-bit WOW6432Node), and the deployment user's own records | Matched by display-name prefix, case-insensitive. The user's records are read only while that user's hive is loaded. This tool never loads a hive. |
+| `appx` | Registered for the deployment user (by SID), or provisioned for every user (`where: provisioned`) | A provisioned package is registered at each user's sign-in. |
+| `file` | `%ProgramFiles%`, `%ProgramFiles(x86)%`, `%ProgramData%`, and the deployment user's `%LocalAppData%` and `%AppData%` | The user's paths come from the ProfileList entry, never from SYSTEM's profile. The file version is reported. |
+| `registry` | `HKLM\SOFTWARE\...` in the 64- or 32-bit view, with an optional exact value | A different value is not evidence. The finding reports the mismatch. |
+| Visual C++ | A `Microsoft.VCRedist.<family>.<arch>` package | Its family and architecture in the runtime inventory. |
+
+The evidence is written to `applications[].evidence` as `{ kind, detail, where, version }`. The
+`where` value is `machine`, `user:<account>` or `provisioned`. The engine's own evidence is written
+to `engineEvidence`. The technician report (HTML and text) lists both.
+
+Each application has a `verification` status. 1.2.0 adds four states and keeps the 1.1.0 names:
+
+| Status | Finding | Meaning |
+|---|---|---|
+| InstalledAndVerified | Pass | Evidence was found now. |
+| InstallerSucceededVerificationPending | Deferred or Pending | The installer succeeded, but no evidence was found yet. The evidence can appear only later, or it cannot be read now: <br>• `verify.after` is `signIn` or `restart`, and a restart is pending<br>• the per-user evidence is unreadable: the user is signed out, the user has no profile yet, or the check runs as SYSTEM without either<br>• the engine reported RestartOrSignInRequired |
+| InstallerSucceededVerificationFailed | Warning | The installer succeeded. The evidence was readable and none was found. "Deployment recovery" > Reverify applications checks again. |
+| Missing | Fail | No evidence was found, and the engine has no result (or the stage is inconsistent). |
+| Failed | Fail | The installation failed. |
+| PackageUnavailable | Fail | The package was not available. |
+| UnattendedUnsupported | Warning | The package cannot be installed unattended. A manual action is listed. |
+| ManualActionRequired | Warning | A person has to install or finish the package. |
+| Pending | Pending | The application stage is still running. |
+| Deferred | Deferred | There is no engine record, and the deployment user's profile is not available. |
+| NotSelected | NotApplicable | The application was deselected for this deployment. |
+| InstallerSucceededUnverified | — | 1.1.0 only. It appears in older reports, and 1.2.0 never writes it. |
+
+The rules:
+
+- An installer exit code alone never makes an application "installed". Every Pass has evidence.
+- An application is never reported as "missing" only because a machine-wide uninstall record is
+  absent. Per-user, AppX or file evidence is enough. Per-user evidence that cannot be read now
+  makes the application pending.
+- Evidence found now always wins. If the evidence is gone although the engine once verified the
+  application, the result is InstallerSucceededVerificationFailed.
+
+### Visual C++ runtimes (`apps.runtimes`, report section `runtimes`)
+
+This check is read-only. It reproduces the engine's `Get-WdaRuntimeInventory` logic on this
+engine's own uninstall probe. The probe is replaced in tests, so a test never reads the real
+computer. The inventory has two sources:
+
+- the uninstall records, for example `Microsoft Visual C++ 2015-2022 Redistributable (x64) -
+  14.40.33810` or `... v14 Redistributable (x86) ...`
+- the `VisualStudio\14.0\VC\Runtimes\<X64|X86|ARM64>` keys, for an architecture the records lack
+
+Each entry has a family (`2015+` for the shared v14 runtime, then 2013, 2012, 2010, 2008 and 2005),
+an architecture and a version. x86 and x64 are listed separately. On 64-bit Windows, 32-bit
+applications need the x86 runtime, so the report never calls it redundant, and x64 never replaces
+it (nor the other way round).
+
+The finding is `Info`. It becomes a `Warning` when a runtime the deployment selected is absent, and
+the warning names the architecture and the reason.
+
+### WinGet update listing (`-CheckAppUpdates`, `apps.updates`, report section `appUpdates`)
+
+This check is optional and read-only. It runs `winget upgrade --source winget
+--disable-interactivity` as the account that runs the audit. It accepts no agreement and installs
+nothing. It uses the Application Manager's table parser when that parser is loaded, and a compact
+reading of the English column titles otherwise.
+
+WinGet lists packages per user, so as SYSTEM the status is `notAsSystem` and WinGet is never
+called. When the audit runs as another administrator, the report says that the deployment user's
+per-user packages are not included.
+
+The finding is always `Info`. An available update is not a deployment defect.
+
+### Deployment recovery (read-only actions)
+
+The `DeploymentRecovery.ps1` menu lists the read-only actions separately from the actions that
+install or change something:
+
+| Key | `-Action` | What it does |
+|---|---|---|
+| V | `ReverifyApplications` | Runs `scripts\applications\ApplicationEngine.ps1 -Mode Verify -ConfigPath <applications-config.json>` from the staged package as a separate process. Standard error is kept as text. Exit codes: 0 all verified, 10 pending, 20 failed. Any other code says that the engine could not re-verify (for example, an engine older than 1.6.0) and points to the health audit. Nothing is reopened or installed. |
+| C | `CheckAppUpdates` | Runs the health audit with `-CheckAppUpdates` and prints the WinGet listing. |
+
+The installing actions stay under their own heading: 2 Retry failed operations, 4 Retry one
+application, 5 Resume, 7 Restore settings and 8 Add drivers.
 
 ### Microsoft Office (category `applications`)
 

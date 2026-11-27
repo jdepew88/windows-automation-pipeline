@@ -30,7 +30,7 @@ illustrative.applications.selection.added.push(
   { packageIdentifier: '7zip.7zip', source: 'winget', displayName: '7-Zip', version: '', scope: '' },
   { packageIdentifier: 'Microsoft.WSL', source: 'winget', displayName: 'Windows Subsystem for Linux', version: '', scope: '' },
   { packageIdentifier: 'Docker.DockerDesktop', source: 'winget', displayName: 'Docker Desktop', version: '', scope: '' },
-  { packageIdentifier: '9MSPC6MP8FM4', source: 'msstore', displayName: 'Microsoft Whiteboard', version: '', scope: '' },
+  { packageIdentifier: '9NKSQGP7F2NH', source: 'msstore', displayName: 'WhatsApp', version: '', scope: '' },
 );
 const apps = generate(illustrative);
 if (!apps.ok) process.exit(1);

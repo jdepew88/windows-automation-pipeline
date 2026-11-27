@@ -24,13 +24,13 @@ import type { Profile } from '../../src/engine/schema/profile';
 const nodeSha = (b: Uint8Array | string) => createHash('sha256').update(b).digest('hex').toUpperCase();
 const dec = new TextDecoder();
 
-// Exactly Git + Whiteboard (no Core Essentials), as in Phase 4.
+// Exactly Git + a Store app (WhatsApp; Phase 3/4 used Whiteboard, removed from the catalog in 2026-11) (no Core Essentials), as in Phase 4.
 const withApps = (mutate?: (p: Profile) => void) =>
   profile((p) => {
     noApps(p);
     p.applications.selection.added.push(
       { packageIdentifier: 'Git.Git', source: 'winget', displayName: 'Git', version: '', scope: '' },
-      { packageIdentifier: '9MSPC6MP8FM4', source: 'msstore', displayName: 'Whiteboard', version: '', scope: '' },
+      { packageIdentifier: '9NKSQGP7F2NH', source: 'msstore', displayName: 'WhatsApp', version: '', scope: '' },
     );
     mutate?.(p);
   });

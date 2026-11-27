@@ -98,8 +98,15 @@ TypeScript has the same table (`PHASE5_OUTCOME_MAP`). A test compares it with th
 | InstalledManually | a manual entry that is now installed |
 | SkippedByUser | deselected |
 | BlockedByDependency | a dependency failed |
-| WaitingForReboot, Pending | still being installed, or waiting for a restart |
-| WaitingForUserContext | per-user item while the deployment user is signed out (Deferred) |
+| WaitingForReboot, Pending | still being installed, or waiting for a restart (1.2.0: also `verify.after` = restart while a restart is pending) |
+| WaitingForUserContext | per-user evidence cannot be read now: the deployment user is signed out, has no profile yet, or the check runs as SYSTEM (Deferred) |
+| WaitingForSignIn | 1.2.0: `verify.after` = signIn and no evidence yet (Pending) |
+| PackageUnavailable | 1.2.0: engine status Unavailable or outcome PackageUnavailable (Fail) |
+| UnattendedUnsupported | 1.2.0: engine outcome UnattendedUnsupported (Warning, manual action) |
+
+From health engine 1.2.0, every result also carries the evidence found now (`evidence`), and the
+engine's record (`outcome`, `engineVerification`, `engineEvidence`) as history. See
+[post-deployment-audit.md](post-deployment-audit.md#applications-health-engine-120-package-aware-verification).
 
 ## Evidence quality
 

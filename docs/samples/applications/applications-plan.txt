@@ -40,9 +40,9 @@ For every package: "winget list" first (already installed = left unchanged), the
  12. Docker Desktop  [winget: Docker.DockerDesktop]
      needs an account sign-in after installation; may need a restart; after winget:microsoft.wsl
      winget install --id Docker.DockerDesktop --exact --source winget --silent --no-upgrade --accept-package-agreements --accept-source-agreements --disable-interactivity
- 13. Microsoft Whiteboard  [msstore: 9MSPC6MP8FM4]
+ 13. WhatsApp  [msstore: 9NKSQGP7F2NH]
      needs an account sign-in after installation; Microsoft Store package
-     winget install --id 9MSPC6MP8FM4 --exact --source msstore --silent --no-upgrade --accept-package-agreements --accept-source-agreements --disable-interactivity
+     winget install --id 9NKSQGP7F2NH --exact --source msstore --silent --no-upgrade --accept-package-agreements --accept-source-agreements --disable-interactivity
 
 Additional Software (after WinGet):
   (none)

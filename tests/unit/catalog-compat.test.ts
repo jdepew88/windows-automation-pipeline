@@ -3,6 +3,8 @@ import { installable, manualItems, resolveSelection } from '../../src/engine/app
 import { CATALOG_EXCLUDED, catalogEntryById, entryForFormerKey, removalForCatalogId } from '../../src/engine/applications/catalog';
 import type { ApplicationsSelection, PackageRef } from '../../src/engine/schema/applications';
 import { profile } from './helpers';
+import { generate } from '../../src/engine/pipeline';
+import { applicationsConfig } from '../../src/engine/applications';
 
 /**
  * Catalog audit 2026-11: saved profiles that name an app removed from the automated catalog, or an app
@@ -43,6 +45,18 @@ describe('apps removed from the automated catalog', () => {
     expect(keys(r)).not.toContain(p.key);
     expect(keys(r)).toContain('winget:git.git');
     expect(r.notices.some((n) => n.key === p.key && n.kind === 'warning')).toBe(true);
+  });
+
+  it('a deployment profile that still selects a removed app generates: a warning, never an error, and the app is not in the engine plan', () => {
+    const p = profile((x) => x.applications.selection.added.push(ref('msstore', '9MSPC6MP8FM4', 'Microsoft Whiteboard')));
+    const r = generate(p);
+    expect(r.ok).toBe(true);
+    expect(r.issues.filter((i) => i.severity === 'error')).toEqual([]);
+    expect(r.issues.some((i) => i.severity === 'warning' && /Microsoft Whiteboard was removed from the automated catalog/.test(i.message))).toBe(true);
+    // Not in the engine's install list; reported to it as unresolved (with the reason) instead.
+    const cfg = applicationsConfig(p);
+    expect(cfg.packages.some((x) => x.packageIdentifier === '9MSPC6MP8FM4')).toBe(false);
+    expect(cfg.unresolved.find((x) => x.packageIdentifier === '9MSPC6MP8FM4')?.reason).toMatch(/removed from the automated catalog/);
   });
 
   it('the frozen revision-1 Touchscreen profile still loads; its removed Whiteboard is reported, the rest is planned', () => {

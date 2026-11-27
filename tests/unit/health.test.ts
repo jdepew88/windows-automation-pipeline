@@ -2,7 +2,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { catalogEntryById, catalogRef } from '../../src/engine/applications/catalog';
+import { catalogEntryById, catalogRef, verifySpec } from '../../src/engine/applications/catalog';
 import { generateOk, noApps, profile } from './helpers';
 import { ownerDefaults, importProfile } from '../../src/engine/profiles';
 import { applicationsConfig } from '../../src/engine/applications';
@@ -14,8 +14,11 @@ import { buildDeploymentPackage, buildManifest, packageFiles } from '../../src/e
 import { reviewSummary } from '../../src/engine/quick';
 import { validateProfile } from '../../src/engine/validation/validate';
 import {
+  APP_VERIFICATION_STATES,
   CustomerHandoffSchema,
   EDITION_IDS,
+  HEALTH_ENGINE_VERSION,
+  HEALTH_REPORT_JSON_SCHEMA,
   HEALTH_CATEGORIES,
   HEALTH_EXIT_CODES,
   HEALTH_STATES,
@@ -90,6 +93,79 @@ describe('verification plan (health-config.json)', () => {
     expect(Object.keys(ownerDefaults().health).sort()).toEqual(['customerNotes', 'customerReport', 'enabled', 'keepHistory', 'networkRequirement', 'openReportAfterDeployment', 'optionalApps', 'storageObservations', 'technicianReport']);
   });
 });
+
+describe('health engine 1.2.0: package-aware application verification', () => {
+  it('each selected application carries the same verify block the application engine receives (verifySpec of its catalog entry)', () => {
+    const p = profile((q) => q.applications.selection.added.push(catalogRef(catalogEntryById('nodejs-lts')!)!));
+    const c = healthConfig(p);
+    const engine = new Map(applicationsConfig(p).packages.map((x) => [x.key, x.verify]));
+    const automatic = c.applications.items.filter((x) => x.kind === 'automatic');
+    expect(automatic.length).toBeGreaterThan(3);
+    for (const it of automatic) expect(it.verify, it.key).toEqual(engine.get(it.key));
+    const node = c.applications.items.find((x) => x.key === 'winget:openjs.nodejs.lts')!;
+    expect(node.verify).toEqual(verifySpec(catalogEntryById('nodejs-lts')));
+    // Additional Software has no catalog evidence; the engine then relies on names, as before 1.2.0.
+    const q = profile((x) => additional(x, 'automatic'));
+    expect(healthConfig(q).applications.items.find((x) => x.key === 'additional:contoso-tool')!.verify).toEqual({});
+    expect(HEALTH_ENGINE_VERSION).toBe('1.2.0');
+    expect(engineSource).toContain(`$script:WdhVersion = '${HEALTH_ENGINE_VERSION}'`);
+  });
+
+  it('older plans and results keep working: every new field is read optionally', () => {
+    expect(engineSource).toContain("$v = Get-WdhKey $Item 'verify' $null");
+    for (const k of ['outcome', 'verification', 'verificationNote', 'failureClass']) expect(engineSource).toContain(`Get-WdhKey $e '${k}' ''`);
+    expect(engineSource).toContain("Get-WdhKey $Engine 'verificationEvidence'");
+  });
+
+  it('verification states extend 1.1.0 compatibly; an older report without the 1.2.0 fields still validates', () => {
+    expect(APP_VERIFICATION_STATES).toEqual(expect.arrayContaining(['InstalledAndVerified', 'InstallerSucceededUnverified', 'Missing', 'Failed', 'ManualActionRequired', 'NotSelected', 'Pending', 'Deferred']));
+    expect(APP_VERIFICATION_STATES).toEqual(expect.arrayContaining(['InstallerSucceededVerificationPending', 'InstallerSucceededVerificationFailed', 'PackageUnavailable', 'UnattendedUnsupported']));
+    const t = sampleHealthReport('technician') as { report: Record<string, unknown> };
+    const old = JSON.parse(JSON.stringify(t.report)) as Record<string, unknown> & { applications: Record<string, unknown>[]; engineVersion: string };
+    old.engineVersion = '1.1.0';
+    for (const a of old.applications) for (const k of ['evidence', 'engineEvidence', 'outcome', 'engineVerification', 'failureClass', 'verificationNote']) delete a[k];
+    delete old.runtimes;
+    delete old.appUpdates;
+    expect(HealthReportSchema.safeParse(old).success).toBe(true);
+    const bad = JSON.parse(JSON.stringify(t.report)) as { applications: { evidence: { kind: string }[] }[] };
+    bad.applications[0]!.evidence[0]!.kind = 'guess';
+    expect(HealthReportSchema.safeParse(bad).success).toBe(false);
+    const props = HEALTH_REPORT_JSON_SCHEMA.properties as Record<string, unknown>;
+    expect(Object.keys(props)).toEqual(expect.arrayContaining(['runtimes', 'appUpdates']));
+    expect(HEALTH_REPORT_JSON_SCHEMA.required).not.toContain('runtimes');
+  });
+
+  it("never loads a user hive or reads SYSTEM's profile; the WinGet listing is read-only and refused as SYSTEM", () => {
+    const body = (name: string) => {
+      const i = engineSource.indexOf(`function ${name} {`);
+      const j = engineSource.indexOf('\nfunction ', i + 10);
+      return engineSource.slice(i, j < 0 ? undefined : j);
+    };
+    expect(engineSource).not.toMatch(/reg(\.exe)?\s+load|RegLoadKey|LoadUserProfile|NTUSER\.DAT/i);
+    expect(body('Find-WdhAppEvidence')).not.toMatch(/\$env:(LOCALAPPDATA|APPDATA|USERPROFILE)/i);
+    expect(body('Get-WdhUserProfilePath')).toContain('ProfileList');
+    const wg = body('Get-WdhWinGetUpgrades');
+    const calls = [...wg.matchAll(/& \$wg ([^|]*)/g)].map((m) => m[1]!.trim());
+    expect(calls).toEqual(["'upgrade' '--source' 'winget' '--disable-interactivity' 2>&1"]);
+    expect(wg).not.toMatch(/'(install|uninstall)'|--accept|--all\b|--id\b/);
+    expect(body('Test-WdhAppUpdates')).toMatch(/if \(\$C\.Identity\.IsSystem\) \{[\s\S]*?notAsSystem[\s\S]*?return/);
+    expect(body('Test-WdhAppUpdates')).toMatch(/if \(-not \$C\.CheckAppUpdates\) \{ return \}/);
+  });
+
+  it('the runtime inventory keeps x86 and x64 apart and never calls x86 redundant', () => {
+    const rt = body2('Test-WdhRuntimes');
+    expect(rt).toContain('32-bit applications use the x86 runtime');
+    // Only the comment explains it; no message the report shows calls a runtime redundant.
+    expect(rt.split(/\r?\n/).filter((l) => /Add-WdhFinding|\$notes \+=/.test(l) && /redundant/i.test(l))).toEqual([]);
+    expect(engineSource).toContain("$script:WdhVcRedistId = '^Microsoft\\.VCRedist\\.(2015\\+|2013|2012|2010|2008|2005)\\.(x64|x86|arm64)$'");
+  });
+});
+
+const body2 = (name: string) => {
+  const i = engineSource.indexOf(`function ${name} {`);
+  const j = engineSource.indexOf('\nfunction ', i + 10);
+  return engineSource.slice(i, j < 0 ? undefined : j);
+};
 
 describe('health engine 1.1.0: post-deployment audit plan', () => {
   it('carries the Office product and the activation requests (never a key or KMS host); both stay optional for older plans', () => {
@@ -197,7 +273,7 @@ describe('profiles and packages', () => {
     ]);
     const m = buildManifest(p);
     expect(m.manifest.files.filter((f) => f.embedded && f.path.startsWith('scripts/health/')).every((f) => f.textSha256)).toBe(true);
-    expect(m.manifest).toMatchObject({ verification: { enabled: true, readOnly: true, tool: 'scripts/health/DeploymentHealth.ps1' }, paths: { healthTool: 'C:\\ProgramData\\WindowsDeploymentBuilder\\Package\\scripts\\health\\DeploymentHealth.ps1' }, generator: { healthEngine: '1.1.0' } });
+    expect(m.manifest).toMatchObject({ verification: { enabled: true, readOnly: true, tool: 'scripts/health/DeploymentHealth.ps1' }, paths: { healthTool: 'C:\\ProgramData\\WindowsDeploymentBuilder\\Package\\scripts\\health\\DeploymentHealth.ps1' }, generator: { healthEngine: '1.2.0' } });
     const pkg = buildDeploymentPackage(p, generateOk(p));
     expect(pkg.entries.some((e) => e.path === 'WindowsDeployment/scripts/health/DeploymentHealth.ps1')).toBe(true);
     expect(generateOk(p).xml).toContain('DeploymentHealth.ps1');
