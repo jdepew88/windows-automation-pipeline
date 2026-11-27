@@ -40,6 +40,10 @@
                                  backups are never included (every entry is checked afterwards)
       -Action Verify             Phase 9: verifies the deployment against Windows itself
                                  (DeploymentHealth.ps1, read-only) and writes the health reports
+      -Action RetryWindowsUpdate [-UpdateMode Status|Scan|RetryUpdates|RetryDrivers|RetryAll|ExportDiagnostics]
+                                 Retry Windows Update with the corrected engine 2.0.0
+                                 (scripts\windows-update\Invoke-WindowsUpdateRetry.ps1): a separate
+                                 run that never changes the original update records
 
     Per-user applications belong to the account the application stage ran as (Phase 5 deployment
     user). Run from another administrator account, RetryFailed, Retry, Resume and RestoreSettings
@@ -59,8 +63,10 @@
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('Menu', 'Status', 'PendingActions', 'RetryFailed', 'Retry', 'Resume', 'RestoreSettings', 'AddDrivers', 'ExportDiagnostics', 'Verify', 'Activate', 'CheckActivation')]
+    [ValidateSet('Menu', 'Status', 'PendingActions', 'RetryFailed', 'Retry', 'Resume', 'RestoreSettings', 'AddDrivers', 'ExportDiagnostics', 'Verify', 'Activate', 'CheckActivation', 'RetryWindowsUpdate')]
     [string] $Action = 'Menu',
+    [ValidateSet('Status', 'Scan', 'RetryUpdates', 'RetryDrivers', 'RetryAll', 'ExportDiagnostics')]
+    [string] $UpdateMode = 'Status',
     [ValidateSet('', 'Windows', 'Office')]
     [string] $Target = '',
     [string] $BackupPath = '',
@@ -75,7 +81,7 @@ param(
 
 $script:RecoveryMain = $MyInvocation.InvocationName -ne '.'
 # Captured first: the scripts dot-sourced below bind their own parameters in this scope.
-$script:RecoveryArgs = @{ Action = $Action; Target = $Target; BackupPath = $BackupPath; DriverPath = $DriverPath; Operation = @($Operation); IncludePermanent = [bool] $IncludePermanent; RetargetUser = [bool] $RetargetUser; Json = [bool] $Json; OutputPath = $OutputPath; Elevate = [bool] $Elevate }
+$script:RecoveryArgs = @{ Action = $Action; Target = $Target; BackupPath = $BackupPath; DriverPath = $DriverPath; Operation = @($Operation); IncludePermanent = [bool] $IncludePermanent; RetargetUser = [bool] $RetargetUser; Json = [bool] $Json; OutputPath = $OutputPath; Elevate = [bool] $Elevate; UpdateMode = $UpdateMode }
 . (Join-Path $PSScriptRoot '..\common\DeploymentCommon.ps1')
 . (Join-Path $PSScriptRoot '..\bootstrap\Initialize-Deployment.ps1')
 . (Join-Path $PSScriptRoot '..\orchestrator\Show-DeploymentStatus.ps1')
@@ -657,8 +663,15 @@ function Invoke-WdrActivation {
 }
 
 function Invoke-WdrAction {
-    param([hashtable] $Manifest, [hashtable] $Paths, [string] $Action, [string[]] $Operation = @(), [switch] $IncludePermanent, [switch] $Json, [string] $OutputPath = '', [string] $BackupPath = '', [string] $DriverPath = '', [switch] $RetargetUser, [string] $Target = '')
+    param([hashtable] $Manifest, [hashtable] $Paths, [string] $Action, [string[]] $Operation = @(), [switch] $IncludePermanent, [switch] $Json, [string] $OutputPath = '', [string] $BackupPath = '', [string] $DriverPath = '', [switch] $RetargetUser, [string] $Target = '', [string] $UpdateMode = 'Status')
     switch ($Action) {
+        'RetryWindowsUpdate' {
+            # Engine 2.0.0: the standalone Retry Windows Update tool shipped with the update engine.
+            $tool = Join-Path $Paths.Package 'scripts\windows-update\Invoke-WindowsUpdateRetry.ps1'
+            if (-not (Test-Path -LiteralPath $tool)) { return @{ Text = 'Retry Windows Update is not part of this deployment package (Windows Update automation was off, or the package predates engine 2.0.0). Copy the Windows Update retry kit to this computer and run it from there.'; Exit = 1 } }
+            $out = Invoke-WdrUpdateRetryTool $tool $UpdateMode $Paths.Root $Json $OutputPath
+            return @{ Text = ($out.Text -join "`r`n"); Exit = $(if ($out.Exit -eq 0) { 0 } else { 1 }) }
+        }
         { $_ -in 'Activate', 'CheckActivation' } {
             $r = Invoke-WdrActivation $Manifest $Paths $Action $Target
             $text = $(if ($Json) { [pscustomobject]@{ Outcome = $r.Outcome; Message = $r.Message } | ConvertTo-Json -Depth 4 } else { "$($Action): $($r.Outcome). $($r.Message)" })
@@ -702,6 +715,23 @@ function Invoke-WdrAction {
     }
 }
 
+<# Runs Invoke-WindowsUpdateRetry.ps1 in its own process (replaceable in tests). #>
+function Invoke-WdrUpdateRetryTool {
+    param([string] $Tool, [string] $Mode, [string] $DataRoot, [bool] $Json, [string] $OutputPath)
+    $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $Tool, '-Mode', $Mode, '-DataRoot', $DataRoot)
+    if ($Json) { $argList += '-Json' }
+    if ($OutputPath) { $argList += @('-OutputPath', $OutputPath) }
+    # Windows PowerShell 5.1 turns a native stderr line into a terminating error under 'Stop'.
+    $eap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $text = @(& $ps @argList 2>&1 | ForEach-Object { [string] $_ })
+        $code = $LASTEXITCODE
+    } finally { $ErrorActionPreference = $eap }
+    @{ Text = $text; Exit = $code }
+}
+
 function Show-WdrMenu {
     param([hashtable] $Manifest, [hashtable] $Paths)
     while ($true) {
@@ -715,6 +745,7 @@ function Show-WdrMenu {
         Write-Output '  7  Restore application settings from a backup folder'
         Write-Output '  8  Add driver packages from a folder (for example a network driver)'
         Write-Output '  9  Verify the deployment (health report; read-only)'
+        Write-Output '  U  Retry Windows Update (status, scan, updates, drivers, diagnostics)'
         if ($Manifest.ContainsKey('activation') -and $Manifest.activation) { Write-Output '  A  Activation: check the licensing state, or activate Windows or Office' }
         Write-Output '  0  Exit'
         $c = Read-Host 'Choose'
@@ -732,6 +763,11 @@ function Show-WdrMenu {
             '7' { Invoke-WdrAction $Manifest $Paths 'RestoreSettings' -BackupPath (Read-Host 'Backup folder or .zip (for example E:\WindowsDeployment\backups\WDB-AppBackup-...)') }
             '8' { Invoke-WdrAction $Manifest $Paths 'AddDrivers' -DriverPath (Read-Host 'Folder with INF driver packages (for example E:\Drivers\Network)') }
             '9' { Invoke-WdrAction $Manifest $Paths 'Verify' }
+            { $_ -ieq 'U' } {
+                Write-Output '  S Status (read-only)   C Scan (read-only)   N Retry normal updates   D Retry drivers   A Retry all   E Export diagnostics'
+                $m = switch -regex (Read-Host 'Choose') { '^[Ss]' { 'Status' } '^[Cc]' { 'Scan' } '^[Nn]' { 'RetryUpdates' } '^[Dd]' { 'RetryDrivers' } '^[Aa]' { 'RetryAll' } '^[Ee]' { 'ExportDiagnostics' } default { '' } }
+                if ($m) { Invoke-WdrAction $Manifest $Paths 'RetryWindowsUpdate' -UpdateMode $m } else { @{ Text = 'Nothing chosen.'; Exit = 0 } }
+            }
             { $_ -ieq 'A' -and $Manifest.ContainsKey('activation') -and $Manifest.activation } {
                 $t = Read-Host 'Activate Windows (W), Office (O), or only check the licensing state (C)?'
                 if ($t -match '^[Ww]') { Invoke-WdrAction $Manifest $Paths 'Activate' -Target 'Windows' }
@@ -753,7 +789,7 @@ if ($script:RecoveryMain) {
     $id = Get-WddIdentity
     if ($a.Elevate -and -not $id.IsAdmin) {
         $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-        Start-Process -FilePath $ps -Verb RunAs -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"", '-Action', $a.Action) + @(if ($a.Target) { '-Target', $a.Target })
+        Start-Process -FilePath $ps -Verb RunAs -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"", '-Action', $a.Action) + @(if ($a.Target) { '-Target', $a.Target }) + @(if ($a.Action -eq 'RetryWindowsUpdate') { '-UpdateMode', $a.UpdateMode })
         exit 0
     }
     if ($a.Action -eq 'Menu') {
@@ -761,7 +797,7 @@ if ($script:RecoveryMain) {
         Show-WdrMenu $manifest $paths
         exit 0
     }
-    $r = Invoke-WdrAction $manifest $paths $a.Action -Operation $a.Operation -IncludePermanent:$a.IncludePermanent -Json:$a.Json -OutputPath $a.OutputPath -BackupPath $a.BackupPath -DriverPath $a.DriverPath -RetargetUser:$a.RetargetUser -Target $a.Target
+    $r = Invoke-WdrAction $manifest $paths $a.Action -Operation $a.Operation -IncludePermanent:$a.IncludePermanent -Json:$a.Json -OutputPath $a.OutputPath -BackupPath $a.BackupPath -DriverPath $a.DriverPath -RetargetUser:$a.RetargetUser -Target $a.Target -UpdateMode $a.UpdateMode
     Write-Output $r.Text
     exit $r.Exit
 }

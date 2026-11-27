@@ -59,7 +59,7 @@ describe('earlier milestones are preserved', () => {
     const r = generateOk(profile(noApps));
     expect(r.embeddedFiles.some((f) => f.path.startsWith(APP_STAGING_DIR))).toBe(false);
     expect(commandLines(r.root).firstLogon).toHaveLength(2);
-    expect(r.assets.map((a) => a.name)).toEqual(['WindowsUpdateEngine.ps1', 'Install-UpdateEngine.ps1', 'config.json', 'README-WindowsUpdate.txt', 'orchestration.json']);
+    expect(r.assets.map((a) => a.name)).toEqual(['WindowsUpdateEngine.ps1', 'Install-UpdateEngine.ps1', 'config.json', 'Invoke-WindowsUpdateRetry.ps1', 'README-WindowsUpdate.txt', 'orchestration.json']);
   });
 
   it('Milestone 1: both engines off reproduce the Milestone 1 answer file byte for byte', () => {

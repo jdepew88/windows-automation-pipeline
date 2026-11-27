@@ -54,9 +54,9 @@ describe('Milestone 1 output is preserved', () => {
 describe('engine enabled (owner default)', () => {
   const r = generateOk(profile());
 
-  it('embeds the engine, installer and config in the staging folder', () => {
+  it('embeds the engine, installer, config and (engine 2.0.0) Retry Windows Update in the staging folder', () => {
     const files = r.embeddedFiles.filter((f) => f.path.startsWith(STAGING_DIR)).map((f) => f.path.slice(STAGING_DIR.length + 1));
-    expect(files).toEqual(['WindowsUpdateEngine.ps1', 'Install-UpdateEngine.ps1', 'config.json']);
+    expect(files).toEqual(['WindowsUpdateEngine.ps1', 'Install-UpdateEngine.ps1', 'config.json', 'Invoke-WindowsUpdateRetry.ps1']);
   });
 
   it('round-trips script text exactly through the XML (as Windows extracts it)', () => {
@@ -141,15 +141,15 @@ describe('engine configuration', () => {
     expect(engineConfig(profile((p) => (p.windowsUpdate.excludedKbs = 'kb5034441 5005463'))).excludedKbs).toEqual(['KB5034441', 'KB5005463']);
   });
 
-  it('offers four downloadable assets with CRLF line endings', () => {
+  it('offers five downloadable assets with CRLF line endings (engine 2.0.0 adds Retry Windows Update)', () => {
     const assets = updateEngineAssets(profile());
-    expect(assets.map((a) => a.name)).toEqual(['WindowsUpdateEngine.ps1', 'Install-UpdateEngine.ps1', 'config.json', 'README-WindowsUpdate.txt']);
+    expect(assets.map((a) => a.name)).toEqual(['WindowsUpdateEngine.ps1', 'Install-UpdateEngine.ps1', 'config.json', 'Invoke-WindowsUpdateRetry.ps1', 'README-WindowsUpdate.txt']);
     for (const a of assets) {
       expect(a.content.replace(/\r\n/g, ''), a.name).not.toContain('\n');
       const nonAscii = [...a.content].filter((ch) => !(ch === '\t' || ch === '\n' || ch === '\r' || (ch >= ' ' && ch <= '~')));
       expect(nonAscii, a.name).toEqual([]);
     }
-    expect(assets[3]!.content).toContain(COMPLETION_MARKER);
+    expect(assets.find((a) => a.name === 'README-WindowsUpdate.txt')!.content).toContain(COMPLETION_MARKER);
     // The pipeline adds the orchestration contract next to the engine files (Phase 3).
     expect(generateOk(profile(noApps)).assets.map((a) => a.name)).toEqual([...assets.map((a) => a.name), 'orchestration.json']);
   });

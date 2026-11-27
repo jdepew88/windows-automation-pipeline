@@ -70,6 +70,16 @@ describe.skipIf(!onWindows)('PowerShell (Windows only)', () => {
     expect(out).toMatch(/\b\d+ passed, 0 failed/);
   }, 180_000);
 
+  it('Retry Windows Update scenarios pass (engine 2.0.0 recovery tool; simulated tasks, nothing installed)', async () => {
+    let out: string;
+    try {
+      out = await psAsync(['-File', script('../powershell/UpdateRetry.Tests.ps1')]);
+    } catch (e) {
+      throw new Error(`UpdateRetry.Tests.ps1 failed:\n${(e as { stdout?: string }).stdout ?? e}`);
+    }
+    expect(out).toMatch(/\b\d+ passed, 0 failed/);
+  }, 180_000);
+
   it('application engine and bootstrap scenarios pass; every result.json matches the published schema', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'wda-results-'));
     try {

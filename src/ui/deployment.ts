@@ -1,12 +1,15 @@
 import type { GenerateResult } from '../engine/pipeline';
 import type { Profile } from '../engine/schema/profile';
-import { DATA_ROOT } from '../engine/windows-update';
+import { DATA_ROOT, RECOVERY_KIT_FILE } from '../engine/windows-update';
 import { PACKAGE_DIR, PACKAGE_ROOT, RESUME_SCRIPT, STATUS_SCRIPT, buildDeploymentPackage, type DeploymentPackage } from '../engine/deployment';
 import { ASSISTANT_BUNDLE, ASSISTANT_SCRIPT, MICROSOFT_DOWNLOAD, WINDOWS_RELEASES, assistantBundle, mediaRequirements } from '../engine/media';
 import { settingsRestoreActive } from '../engine/migration/plan';
 import { driverMediaBlock } from '../engine/drivers';
 import { clear, download, h } from './dom';
 import { icon, type IconName } from './icons';
+
+/** The standalone Windows Update recovery download (scripts/build-update-recovery-kit.ts). */
+const RECOVERY_KIT_URL = `downloads/${RECOVERY_KIT_FILE}`;
 
 /** The ZIP for the current configuration, built on demand (in the browser, offline). */
 export function currentPackage(p: Profile, result: GenerateResult): DeploymentPackage | null {
@@ -95,6 +98,12 @@ export function renderDeploymentPage(): DeploymentPageHandle {
             h('div', { class: 'dl-option recommended' }, h('strong', {}, 'Complete deployment package (recommended)'), h('p', {}, `${PACKAGE_DIR}\\ plus the answer file, ready to extract to the root of a Windows 11 installation USB drive. Verifies itself; works after the USB drive is removed.`)),
             h('div', { class: 'dl-option' }, h('strong', {}, 'Answer file only'), h('p', {}, 'autounattend.xml by itself. It already embeds the Windows Update and application engines and the orchestrator, but it has no manual entry point, documentation or verification tools.')),
             h('div', { class: 'dl-option' }, h('strong', {}, 'Individual scripts'), h('p', {}, 'Single engine files for inspection or troubleshooting: ', h('a', { href: '#deployment-assets' }, 'Deployment assets'), ' on the Review page.')),
+            h(
+              'div',
+              { class: 'dl-option', 'data-testid': 'update-recovery-download' },
+              h('strong', {}, 'Windows Update recovery (computers already installed)'),
+              h('p', {}, 'Retry Windows Update with the current engine on a computer deployed before engine 2.0.0, whose updates and drivers failed with 0x80131508. Status, scan, retry and diagnostics; the original Windows Update results and report are never changed, and nothing runs by itself. Packages built now already include it (Deployment Recovery, menu U). ', h('a', { href: RECOVERY_KIT_URL, download: '' }, 'Download (ZIP)')),
+            ),
           ),
         ),
         card('contents-card', head('Package contents', 'list', 'Every file, its size and its role. The manifest lists the SHA-256 of each one; setup.ps1 and the orchestrator check them before running anything.'), contents),
