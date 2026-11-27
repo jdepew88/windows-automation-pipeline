@@ -16,7 +16,7 @@ async function go(page: Page, target: string) {
   await expect(page.locator(`#${target}`)).toBeVisible();
 }
 
-test('the Windows Update recovery download is offered and contains engine 2.0.0 and Retry Windows Update', async ({ page }) => {
+test('the Windows Update recovery download is offered and contains engine 2.1.0, Retry Windows Update and the health audit', async ({ page }) => {
   await page.addInitScript(() => {
     if (!sessionStorage.getItem('e2e-init')) {
       localStorage.setItem('wdb.mode', 'advanced');
@@ -33,9 +33,11 @@ test('the Windows Update recovery download is offered and contains engine 2.0.0 
   const { readZip } = await import('../../src/engine/deployment/zip');
   const entries = readZip(new Uint8Array(await res.body()));
   expect(entries.map((e) => e.path).sort()).toEqual(
-    ['README.txt', 'files.json', 'Invoke-WindowsUpdateRetry.ps1', 'WindowsUpdateEngine.ps1'].map((f) => `WDB-WindowsUpdate/${f}`).sort(),
+    ['README.txt', 'files.json', 'Invoke-WindowsUpdateRetry.ps1', 'WindowsUpdateEngine.ps1', 'health/DeploymentHealth.ps1', 'health/HealthReport.html', 'common/DeploymentCommon.ps1']
+      .map((f) => `WDB-WindowsUpdate/${f}`)
+      .sort(),
   );
   const engine = new TextDecoder().decode(entries.find((e) => e.path.endsWith('WindowsUpdateEngine.ps1'))!.data);
-  expect(engine).toContain("$script:EngineVersion = '2.0.0'");
+  expect(engine).toContain("$script:EngineVersion = '2.1.0'");
   expect(engine).toContain('return , $coll');
 });

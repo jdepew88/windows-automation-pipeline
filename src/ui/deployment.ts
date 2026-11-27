@@ -101,8 +101,8 @@ export function renderDeploymentPage(): DeploymentPageHandle {
             h(
               'div',
               { class: 'dl-option', 'data-testid': 'update-recovery-download' },
-              h('strong', {}, 'Windows Update recovery (computers already installed)'),
-              h('p', {}, 'Retry Windows Update with the current engine on a computer deployed before engine 2.0.0, whose updates and drivers failed with 0x80131508. Status, scan, retry and diagnostics; the original Windows Update results and report are never changed, and nothing runs by itself. Packages built now already include it (Deployment Recovery, menu U). ', h('a', { href: RECOVERY_KIT_URL, download: '' }, 'Download (ZIP)')),
+              h('strong', {}, 'Windows Update recovery and health audit (computers already installed)'),
+              h('p', {}, 'Retry Windows Update with the current engine on a computer that is already installed (also one deployed before engine 2.0.0, whose updates failed with 0x80131508), and the read-only health audit. Status, check for updates, retry, diagnostics; the original Windows Update results and report are never changed, and nothing runs by itself. Packages built now already include both (Deployment Recovery, menu U). ', h('a', { href: RECOVERY_KIT_URL, download: '' }, 'Download (ZIP)')),
             ),
           ),
         ),

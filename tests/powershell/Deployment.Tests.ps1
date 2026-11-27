@@ -1342,18 +1342,23 @@ Test-Scenario 'Engine 2.0.0: the deployment report carries the engine version, r
         passes = @(@{ pass = 'A'; updates = @('SSU') }, @{ pass = 'B'; updates = @('CU') }, @{ pass = 'D'; updates = @() })
         engineExceptions = @(@{ operation = 'install: IUpdateInstaller.Install'; type = 'System.Runtime.InteropServices.COMException'; hresult = '0x8024000B'; message = 'x'; line = 12; statement = ''; updates = @('KB1') })
         drivers = @(@{ title = 'Intel - System - 10.1'; device = @{ model = 'Intel SM Bus'; hardwareID = 'PCI\VEN_8086&DEV_51A3' }; result = 'Succeeded' })
-        verification = @{ remainingOffered = 1; noLongerOffered = @(@{ title = 'old preview' }); devicesWithProblems = @(@{ name = 'USB device'; problem = 43 }); rebootPending = $false } }
+        verification = @{ remainingOffered = 1; noLongerOffered = @(@{ title = 'old preview' }); devicesWithProblems = @(@{ name = 'USB device'; problem = 43 }); rebootPending = $false }
+        updateState = 'CompletedWithFailures'; updateStateText = '1 selected update(s) could not be installed.'
+        summary = @{ installed = 1; superseded = 1; notApplicable = 0; excluded = 2; previewsExcluded = 1; downloadFailed = 0; installFailed = 1; awaitingRestart = $false; remaining = 1; notAttempted = 0 }
+        settingsRefresh = @{ available = $true; requested = $true; completed = $true; settingsDisplayVerified = $false; message = 'Windows Update completed a check.' } }
     Set-EngineResult 'applications' 'Succeeded' @{ packages = @(@{ name = 'Git'; packageIdentifier = 'Git.Git'; source = 'winget'; status = 'Succeeded'; attempts = 1; exitCode = 0; message = '' }) }
     $outcome = Invoke-WddMonitor $script:Paths
     Assert-True ($outcome -like 'Completed:*') "the deployment completes ($outcome)"
     $r = Read-WddJson $script:Paths.ReportJson
     $w = $r.windowsUpdate
     Assert-Equal "$($w.engineVersion) $(@($w.engineExceptions).Count) $(@($w.passes).Count) $($w.devicesAfterUpdates)" '2.0.0 1 3 1' 'engine 2.0.0 details in the JSON report'
+    Assert-Equal "$($w.updateState) $($w.summary.previewsExcluded) $($w.settingsRefresh.completed)" 'CompletedWithFailures 1 True' 'engine 2.1.0 state, counts and Settings refresh in the JSON report'
     Assert-Equal "$($w.failedUpdates[0].category) $($w.failedUpdates[0].lastHResult)" 'InstallerFailure 0x800F0922' 'failure category carried into the report'
     Assert-True (@($r.remainingTasks) -match 'KB5099999.*0x800F0922, InstallerFailure').Count 'follow-up names the code and category'
     Assert-True (@($r.remainingTasks) -match 'Check free space on the system reserved partition').Count 'technician action is a follow-up'
     $txt = Get-Content -LiteralPath $script:Paths.ReportText -Raw -Encoding UTF8
-    foreach ($t in 'Engine: 2.0.0', 'Readiness: Ready after 2 search', 'Passes: A (1), B (1), D (0)', 'Failures by category: InstallerFailure 1', 'ENGINE  install: IUpdateInstaller.Install', 'not an update failure', 'DRIVER  Intel - System - 10.1 -> Intel SM Bus [PCI\VEN_8086&DEV_51A3]', 'Final check: 1 still offered, 1 no longer offered', '1 device(s) with problems', 'FAILED  KB5099999 2026-11 Cumulative Update (2 attempts, 0x800F0922, InstallerFailure)', 'ACTION  Check free space') {
+    foreach ($t in 'Engine: 2.0.0', 'Readiness: Ready after 2 search', 'Passes: A (1), B (1), D (0)', 'Failures by category: InstallerFailure 1', 'ENGINE  install: IUpdateInstaller.Install', 'not an update failure', 'DRIVER  Intel - System - 10.1 -> Intel SM Bus [PCI\VEN_8086&DEV_51A3]', 'Final check: 1 still offered, 1 no longer offered', '1 device(s) with problems', 'FAILED  KB5099999 2026-11 Cumulative Update (2 attempts, 0x800F0922, InstallerFailure)', 'ACTION  Check free space',
+               'Update state: CompletedWithFailures. 1 selected update(s) could not be installed.', 'excluded by policy 2 (previews 1)', 'Settings refresh: available True, requested True, completed True; Settings page display not verified') {
         Assert-True ($txt.Contains($t)) "text report: $t"
     }
     Assert-True (-not $txt.Contains('Post-install')) 'no post-install section (not part of this branch)'

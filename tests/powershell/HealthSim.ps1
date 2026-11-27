@@ -66,6 +66,15 @@ function Reset-HealthSim {
         reg            = $reg
         fail           = @()
         opened         = New-Object System.Collections.Generic.List[string]
+        # Health engine 1.1.0 probes: display adapters, processors, chassis, the Windows Update history
+        # and the orchestrator's last scan. Every suite that runs the audit uses these, so nothing on
+        # this computer is read.
+        videoControllers = @(@{ name = 'NVIDIA GeForce RTX 3060'; pnpDeviceId = 'PCI\VEN_10DE&DEV_2504&SUBSYS_397D1462&REV_A1\4&2A5A3C1&0&0008' })
+        processors     = @(@{ name = 'Intel(R) Core(TM) i7-12700K'; manufacturer = 'GenuineIntel' })
+        chassis        = @{ chassisTypes = @(3); battery = $false }
+        updateHistory  = @()
+        HistoryQueries = 0
+        orchestrator   = @{ lastSuccessfulScanUtc = '2026-10-20T09:41:00.0000000Z'; isScanning = $false; isWorking = $false }
     }
 }
 
@@ -99,6 +108,11 @@ function Test-WdhTcp { param([string] $HostName, [int] $Port = 443) [bool] $scri
 function Get-WdhVolume { Assert-SimProbe 'volume'; $script:M.volume }
 function Get-WdhPhysicalDisks { Assert-SimProbe 'physicalDisks'; @($script:M.physicalDisks) }
 function Open-WdhReport { param([string] $Path) $script:M.opened.Add($Path) }
+function Get-WdhVideoControllers { Assert-SimProbe 'videoControllers'; @($script:M.videoControllers) }
+function Get-WdhProcessors { Assert-SimProbe 'processors'; @($script:M.processors) }
+function Get-WdhChassis { Assert-SimProbe 'chassis'; $script:M.chassis }
+function Get-WdhUpdateHistory { Assert-SimProbe 'updateHistory'; $script:M.HistoryQueries++; @($script:M.updateHistory) }
+function Get-WdhOrchestratorScan { Assert-SimProbe 'orchestrator'; $script:M.orchestrator }
 function Register-WdhRecheckTask { param([string] $Script) $script:SimTasks['\WindowsDeploymentBuilder\HealthCheck'] = 'SYSTEM' }
 
 function Get-WdhRegValue {

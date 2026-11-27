@@ -133,11 +133,12 @@ test('Quick Deployment end to end under the production policy: live counts, Fina
     expect(e, f.path).toBeTruthy();
     expect(createHash('sha256').update(e!.data).digest('hex').toUpperCase(), f.path).toBe(f.sha256.toUpperCase());
   }
-  // Windows Update engine 2.0.0 (the 0x80131508 fix) and Retry Windows Update ship in the package.
+  // Windows Update engine 2.1.0 (with the 2.0.0 fix for 0x80131508), Retry Windows Update and the health audit ship in the package.
   const wuEngine = new TextDecoder().decode(entries.find((e) => e.path === 'WindowsDeployment/scripts/windows-update/WindowsUpdateEngine.ps1')!.data);
-  expect(wuEngine).toContain("$script:EngineVersion = '2.0.0'");
+  expect(wuEngine).toContain("$script:EngineVersion = '2.1.0'");
   expect(wuEngine).toContain('return , $coll');
   expect(paths).toContain('WindowsDeployment/scripts/windows-update/Invoke-WindowsUpdateRetry.ps1');
+  expect(paths).toContain('WindowsDeployment/scripts/health/DeploymentHealth.ps1');
   // The package's application manifest is the step 2 selection, nothing more or less.
   expect(paths).toContain('WindowsDeployment/scripts/applications/applications-config.json');
   const cfg = JSON.parse(new TextDecoder().decode(entries.find((e) => e.path.endsWith('applications-config.json'))!.data)) as { packages: { key: string }[]; manual: { key: string }[] };

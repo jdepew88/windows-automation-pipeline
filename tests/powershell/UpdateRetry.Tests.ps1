@@ -83,7 +83,8 @@ $tests['retry configurations: own folder, marker and task; selection per mode; t
     $root = New-DataRoot; Write-FieldResult $root
     $n = New-WurRunConfig $root 'normal' 'r1'
     Assert-Equal "$($n.workFolder) $($n.markerName) $($n.taskName)" 'UpdateRetry\r1 windows-update-retry.done WindowsUpdateRetry' 'separate from the original run'
-    Assert-Equal "$($n.selection) $($n.drivers) $($n.optionalUpdates)" 'normal exclude skip' 'normal updates only'
+    # Tool 1.1.0: Windows updates as the deployment's policy allows (optional and previews included), no drivers.
+    Assert-Equal "$($n.selection) $($n.drivers) $($n.optionalUpdates) $($n.previewUpdates)" 'normal exclude install True' 'Windows updates under the deployment policy, no drivers'
     $d = New-WurRunConfig $root 'drivers' 'r2'
     Assert-Equal "$($d.selection) $($d.drivers) $($d.optionalUpdates)" 'drivers include install' 'drivers, optional ones included'
     $a = New-WurRunConfig $root 'all' 'r3'
@@ -182,6 +183,106 @@ $tests['diagnostics: a ZIP with copies of logs, results, the comparison and hist
     Assert-True (-not ($names -contains 'Updates/engine.ps1')) 'scripts are not exported'
     Assert-True (Test-Path -LiteralPath (Join-Path $root 'Updates\logs\engine.log')) 'originals kept'
     Remove-Item -LiteralPath $zip -Force
+}
+
+<# A finished retry run as the engine leaves it. #>
+function Write-FinishedRun {
+    param([string] $Root, [string] $RunId, [string] $Selection, [string] $Final = 'Succeeded', [int] $Installed = 1, [string] $UpdateState = 'UpToDate')
+    $dir = Join-Path $Root "UpdateRetry\$RunId"
+    Write-WurJson (Join-Path $dir 'config.json') @{ selection = $Selection }
+    Write-WurJson (Join-Path $dir 'state.json') @{ final = $Final }
+    Write-WurJson (Join-Path $dir 'result.json') ([ordered]@{ status = $Final; engineVersion = '2.1.0'; installed = @(1..$Installed | ForEach-Object { @{ title = "u$_"; kbs = @("KB$_") } }); failed = @(); skipped = @()
+        updateState = $UpdateState; updateStateText = "state $UpdateState"; verification = @{ devicesWithProblems = @(); rebootPending = $false } })
+    $dir
+}
+
+$tests['tool 1.1.0 advice: after RetryUpdates and RetryDrivers both succeeded, no further retry is suggested; the health audit is'] = {
+    Reset-Sim
+    $root = New-DataRoot; Write-FieldResult $root
+    [void] (Write-FinishedRun $root '20261127-100000-normal' 'normal' 'Succeeded' 1)
+    [void] (Write-FinishedRun $root '20261127-110000-drivers' 'drivers' 'Succeeded' 9)
+    $s = Get-WurStatus $root
+    Assert-True (@($s.advice | Where-Object { $_ -like '*RetryUpdates*' -and $_ -notlike 'Recovery complete*' }).Count -eq 0) "no retry suggested: $($s.advice -join ' | ')"
+    Assert-True (@($s.advice | Where-Object { $_ -like 'Recovery complete: RetryUpdates Succeeded, RetryDrivers Succeeded*-Mode HealthAudit*' }).Count -eq 1) 'health audit recommended'
+    Assert-True ((Show-WurStatus $s) -match 'UpToDate') 'update state shown per retry'
+}
+
+$tests['tool 1.1.0 advice: only the part that has not succeeded is suggested; a failed last retry points at its result'] = {
+    Reset-Sim
+    $root = New-DataRoot; Write-FieldResult $root
+    [void] (Write-FinishedRun $root '20261127-100000-normal' 'normal' 'Succeeded' 1)
+    $s = Get-WurStatus $root
+    Assert-True (@($s.advice | Where-Object { $_ -like '*Run -Mode RetryDrivers (the other part already succeeded)*' }).Count -eq 1) "drivers only: $($s.advice -join ' | ')"
+    [void] (Write-FinishedRun $root '20261127-110000-drivers' 'drivers' 'CompletedWithFailures' 2 'CompletedWithFailures')
+    [void] (Write-FinishedRun $root '20261127-120000-drivers' 'drivers' 'CompletedWithFailures' 0 'CompletedWithFailures')
+    $s = Get-WurStatus $root
+    Assert-True (@($s.advice | Where-Object { $_ -like '*Run -Mode RetryDrivers*' }).Count -eq 1) 'drivers never succeeded: still suggested'
+}
+
+$tests['tool 1.1.0 run phases: running, awaiting restart, resuming after restart, stopped without a task'] = {
+    Reset-Sim
+    $root = New-DataRoot; Write-FieldResult $root
+    $dir = Join-Path $root 'UpdateRetry\20261127-100000-normal'
+    Write-WurJson (Join-Path $dir 'config.json') @{ selection = 'normal' }
+    Write-WurJson (Join-Path $dir 'status.json') @{ phase = 'Installing' }
+    $script:Sim.Task = [pscustomobject]@{ State = 'Running' }
+    Assert-True (@((Get-WurStatus $root).advice | Where-Object { $_ -like '*is running. Follow it with -Mode RetryUpdates -Wait*' }).Count -eq 1) 'running'
+    Write-WurJson (Join-Path $dir 'status.json') @{ phase = 'Rebooting' }
+    Assert-True (@((Get-WurStatus $root).advice | Where-Object { $_ -like '*waiting for a restart and continues by itself*' }).Count -eq 1) 'awaiting restart'
+    $script:Sim.Task = [pscustomobject]@{ State = 'Ready' }
+    Write-WurJson (Join-Path $dir 'status.json') @{ phase = 'Starting' }
+    $s = Get-WurStatus $root
+    Assert-True (@($s.advice | Where-Object { $_ -like '*unfinished and continues by itself*' }).Count -eq 1) 'resuming'
+    Assert-True ((Show-WurStatus $s) -match 'unfinished \(Resuming\)') 'phase shown'
+    $script:Sim.Task = $null
+    Assert-True (@((Get-WurStatus $root).advice | Where-Object { $_ -like '*stopped before finishing (it will not continue by itself)*' }).Count -eq 1) 'stopped'
+    Assert-True (@((Get-WurStatus $root).advice | Where-Object { $_ -like '*collection defect*' }).Count -eq 0) 'no new retry suggested while one is unfinished'
+}
+
+$tests['tool 1.1.0 health audit: the copy beside the tool is preferred, then the installed package; missing is said plainly'] = {
+    $root = New-DataRoot
+    Assert-Equal (Get-WurHealthScript $root) $null 'none found in an empty data root (and not beside the tool in src)'
+    $pkg = Join-Path $root 'Package\scripts\health'
+    New-Item -ItemType Directory -Path $pkg -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $pkg 'DeploymentHealth.ps1') -Value '# stub'
+    Assert-Equal (Get-WurHealthScript $root) (Join-Path $pkg 'DeploymentHealth.ps1') 'installed package copy'
+    $r = Invoke-WurHealthAudit (New-DataRoot)
+    Assert-True ($r.Exit -eq 1 -and ($r.Text -join ' ') -like '*not on this computer*recovery download*') 'missing'
+}
+
+$tests['tool 1.1.0 advice never claims success it has not seen: a failed kind, updates still to do, no result, drivers excluded, an older unfinished run'] = {
+    Reset-Sim
+    # No recovery needed originally; RetryUpdates failed, then RetryDrivers succeeded: RetryUpdates again, not "complete".
+    $root = New-DataRoot
+    Write-WurJson (Join-Path $root 'Updates\result.json') ([ordered]@{ status = 'Succeeded'; engineVersion = '2.1.0'; installed = @(); failed = @(); skipped = @() })
+    Write-WurJson (Join-Path $root 'Updates\config.json') @{ drivers = 'include'; optionalUpdates = 'install' }
+    [void] (Write-FinishedRun $root '20261127-100000-normal' 'normal' 'CompletedWithFailures' 0 'CompletedWithFailures')
+    [void] (Write-FinishedRun $root '20261127-110000-drivers' 'drivers' 'Succeeded' 2)
+    $a = @((Get-WurStatus $root).advice)
+    Assert-True (@($a | Where-Object { $_ -like '*RetryUpdates last finished CompletedWithFailures*Run -Mode RetryUpdates (the other part already succeeded)*' }).Count -eq 1) "failed kind named: $($a -join ' | ')"
+    Assert-True (@($a | Where-Object { $_ -like 'Recovery complete*' }).Count -eq 0) 'never "complete"'
+    # The last run succeeded but reports updates still to do: said, and not "complete".
+    [void] (Write-FinishedRun $root '20261127-120000-normal' 'normal' 'Succeeded' 1 'UpdatesRemaining')
+    $a = @((Get-WurStatus $root).advice)
+    Assert-True (@($a | Where-Object { $_ -like '*reports UpdatesRemaining*' }).Count -eq 1 -and @($a | Where-Object { $_ -like 'Recovery complete*' }).Count -eq 0) "remaining said: $($a -join ' | ')"
+    # A finished run without result.json confirms nothing.
+    $root = New-DataRoot; Write-FieldResult $root
+    [void] (Write-FinishedRun $root '20261127-100000-configured' 'configured' 'Succeeded' 1)
+    Remove-Item -LiteralPath (Join-Path $root 'UpdateRetry\20261127-100000-configured\result.json')
+    $a = @((Get-WurStatus $root).advice)
+    Assert-True (@($a | Where-Object { $_ -like '*left no result; nothing is confirmed*' }).Count -eq 1) "no result: $($a -join ' | ')"
+    # The deployment excluded drivers: RetryUpdates alone completes the recovery.
+    $root = New-DataRoot; Write-FieldResult $root
+    Write-WurJson (Join-Path $root 'Updates\config.json') @{ drivers = 'exclude'; optionalUpdates = 'install' }
+    [void] (Write-FinishedRun $root '20261127-100000-normal' 'normal' 'Succeeded' 1)
+    $a = @((Get-WurStatus $root).advice)
+    Assert-True (@($a | Where-Object { $_ -like 'Recovery complete*drivers excluded by the deployment*' }).Count -eq 1 -and @($a | Where-Object { $_ -like '*RetryDrivers*' -and $_ -notlike 'Recovery complete*' }).Count -eq 0) "no driver retry: $($a -join ' | ')"
+    # Two unfinished runs: only the newest can own the task; the older one is stopped.
+    $root = New-DataRoot; Write-FieldResult $root
+    foreach ($id in '20261127-100000-normal', '20261127-110000-drivers') { $d = Join-Path $root "UpdateRetry\$id"; Write-WurJson (Join-Path $d 'config.json') @{ selection = $id.Split('-')[-1] }; Write-WurJson (Join-Path $d 'status.json') @{ phase = 'Installing' } }
+    $script:Sim.Task = [pscustomobject]@{ State = 'Running' }
+    $s = Get-WurStatus $root
+    Assert-Equal (@($s.retries | ForEach-Object { "$($_.runId)=$($_.phase)" }) -join ' ') '20261127-100000-normal=Stopped 20261127-110000-drivers=Running' 'phases'
 }
 
 $tests['the engine beside the tool must be 2.0.0 or later'] = {

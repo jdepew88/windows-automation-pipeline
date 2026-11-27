@@ -2,6 +2,9 @@ import { createZip, type ZipEntry } from '../deployment/zip';
 import { encodeFile } from '../deployment';
 import { sha256 } from '../deployment/sha256';
 import { DATA_ROOT, ENGINE_FILE, ENGINE_SOURCE, ENGINE_VERSION, RECOVERY_KIT_DIR, RETRY_FILE, RETRY_SOURCE } from '.';
+import healthSource from '../health/scripts/DeploymentHealth.ps1?raw';
+import healthTemplate from '../health/scripts/HealthReport.html?raw';
+import commonSource from '../deployment/scripts/DeploymentCommon.ps1?raw';
 
 /**
  * The standalone Windows Update recovery download (dist/downloads/windows-update-recovery.zip,
@@ -9,6 +12,9 @@ import { DATA_ROOT, ENGINE_FILE, ENGINE_SOURCE, ENGINE_VERSION, RECOVERY_KIT_DIR
  *
  *   WDB-WindowsUpdate/WindowsUpdateEngine.ps1        engine 2.0.0 or later
  *   WDB-WindowsUpdate/Invoke-WindowsUpdateRetry.ps1  Retry Windows Update (finds the engine next to it)
+ *   WDB-WindowsUpdate/health/DeploymentHealth.ps1    the read-only health audit (-Mode HealthAudit)
+ *   WDB-WindowsUpdate/health/HealthReport.html       its report template
+ *   WDB-WindowsUpdate/common/DeploymentCommon.ps1    shared functions the audit loads (..\common)
  *   WDB-WindowsUpdate/README.txt
  *   WDB-WindowsUpdate/files.json                     SHA-256 of every file
  *
@@ -50,11 +56,19 @@ administrator in it and run, in order:
        Start it once step 4's run has finished (-Mode Status lists it as Succeeded,
        CompletedWithFollowUp or CompletedWithFailures); until then it is refused and nothing changes.
   6. ${rw} -Mode Status
-  7. ${rw} -Mode ExportDiagnostics
+       Advice follows what happened: once the retries succeeded it recommends the health audit,
+       never another retry.
+  7. ${rw} -Mode HealthAudit
+       Read-only health audit of the computer now (Windows Update, devices, applications, Office,
+       manufacturer software recommendations, recovery history). Writes only its report under
+       ${DATA_ROOT}\\reports\\health. The original deployment report is never rewritten.
+  8. ${rw} -Mode ExportDiagnostics
        Includes comparison.txt: the original run against each retry.
 
-Also: -Mode RetryAll (everything the deployment's policy allows). Add -Json for machine-readable
-output.
+RetryUpdates installs every Windows update the deployment's policy allows (security,
+cumulative, .NET, Defender, MSRT, and the Windows and .NET preview updates when the policy
+includes previews); RetryDrivers installs drivers. -Mode RetryAll does both in one run. Firmware,
+feature updates and Insider builds are never installed. Add -Json for machine-readable output.
 
 A good result: no 0x80131508 anywhere; anything still failing carries a Windows Update code and
 category (for example InstallerFailure 0x800F0922 or NotApplicable), never EngineException.
@@ -62,6 +76,7 @@ category (for example InstallerFailure 0x800F0922 or NotApplicable), never Engin
 Files
   ${ENGINE_FILE}         Windows Update engine ${ENGINE_VERSION}
   ${RETRY_FILE}  Retry Windows Update (needs the engine in the same folder)
+  health\\DeploymentHealth.ps1    read-only health audit (needs common\\ beside it)
   files.json                      SHA-256 of every file
 `);
 }
@@ -75,6 +90,9 @@ export function recoveryKitFiles(): RecoveryKitFile[] {
   return [
     { path: ENGINE_FILE, content: crlf(ENGINE_SOURCE) },
     { path: RETRY_FILE, content: crlf(RETRY_SOURCE) },
+    { path: 'health/DeploymentHealth.ps1', content: crlf(healthSource) },
+    { path: 'health/HealthReport.html', content: crlf(healthTemplate) },
+    { path: 'common/DeploymentCommon.ps1', content: crlf(commonSource) },
     { path: 'README.txt', content: recoveryKitReadme() },
   ];
 }

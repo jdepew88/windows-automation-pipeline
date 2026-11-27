@@ -167,6 +167,18 @@ export const MIGRATIONS: Record<number, Migration> = {
       activation: isObj(input.activation) ? input.activation : { windows: 'none', windowsMethod: 'digitalLicense', windowsKmsHost: '', office: 'none', officeMethod: 'kms', officeKmsHost: '' },
     },
   }),
+
+  // v10 separates Windows and .NET Framework preview updates from the other optional updates
+  // ("Install preview updates"). Up to schema 9 "Optional and preview updates" covered both, so an
+  // older profile keeps exactly what it installed: previews follow its optionalUpdates choice.
+  9: (input) => {
+    if (!isObj(input.windowsUpdate) || typeof input.windowsUpdate.previewUpdates === 'boolean') return { value: input };
+    const previews = input.windowsUpdate.optionalUpdates !== 'skip';
+    return {
+      value: { ...input, windowsUpdate: { ...input.windowsUpdate, previewUpdates: previews } },
+      note: previews ? undefined : 'Preview updates (separate from the other optional updates since schema version 10) stay off for this profile, as before.',
+    };
+  },
 };
 
 /** The six (empty) built-in profiles of schema version 3, for the v2→v3 step. */
