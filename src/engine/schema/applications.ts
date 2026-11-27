@@ -119,7 +119,7 @@ export const ApplicationsSelectionSchema = z
     addedWith: z.record(z.string().max(200), z.array(z.string().max(48)).max(50)).optional(),
     /** Package keys ("source:id", lower case) removed from the combined selection. */
     removed: z.array(z.string().max(200)).max(1000),
-    /** Built-in profile revision this deployment uses (schema version 10; absent = 1). */
+    /** Built-in profile revision this deployment uses (schema version 11; absent = 1). */
     profileRevision: ProfileRevisionSchema.optional(),
   })
   .strict();

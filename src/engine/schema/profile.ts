@@ -11,7 +11,7 @@ import { HealthSchema } from './health';
  *
  * Bump {@link SCHEMA_VERSION} and add a migration in `migrations.ts` for any breaking change.
  */
-export const SCHEMA_VERSION = 10;
+export const SCHEMA_VERSION = 11;
 
 export const ScriptTypeSchema = z.enum(['ps1', 'cmd', 'reg', 'vbs']);
 export type ScriptType = z.infer<typeof ScriptTypeSchema>;
@@ -173,6 +173,8 @@ export const ProfileSchema = z
         drivers: z.enum(['followPolicy', 'include', 'exclude']),
         featureUpdates: z.enum(['skip', 'install']),
         optionalUpdates: z.enum(['skip', 'install']),
+        /** Schema 10: optional Windows and .NET Framework preview updates (independent of optional drivers). */
+        previewUpdates: bool,
         microsoftUpdate: bool,
         maxReboots: z.number().int(),
         maxAttemptsPerUpdate: z.number().int(),

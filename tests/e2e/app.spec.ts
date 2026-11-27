@@ -214,21 +214,25 @@ test('Windows Update automation: on by default, assets downloadable, policy conf
 
   const assets = page.getByTestId('assets');
   await go(page, 'review');
-  // 4 engine files + orchestration.json (the application assets of Core Essentials are a separate group since Phase 4.2).
-  await expect(assets.locator('[data-asset-group="windows-update"] [data-asset]')).toHaveCount(4);
+  // 5 engine files (engine 2.0.0 adds Retry Windows Update) + orchestration.json (the application assets of Core Essentials are a separate group since Phase 4.2).
+  await expect(assets.locator('[data-asset-group="windows-update"] [data-asset]')).toHaveCount(5);
   await expect(assets.locator('[data-asset-group="orchestration"] [data-asset]')).toHaveCount(1);
   const [dl] = await Promise.all([page.waitForEvent('download'), assets.locator('[data-asset="config.json"] [data-action="download-asset"]').click()]);
   expect(dl.suggestedFilename()).toBe('config.json');
   const config = JSON.parse(await readFile((await dl.path())!, 'utf8'));
-  expect(config).toMatchObject({ drivers: 'include', featureUpdates: 'skip', maxReboots: 10 });
+  expect(config).toMatchObject({ drivers: 'include', featureUpdates: 'skip', maxReboots: 10, previewUpdates: true, settingsRefresh: true });
 
   await page.getByRole('button', { name: 'Advanced', exact: true }).click();
   await go(page, 'windowsUpdate');
+  // Schema 10: "Install preview updates" is on by default; off excludes only the previews.
+  await expect(checkbox(page, 'windowsUpdate.previewUpdates')).toBeChecked();
+  await expect(field(page, 'windowsUpdate.previewUpdates')).toContainText('Include optional Windows and .NET Framework preview updates during deployment.');
+  await checkbox(page, 'windowsUpdate.previewUpdates').uncheck();
   await page.locator('input[name="windowsUpdate.maxReboots"]').fill('3');
   await page.locator('input[name="windowsUpdate.excludedKbs"]').fill('KB5034441');
   await go(page, 'review');
   const [dl2] = await Promise.all([page.waitForEvent('download'), assets.locator('[data-asset="config.json"] [data-action="download-asset"]').click()]);
-  expect(JSON.parse(await readFile((await dl2.path())!, 'utf8'))).toMatchObject({ maxReboots: 3, excludedKbs: ['KB5034441'] });
+  expect(JSON.parse(await readFile((await dl2.path())!, 'utf8'))).toMatchObject({ maxReboots: 3, excludedKbs: ['KB5034441'], previewUpdates: false, optionalUpdates: 'install', drivers: 'include' });
 
   // The conflict with a policy that withholds drivers (an older profile's or an organization's choice).
   await go(page, 'updates');

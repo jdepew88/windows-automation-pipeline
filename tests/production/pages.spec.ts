@@ -68,6 +68,10 @@ test('security headers on pages, assets and downloads; source maps and _headers 
   expect(h['cache-control'] ?? '').not.toContain('immutable');
   expect((await request.get(`/${asset}.map`)).status()).toBe(404);
   expect((await request.get('/_headers')).status()).toBe(404);
+  // The standalone Windows Update recovery download (engine 2.0.0) is served with the same headers.
+  const kit = await request.get('/downloads/windows-update-recovery.zip');
+  expect(kit.status()).toBe(200);
+  expect(kit.headers()['x-content-type-options']).toBe('nosniff');
   const missing = await request.get('/no-such-page');
   expect(missing.status()).toBe(404);
   expect(await missing.text()).toContain('Page not found');
@@ -129,6 +133,12 @@ test('Quick Deployment end to end under the production policy: live counts, Fina
     expect(e, f.path).toBeTruthy();
     expect(createHash('sha256').update(e!.data).digest('hex').toUpperCase(), f.path).toBe(f.sha256.toUpperCase());
   }
+  // Windows Update engine 2.1.0 (with the 2.0.0 fix for 0x80131508), Retry Windows Update and the health audit ship in the package.
+  const wuEngine = new TextDecoder().decode(entries.find((e) => e.path === 'WindowsDeployment/scripts/windows-update/WindowsUpdateEngine.ps1')!.data);
+  expect(wuEngine).toContain("$script:EngineVersion = '2.1.0'");
+  expect(wuEngine).toContain('return , $coll');
+  expect(paths).toContain('WindowsDeployment/scripts/windows-update/Invoke-WindowsUpdateRetry.ps1');
+  expect(paths).toContain('WindowsDeployment/scripts/health/DeploymentHealth.ps1');
   // The package's application manifest is the step 2 selection, nothing more or less.
   expect(paths).toContain('WindowsDeployment/scripts/applications/applications-config.json');
   const cfg = JSON.parse(new TextDecoder().decode(entries.find((e) => e.path.endsWith('applications-config.json'))!.data)) as { packages: { key: string }[]; manual: { key: string }[] };

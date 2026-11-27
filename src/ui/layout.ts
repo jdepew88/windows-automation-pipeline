@@ -134,7 +134,7 @@ export const FIELD_GROUPS: Partial<Record<SectionId, FieldGroup[]>> = {
     {
       title: 'What to install',
       description: 'Drivers and feature updates change the most on a new installation. Driver inclusion must agree with the Windows Update policy page.',
-      paths: ['windowsUpdate.drivers', 'windowsUpdate.featureUpdates', 'windowsUpdate.optionalUpdates', 'windowsUpdate.microsoftUpdate', 'windowsUpdate.excludedKbs'],
+      paths: ['windowsUpdate.drivers', 'windowsUpdate.featureUpdates', 'windowsUpdate.optionalUpdates', 'windowsUpdate.previewUpdates', 'windowsUpdate.microsoftUpdate', 'windowsUpdate.excludedKbs'],
     },
     {
       title: 'Restarts',

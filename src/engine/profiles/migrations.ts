@@ -168,19 +168,31 @@ export const MIGRATIONS: Record<number, Migration> = {
     },
   }),
 
-  // v10: the built-in application profiles were rebuilt (revision 2). An older profile keeps the
+  // v10 separates Windows and .NET Framework preview updates from the other optional updates
+  // ("Install preview updates"). Up to schema 9 "Optional and preview updates" covered both, so an
+  // older profile keeps exactly what it installed: previews follow its optionalUpdates choice.
+  9: (input) => {
+    if (!isObj(input.windowsUpdate) || typeof input.windowsUpdate.previewUpdates === 'boolean') return { value: input };
+    const previews = input.windowsUpdate.optionalUpdates !== 'skip';
+    return {
+      value: { ...input, windowsUpdate: { ...input.windowsUpdate, previewUpdates: previews } },
+      note: previews ? undefined : 'Preview updates (separate from the other optional updates since schema version 10) stay off for this profile, as before.',
+    };
+  },
+
+  // v11: the built-in application profiles were rebuilt (revision 2). An older profile keeps the
   // revision-1 definitions, so it selects exactly the applications it did before; adopting the new
   // defaults is an explicit button under Applications. Saved custom profiles whose id is now a
   // built-in id get a free id, and every reference to them follows.
-  9: (input) => {
+  10: (input) => {
     const apps = isObj(input.applications) ? { ...input.applications } : undefined;
     const sel = apps && isObj(apps.selection) ? { ...apps.selection } : undefined;
     if (!apps || !sel) return { value: input };
     if (sel.profileRevision === undefined) sel.profileRevision = 1;
     const custom = Array.isArray(sel.profiles) ? (sel.profiles as unknown[]).filter(isObj) : [];
-    const taken = new Set<string>([...V10_NEW_BUILTIN_IDS, ...custom.map((p) => String(p.id))]);
+    const taken = new Set<string>([...V11_NEW_BUILTIN_IDS, ...custom.map((p) => String(p.id))]);
     const renamed = new Map<string, string>();
-    for (const id of V10_NEW_BUILTIN_IDS) {
+    for (const id of V11_NEW_BUILTIN_IDS) {
       if (!custom.some((p) => p.id === id)) continue;
       let n = 2;
       while (taken.has(`${id}-${n}`)) n++;
@@ -200,8 +212,8 @@ export const MIGRATIONS: Record<number, Migration> = {
   },
 };
 
-/** Built-in profile ids that first appeared in revision 2 (schema version 10). */
-const V10_NEW_BUILTIN_IDS = ['student-office', 'remote-support'];
+/** Built-in profile ids that first appeared in revision 2 (schema version 11). */
+const V11_NEW_BUILTIN_IDS = ['student-office', 'remote-support'];
 
 /** The six (empty) built-in profiles of schema version 3, for the v2→v3 step. */
 const V3_BUILTIN_PROFILES = [

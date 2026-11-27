@@ -236,7 +236,7 @@ describe('older configurations are never changed silently', () => {
   };
 
   it('a schema 9 deployment profile keeps revision 1 and exactly its earlier applications, with a note; adopting is explicit', () => {
-    expect(SCHEMA_VERSION).toBe(10);
+    expect(SCHEMA_VERSION).toBe(11);
     const r = importProfile(v9(['core', 'gaming', 'developer']));
     expect(r.errors).toEqual([]);
     const sel = r.profile!.applications.selection;

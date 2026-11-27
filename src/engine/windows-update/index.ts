@@ -1,5 +1,6 @@
 import engineSource from './scripts/WindowsUpdateEngine.ps1?raw';
 import installerSource from './scripts/Install-UpdateEngine.ps1?raw';
+import retrySource from './scripts/Invoke-WindowsUpdateRetry.ps1?raw';
 import type { Profile } from '../schema/profile';
 
 /**
@@ -9,7 +10,7 @@ import type { Profile } from '../schema/profile';
  * profile can change goes into config.json, which both scripts read at run time.
  */
 
-export const ENGINE_VERSION = '1.3.0';
+export const ENGINE_VERSION = '2.1.0';
 export const DATA_ROOT = 'C:\\ProgramData\\WindowsDeploymentBuilder';
 /** Where the answer file extracts the assets during specialize (Administrators-only by default). */
 export const STAGING_DIR = 'C:\\Windows\\Setup\\Scripts\\WindowsUpdate';
@@ -22,8 +23,15 @@ export const ENGINE_FILE = 'WindowsUpdateEngine.ps1';
 export const INSTALLER_FILE = 'Install-UpdateEngine.ps1';
 export const CONFIG_FILE = 'config.json';
 export const README_FILE = 'README-WindowsUpdate.txt';
-/** Files embedded in the answer file (extracted to STAGING_DIR during specialize). */
-export const EMBEDDED_UPDATE_FILES: readonly string[] = [ENGINE_FILE, INSTALLER_FILE, CONFIG_FILE];
+/** Engine 2.0.0: Retry Windows Update, the standalone recovery tool (package and retry kit only). */
+export const RETRY_FILE = 'Invoke-WindowsUpdateRetry.ps1';
+export const RETRY_SOURCE = retrySource;
+export const ENGINE_SOURCE = engineSource;
+/** The standalone Windows Update recovery download (recovery-kit.ts, scripts/build-update-recovery-kit.ts). */
+export const RECOVERY_KIT_FILE = 'windows-update-recovery.zip';
+export const RECOVERY_KIT_DIR = 'WDB-WindowsUpdate';
+/** Files embedded in the answer file (extracted to STAGING_DIR during specialize). Engine 2.0.0 adds Retry Windows Update, so it is on every computer the engine ran on. */
+export const EMBEDDED_UPDATE_FILES: readonly string[] = [ENGINE_FILE, INSTALLER_FILE, CONFIG_FILE, 'Invoke-WindowsUpdateRetry.ps1'];
 
 /**
  * Phase 4.3: the ongoing ("Configure Automatic Updates") policy is a different concept from the
@@ -55,6 +63,10 @@ export interface EngineConfig {
   drivers: 'include' | 'exclude';
   featureUpdates: 'skip' | 'install';
   optionalUpdates: 'skip' | 'install';
+  /** Engine 2.1.0 (schema 10): Windows and .NET Framework preview updates. */
+  previewUpdates: boolean;
+  /** Engine 2.1.0: after the last pass, ask the Update Orchestrator (what Settings shows) for a scan. */
+  settingsRefresh: boolean;
   microsoftUpdate: boolean;
   maxReboots: number;
   maxAttemptsPerUpdate: number;
@@ -109,6 +121,8 @@ export function engineConfig(p: Profile): EngineConfig {
     drivers: resolveDrivers(p),
     featureUpdates: w.featureUpdates,
     optionalUpdates: w.optionalUpdates,
+    previewUpdates: w.previewUpdates,
+    settingsRefresh: true,
     microsoftUpdate: w.microsoftUpdate,
     maxReboots: w.maxReboots,
     maxAttemptsPerUpdate: w.maxAttemptsPerUpdate,
@@ -146,6 +160,9 @@ Manual use (elevated Windows PowerShell 5.1, all files in one folder)
       (read-only: lists what would be installed or skipped; installs nothing)
   powershell.exe -ExecutionPolicy Bypass -File .\\${INSTALLER_FILE} -Uninstall
 
+  powershell.exe -ExecutionPolicy Bypass -File .\\${RETRY_FILE} -Mode Status
+      Retry Windows Update on an installed computer (see "Retry Windows Update" below)
+
 What happens
   The engine waits for the network, installs applicable updates through the Windows Update
   Agent API, restarts when required (with a warning to signed-in users) and resumes after each
@@ -153,15 +170,42 @@ What happens
   looping: maximum restarts, attempts per update, total runtime and unexpected errors. Updates
   that keep failing are given up and reported.
 
-  Selection: recommended updates always; optional updates (cumulative previews, optional driver
-  updates) when "optional updates" is Install; drivers when drivers are included. Windows decides
-  what is applicable; feature updates and Insider builds are not installed. An update that can
+  Engine 2.0.0 first checks that Windows Update is ready (services, a restart already pending,
+  a first successful search; never an arbitrary wait), then installs in passes: A servicing
+  prerequisites (servicing stack, Defender platform) on their own, B normal updates, C optional
+  updates and drivers (each driver on its own, recorded with the device it is for), D a final
+  search that verifies nothing installed is still offered and lists devices with problems.
+  Every failure has a category (engine exception, Windows Update API, not applicable, network,
+  download, installer, restart required, busy, not ready, technician). An exception in the
+  engine's own code is recorded once with its line and stack trace, never as one failure per
+  update; the same one twice stops the stage. Components are reset only for download-cache or
+  data-store errors.
+
+  Engines 1.0.0-1.3.0 failed every download and installation with 0x80131508
+  (IndexOutOfRangeException) because the update collection was unrolled by PowerShell before it
+  reached Windows Update; 2.0.0 fixes this.
+
+  Selection: recommended updates always (servicing stack, cumulative, security, .NET, Defender,
+  MSRT); Windows and .NET Framework preview updates when "Install preview updates" is on (engine
+  2.1.0; previewUpdates in config.json); other optional updates and optional drivers when
+  "optional updates" is Install; drivers when drivers are included. Windows decides what is
+  applicable; feature updates, firmware and Insider builds are never installed. An update that can
   ask for input is installed on its own, quietly; only if Windows answers that it needs a person
   is it reported for follow-up. Each update is downloaded on its own; a transient failure is
   retried after a delay, up to the attempts per update (download and installation count
   together); a permanent one (for example "not applicable") is not retried. Installing updates and scheduling a restart both
   take the install lock (${DATA_ROOT}\\state\\install.lock) shared with the
   application engine, so a restart never interrupts an application installation.
+
+  Engine 2.1.0: once nothing selected remains, the engine asks the Update Orchestrator (what
+  Settings > Windows Update uses) to check for updates through the documented WinRT API
+  Windows.Management.Update.WindowsUpdateManager (Windows 11 24H2 and later), waits for its last
+  successful check time to advance, searches again and installs anything that check made
+  applicable (at most twice), then verifies. result.json records the request and its completion in
+  settingsRefresh; the Settings page itself is never claimed as seen. Before 24H2 the refresh is
+  reported as not available. The final state is updateState: UpToDate, UpToDateUnderPolicy,
+  PreviewUpdatesExcluded, RestartRequired, UpdatesRemaining, CompletedWithFailures,
+  InstallationIncomplete or VerificationUnavailable, with the counts in summary.
 
 Results
   Log:     ${DATA_ROOT}\\Updates\\logs\\engine.log
@@ -174,7 +218,26 @@ Results
            1100 Succeeded, 1101 CompletedWithFailures, 1102 Failed, 1103 Offline,
            1104 CompletedWithFollowUp
 
-Status: not yet validated on a Windows installation in a VM. Test before relying on it.
+Retry Windows Update (${RETRY_FILE})
+  Runs the corrected engine again on an installed computer, as a separate run that never changes
+  the original Windows Update results or the deployment report; it adds its own lines to the
+  deployment's activity log and the Application event log (${DATA_ROOT}\\UpdateRetry\\<run>). Elevated Windows PowerShell:
+    -Mode Status             read-only readiness and what the original run shows
+    -Mode Scan               read-only search: what would be installed, by pass
+    -Mode RetryUpdates       every Windows update the policy allows (previews included when allowed), no drivers
+    -Mode RetryDrivers       drivers offered by Windows Update
+    -Mode RetryAll           everything the deployment's policy allows
+    -Mode ExportDiagnostics  ZIP with logs, results, history and a before/after comparison
+    -Mode HealthAudit        the read-only health audit (scripts\\health\\DeploymentHealth.ps1)
+  Add -Wait to follow progress. The Deployment Recovery tool offers the same (menu U). Status
+  advises from what happened: after a successful recovery it recommends the health audit.
+
+Status: engine 2.0.0's Windows Update calls were checked read-only against the real Windows
+Update Agent (search, collections, assignment). On a physical computer deployed with engine
+1.3.0 (every update failed with 0x80131508), Retry Windows Update with engine 2.0.0 installed 1
+normal update and 9 drivers with no failure, and no device was left with a problem. Engine 2.1.0
+(previews, the Settings refresh, the update states) is verified by simulation only so far; a
+full deployment with it from the start has not been tested on hardware yet.
 `;
 }
 
@@ -185,6 +248,7 @@ export function updateEngineAssets(p: Profile): DeploymentAsset[] {
     { name: ENGINE_FILE, content: crlf(engineSource), mime: 'text/plain', description: 'Update engine (runs as SYSTEM from the scheduled task)', group: 'windows-update' },
     { name: INSTALLER_FILE, content: crlf(installerSource), mime: 'text/plain', description: 'Installs the engine, registers the task and confirms it starts', group: 'windows-update' },
     { name: CONFIG_FILE, content: crlf(JSON.stringify(engineConfig(p), null, 2) + '\n'), mime: 'application/json', description: 'Policy and limits from this profile', group: 'windows-update' },
+    { name: RETRY_FILE, content: crlf(retrySource), mime: 'text/plain', description: 'Retry Windows Update: status, scan, retry and diagnostics on an installed computer', group: 'windows-update' },
     { name: README_FILE, content: crlf(readme()), mime: 'text/plain', description: 'How to use the files and read the results', group: 'windows-update' },
   ];
 }

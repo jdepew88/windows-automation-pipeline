@@ -92,20 +92,34 @@ export const settings: SettingDef[] = [
   {
     path: 'windowsUpdate.optionalUpdates',
     section: 'windowsUpdate',
-    label: 'Optional and preview updates',
+    label: 'Optional updates (optional drivers and other optional updates)',
     control: 'radio',
     choices: [
       { value: 'skip', label: 'Skip' },
       { value: 'install', label: 'Install (owner default)' },
     ],
     description:
-      'Updates Windows Update lists as optional (BrowseOnly): optional cumulative previews and optional driver updates (for example chipset drivers). Windows still decides what is applicable and signed; feature updates and Insider builds are never included here. Optional drivers also need "Drivers from Windows Update" to include drivers.',
+      'Updates Windows Update lists as optional (BrowseOnly), such as optional driver updates (for example chipset drivers). Windows still decides what is applicable and signed; feature updates, firmware and Insider builds are never included. Optional drivers also need "Drivers from Windows Update" to include drivers. Windows and .NET Framework preview updates have their own setting below.',
     applicability: APPLIES,
     stages: ['firstLogon'],
     mapping: 'config.json › optionalUpdates (IUpdate.BrowseOnly)',
     advanced: true,
     visibleWhen: on,
     verification: 'documented',
+  },
+  {
+    path: 'windowsUpdate.previewUpdates',
+    section: 'windowsUpdate',
+    label: 'Install preview updates',
+    control: 'checkbox',
+    description:
+      'Include optional Windows and .NET Framework preview updates during deployment. Turning this off excludes only those previews (they are reported as intentionally excluded); security, cumulative, .NET, Defender and driver updates are installed either way.',
+    applicability: APPLIES,
+    stages: ['firstLogon'],
+    mapping: 'config.json › previewUpdates (non-driver updates titled "Preview", for example "Cumulative Update Preview")',
+    advanced: true,
+    visibleWhen: on,
+    verification: 'unverified',
   },
   {
     path: 'windowsUpdate.microsoftUpdate',

@@ -9,6 +9,8 @@ import { resolveSelection } from '../applications/selection';
 import { settingsRestoreActive } from '../migration/plan';
 import { adapterById } from '../migration/adapters';
 import { driversActive } from '../drivers';
+import { officeProduct } from '../office';
+import { officeActivationAction } from '../activation';
 import { HEALTH_CATEGORIES, HEALTH_REPORT_JSON_SCHEMA } from './contract';
 
 export * from './contract';
@@ -20,7 +22,7 @@ export * from './contract';
  * reads the engines' own results as evidence, never as proof.
  */
 
-export const HEALTH_ENGINE_VERSION = '1.0.0';
+export const HEALTH_ENGINE_VERSION = '1.1.0';
 export const HEALTH_DIR = 'scripts/health';
 export const HEALTH_ENGINE_FILE = 'DeploymentHealth.ps1';
 export const HEALTH_CONFIG_FILE = 'health-config.json';
@@ -148,6 +150,7 @@ export function healthConfig(p: Profile) {
     : [];
   const restore = settingsRestoreActive(p) ? p.migration : null;
   const account = p.accounts;
+  const office = officeProduct(p);
   return {
     schemaVersion: 1 as const,
     engineVersion: HEALTH_ENGINE_VERSION,
@@ -183,6 +186,8 @@ export function healthConfig(p: Profile) {
       drivers: resolveDrivers(p),
       featureUpdates: p.windowsUpdate.featureUpdates,
       optionalUpdates: p.windowsUpdate.optionalUpdates,
+      /** Health engine 1.1.0 (optional for older plans): previews are a separate policy of update engine 2.1.0. */
+      previewUpdates: p.windowsUpdate.previewUpdates,
       ongoingPolicy: ongoingPolicyDeferred(p) ? p.updates.mode : null,
     },
     applications: { enabled: apps, items, deselected: cfg ? cfg.deselected.map((x) => x.key) : [] },
@@ -203,6 +208,12 @@ export function healthConfig(p: Profile) {
     network: { requirement: p.health.networkRequirement, wifiConfigured: p.wifi.mode === 'parameters' || p.wifi.mode === 'profileXml' },
     customizations: customizationAdapters(p),
     customerNotes: p.health.customerNotes,
+    /**
+     * Health engine 1.1.0 (both optional: plans of older packages lack them). Office is verified in the
+     * Click-to-Run registry; activation only as the activation stage recorded it. No key or KMS host here.
+     */
+    office: office ? { product: office.id, displayName: office.displayName, productReleaseId: office.productId } : { product: 'none' as const, displayName: '', productReleaseId: '' },
+    activation: { windows: p.activation.windows, office: officeActivationAction(p) },
   };
 }
 
@@ -236,9 +247,23 @@ Use (Windows PowerShell 5.1, as administrator)
                            it, only when no restoration is outstanding (never the USB copy)
   ... -Mode ExportDiagnostics  a ZIP with the reports and sanitized logs (no backups, no passwords)
 
+It can be run at any time later, without replaying the deployment:
+  powershell.exe -ExecutionPolicy Bypass -File "${HEALTH_TOOL}" -Mode Verify
+  powershell.exe -ExecutionPolicy Bypass -File "${HEALTH_TOOL}" -Mode Dashboard
+Verify writes only its reports (plus a line in the deployment log and an Application event).
+
+Also audited (read-only): the Windows Update state the update engine recorded (2.1.0), its
+policy (feature, optional, preview updates, drivers) and final Settings refresh, every Retry
+Windows Update run, original update failures installed later (retry results or the Windows
+Update history), devices the deployment reported with problems compared with Device Manager
+now, Microsoft Office (Click-to-Run registry; activation as recorded, never a key), and optional
+manufacturer utilities (NVIDIA App, AMD Software: Adrenalin Edition, AMD Ryzen Master) as
+recommendations only; nothing is ever installed by this check.
+
 Reports (${HEALTH_REPORT_DIR})
   deployment-health.json  every finding, with expected and observed state, evidence and next action
   technician-report.html  the dashboard (print it or save it as PDF from the browser)
+  technician-report.txt   the same as plain text
   customer-handoff.html   a plain summary for the person receiving the computer
   history\\                earlier reports, so the record of a failed deployment is never lost
 

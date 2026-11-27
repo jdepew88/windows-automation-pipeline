@@ -26,10 +26,13 @@ function Assert-True($Value, [string] $Message) { if (-not $Value) { throw "ASSE
 # ------------------------------------------------------------------------------------------------
 
 function New-SimUpdate {
-    param([string] $Kb, [string] $Behavior = 'ok', [switch] $Driver, [switch] $Upgrade, [switch] $Optional, [switch] $Interactive, [int] $AppearsAfterReboot = 0)
-    @{ Id = "id-$Kb"; Revision = 1; Title = "Update $Kb"; Kbs = @($Kb); IsDriver = [bool] $Driver; IsUpgrade = [bool] $Upgrade
+    param([string] $Kb, [string] $Behavior = 'ok', [switch] $Driver, [switch] $Upgrade, [switch] $Optional, [switch] $Interactive, [int] $AppearsAfterReboot = 0, [string] $Title = '', [string] $Supersedes = '')
+    $u = @{ Id = "id-$Kb"; Revision = 1; Title = $(if ($Title) { $Title } else { "Update $Kb" }); Kbs = @($Kb); IsDriver = [bool] $Driver; IsUpgrade = [bool] $Upgrade
        IsOptional = [bool] $Optional; NeedsUserInput = [bool] $Interactive; IsDownloaded = $false; Native = $null
-       Behavior = $Behavior; AppearsAfterReboot = $AppearsAfterReboot; Installed = $false; InstallCalls = 0 }
+       Behavior = $Behavior; AppearsAfterReboot = $AppearsAfterReboot; Installed = $false; InstallCalls = 0; Gone = $false; Supersedes = $Supersedes }
+    # Engine 2.0.0: a driver update carries the device it is for.
+    if ($Driver) { $u.Driver = [ordered]@{ hardwareID = "PCI\VEN_8086&DEV_$Kb"; model = "Device for $Kb"; manufacturer = 'Contoso'; class = 'System' } }
+    $u
 }
 
 function Reset-Sim {
@@ -40,6 +43,12 @@ function Reset-Sim {
         RebootPending = $false; RebootRequested = $false; Resets = 0; Events = @(); TaskRemoved = $false
         ScanThrows = 0; InstallThrows = $false; UnexpectedThrows = $false; Busy = 0; LockPolls = 0
         DownloadCalls = @(); InstallBatches = @()
+        # Engine 2.0.0: HRESULT of a simulated search failure (default WU_E_NOT_APPLICABLE: not a data-store error),
+        # simulated engine exceptions / failed batch calls, devices with problems, disabled services.
+        ScanHResult = -2145124329; EngineException = 0; BatchCallFails = $false; Devices = @(); Disabled = @(); Searches = 0
+        # Engine 2.1.0: the simulated Update Orchestrator (Settings refresh). The real one is never called.
+        OrchestratorAvailable = $true; OrchestratorScans = 0; OrchestratorCompletes = $true; OrchestratorRefuses = $false
+        OrchestratorTime = [DateTime]::new(2026, 10, 19, 6, 0, 0, [DateTimeKind]::Utc)
     }
 }
 
@@ -54,12 +63,33 @@ function Reset-WduComponents { $script:Sim.Resets++ }
 function Invoke-WduReboot { param([int] $WarningSeconds, [string] $Reason) $script:Sim.RebootRequested = $true }
 function Wait-WdbLockPoll { $script:Sim.LockPolls++ }
 function Get-WdbBootTime { "boot-$($script:Sim.Boots)" }
+# Engine 2.0.0 read-only probes (readiness, pass D): simulated.
+function Get-WduServiceStates { $st = [ordered]@{}; foreach ($n in 'wuauserv', 'bits', 'cryptsvc', 'TrustedInstaller') { $st[$n] = [ordered]@{ status = 'Stopped'; startType = $(if ($script:Sim.ContainsKey('Disabled') -and $script:Sim.Disabled -contains $n) { 'Disabled' } else { 'Manual' }) } }; $st }
+function Test-WduAgentEnabled { $true }
+function Get-WduDeviceProblems { , @($(if ($script:Sim.ContainsKey('Devices')) { $script:Sim.Devices } else { @() })) }
+# Engine 2.1.0: Update Orchestrator boundary (Settings > Windows Update), simulated. A scan request
+# completes by advancing the last successful scan time and makes AppearsAfterRefresh updates visible.
+function Get-WduOrchestrator { if ($script:Sim.OrchestratorAvailable) { return 'sim-orchestrator' }; return $null }
+function Get-WduOrchestratorScanTime { param($Manager) if ($Manager -ne 'sim-orchestrator') { throw 'not the simulated orchestrator' }; $script:Sim.OrchestratorTime }
+function Start-WduOrchestratorScan {
+    param($Manager)
+    if ($Manager -ne 'sim-orchestrator') { throw 'not the simulated orchestrator' }
+    $script:Sim.OrchestratorScans++
+    if ($script:Sim.OrchestratorRefuses) { throw 'Simulated refusal' }
+    foreach ($u in @($script:Sim.Updates)) { if ($u.ContainsKey('AppearsAfterRefresh')) { $u.AppearsAfterRefresh = $false } }
+    if ($script:Sim.OrchestratorCompletes) { $script:Sim.OrchestratorTime = $script:Sim.Now.AddSeconds(30) }
+    # Windows' own installer starts after the check (an unmanaged computer installs by itself).
+    if ($script:Sim.ContainsKey('BusyAfterScan')) { $script:Sim.Busy = $script:Sim.BusyAfterScan }
+}
+function Test-WduOrchestratorScanning { param($Manager) $false }
 
 function Get-WduAvailableUpdates {
     param([hashtable] $Config)
-    if ($script:Sim.ScanThrows -gt 0) { $script:Sim.ScanThrows--; throw (New-Object System.Runtime.InteropServices.COMException('Simulated scan failure', -2145124329)) }
+    $script:Sim.Searches++
+    if ($script:Sim.ScanThrows -gt 0) { $script:Sim.ScanThrows--; throw (New-Object System.Runtime.InteropServices.COMException('Simulated scan failure', [int] $script:Sim.ScanHResult)) }
     $list = @($script:Sim.Updates | Where-Object {
-        -not $_.Installed -and $script:Sim.Boots -ge $_.AppearsAfterReboot -and ($Config.drivers -eq 'include' -or -not $_.IsDriver)
+        -not $_.Installed -and -not $_.Gone -and $script:Sim.Boots -ge $_.AppearsAfterReboot -and ($Config.drivers -eq 'include' -or -not $_.IsDriver) -and
+        -not ($_.ContainsKey('AppearsAfterRefresh') -and $_.AppearsAfterRefresh)
     })
     return , $list
 }
@@ -83,6 +113,21 @@ function Invoke-WduInstall {
     if ($script:Sim.InstallThrows) { throw 'Simulated unexpected engine error' }
     $out = @{ RebootRequired = $false; Results = @{} }
     $script:Sim.InstallBatches += , @($Updates | ForEach-Object { $_.Kbs[0] })
+    # Engine 2.0.0: the adapter's own call failed (what engines 1.0-1.3 did on every call: 0x80131508 at the Updates setter).
+    if ($script:Sim.EngineException -gt 0) {
+        $script:Sim.EngineException--
+        $info = [ordered]@{ operation = 'install: assign updates to installer'; type = 'System.IndexOutOfRangeException'; hresult = '0x80131508'; message = 'Index was outside the bounds of the array.'; chain = @(); line = 777; statement = '$inst.Updates = $coll'; script = 'WindowsUpdateEngine.ps1'; stack = 'at Invoke-WduInstall'; engineVersion = 'sim'; atUtc = '' }
+        foreach ($u in $Updates) { $out.Results[$u.Id] = @{ Result = 'Failed'; HResult = -2146233080; Source = 'engine'; Exception = (Format-WduException $info); ExceptionInfo = $info } }
+        $out.CallFailed = $true
+        return $out
+    }
+    # A WUA COMException for the whole call when several updates are installed together (0x8024000B WU_E_CALL_CANCELLED).
+    if ($script:Sim.BatchCallFails -and @($Updates).Count -gt 1) {
+        $info = [ordered]@{ operation = 'install: IUpdateInstaller.Install'; type = 'System.Runtime.InteropServices.COMException'; hresult = '0x8024000B'; message = 'Simulated call failure'; chain = @(); line = 1; statement = ''; script = ''; stack = ''; engineVersion = 'sim'; atUtc = '' }
+        foreach ($u in $Updates) { $out.Results[$u.Id] = @{ Result = 'Failed'; HResult = -2145124341; Source = 'engine'; Exception = (Format-WduException $info); ExceptionInfo = $info } }
+        $out.CallFailed = $true
+        return $out
+    }
     foreach ($u in $Updates) {
         $u.InstallCalls++
         switch ($u.Behavior) {
@@ -95,6 +140,10 @@ function Invoke-WduInstall {
             'ok-reboot' { $u.Installed = $true; $out.RebootRequired = $true; $script:Sim.RebootPending = $true; $out.Results[$u.Id] = @{ Result = 'Succeeded'; HResult = 0 } }
             'reoffer'   { $out.Results[$u.Id] = @{ Result = 'Succeeded'; HResult = 0 } }
             'fail'      { $out.Results[$u.Id] = @{ Result = 'Failed'; HResult = -2145124330 } }
+            # 0x80246007 WU_E_DM_NOTDOWNLOADED: a download-cache problem, the kind a component reset repairs.
+            'fail-store' { if ($script:Sim.Resets -gt 0) { $u.Installed = $true; $out.Results[$u.Id] = @{ Result = 'Succeeded'; HResult = 0 } } else { $out.Results[$u.Id] = @{ Result = 'Failed'; HResult = -2145099769 } } }
+            # Installing it makes another update unnecessary (superseded): Windows stops offering that one.
+            'ok-supersedes' { $u.Installed = $true; foreach ($o in $script:Sim.Updates) { if ($o.Kbs[0] -eq $u.Supersedes) { $o.Gone = $true } }; $out.Results[$u.Id] = @{ Result = 'Succeeded'; HResult = 0 } }
             'fail-once' { if ($u.InstallCalls -ge 2) { $u.Installed = $true; $out.Results[$u.Id] = @{ Result = 'Succeeded'; HResult = 0 } } else { $out.Results[$u.Id] = @{ Result = 'Failed'; HResult = -2145124330 } } }
             # Engine 1.3.0: fails while Windows waits for a restart (like KB890830/KB4052623 in the field), installs after it.
             'fail-pending' { if ($script:Sim.RebootPending) { $out.Results[$u.Id] = @{ Result = 'Failed'; HResult = -2146233080 } } else { $u.Installed = $true; $out.Results[$u.Id] = @{ Result = 'Succeeded'; HResult = 0 } } }
@@ -112,6 +161,7 @@ function New-TestConfig {
         maxReboots = 10; maxAttemptsPerUpdate = 2; maxRuntimeHours = 6; maxErrors = 5; networkWaitMinutes = 15
         confirmationScans = 1; confirmationDelaySeconds = 60; resetComponentsOnce = $true; rebootWarningSeconds = 60
         initialDelaySeconds = 60; excludedKbs = @(); lockWaitMinutes = 1; retryDelaySeconds = 120
+        readinessSearchAttempts = 4; readinessSearchDelaySeconds = 90; readinessRestart = $true; maxEngineExceptions = 2; verifyDevices = $true
     }
     foreach ($k in $Overrides.Keys) { $c[$k] = $Overrides[$k] }
     $c
@@ -180,15 +230,25 @@ $tests['re-offered update is given up: CompletedWithFailures, no infinite loop']
     Assert-True ($script:Sim.Events -contains 1101) 'warning event'
 }
 
-$tests['failing update triggers one component reset and one extra attempt'] = {
-    Reset-Sim @((New-SimUpdate KB3000001 'fail'))
+$tests['download-cache failures trigger one component reset and one extra attempt (engine 2.0.0: only when warranted)'] = {
+    Reset-Sim @((New-SimUpdate KB3000001 'fail-store'))
     $c = New-TestConfig
     $o = Invoke-Boots $c
     Assert-Equal $script:Sim.Resets 1 'exactly one reset'
-    Assert-Equal $o[-1] 'Finished:CompletedWithFailures' 'final outcome'
+    Assert-Equal $o[-1] 'Finished:Succeeded' 'installs after the reset'
     Assert-Equal $script:Sim.Updates[0].InstallCalls 3 'two attempts plus one after reset'
+}
+
+$tests['engine 2.0.0: failures that a reset cannot repair never reset Windows Update components'] = {
+    Reset-Sim @((New-SimUpdate KB3000001 'fail'))
+    $c = New-TestConfig
+    $o = Invoke-Boots $c
+    Assert-Equal $script:Sim.Resets 0 'no reset for WU_E_INSTALL_NOT_ALLOWED'
+    Assert-Equal $o[-1] 'Finished:CompletedWithFailures' 'final outcome'
+    Assert-Equal $script:Sim.Updates[0].InstallCalls 2 'two attempts, no extra one'
     $r = Get-Result $c
-    Assert-Equal $r.failed[0].lastHResult '0x80240016' 'HResult recorded'
+    Assert-Equal "$($r.failed[0].lastHResult) $($r.failed[0].category)" '0x80240016 ServicingBusy' 'HResult and category recorded'
+    Assert-Equal $r.failedByCategory.ServicingBusy 1 'counted by category'
 }
 
 $tests['update that fails once then succeeds counts as installed'] = {
@@ -346,14 +406,28 @@ $tests['network arriving later resumes the run'] = {
     Assert-Equal $o2 'Finished:Succeeded' 'second start completes'
 }
 
-$tests['scan failures: one component reset, then Failed'] = {
+$tests['scan failures pointing at the update data store: one component reset, then Failed'] = {
+    Reset-Sim
+    $script:Sim.ScanThrows = 100
+    $script:Sim.ScanHResult = -2145091577   # 0x80248007, WU_E_DS_* (update data store)
+    $c = New-TestConfig
+    $o = Invoke-Boots $c
+    Assert-Equal $o[-1] 'Finished:Failed' 'final outcome'
+    Assert-Equal $script:Sim.Resets 1 'one reset'
+    Assert-True ((Get-Result $c).reason -like '*did not become ready*0x80248007*') 'reason names readiness and the code'
+}
+
+$tests['engine 2.0.0: other scan failures end as NotReady without a component reset'] = {
     Reset-Sim
     $script:Sim.ScanThrows = 100
     $c = New-TestConfig
     $o = Invoke-Boots $c
     Assert-Equal $o[-1] 'Finished:Failed' 'final outcome'
-    Assert-Equal $script:Sim.Resets 1 'one reset'
-    Assert-True ((Get-Result $c).reason -like '*scan keeps failing*') 'reason'
+    Assert-Equal $script:Sim.Resets 0 'no reset'
+    Assert-Equal $script:Sim.Searches 4 'readinessSearchAttempts searches, bounded'
+    $r = Get-Result $c
+    Assert-Equal "$($r.category) $($r.readiness.status) $($r.readiness.searchAttempts)" 'NotReady WaitingForSearch 4' 'category and readiness'
+    Assert-True ($r.technicianAction -like '*Retry Windows Update*') 'technician action'
 }
 
 $tests['transient scan failure is retried'] = {
@@ -510,14 +584,15 @@ $tests['engine 1.3.0: an update failing on its last attempt while a restart is p
 }
 
 $tests['engine 1.3.0: still failing after that restart: given up once, never looped; reported with the retry and the error source'] = {
-    Reset-Sim @((New-SimUpdate KB5500001 'ok-reboot'), (New-SimUpdate KB4052623 'fail'))
+    # KB890830 (MSRT) belongs to pass B with the cumulative update (KB4052623 is a pass A prerequisite since 2.0.0).
+    Reset-Sim @((New-SimUpdate KB5500001 'ok-reboot'), (New-SimUpdate KB890830 'fail'))
     $script:Sim.Updates[1].Behavior = 'fail'
     $c = New-TestConfig @{ maxAttemptsPerUpdate = 1; resetComponentsOnce = $false }
     $o = Invoke-Boots $c
     Assert-Equal $o[-1] 'Finished:CompletedWithFailures' 'outcome'
     Assert-Equal $script:Sim.Updates[1].InstallCalls 2 'the first attempt plus exactly one after the restart'
     $f = @((Get-Result $c).failed)[0]
-    Assert-Equal "$($f.kbs[0]) $($f.retriedAfterRestart) $($f.errorSource)" 'KB4052623 True windowsUpdate' 'retry and source reported'
+    Assert-Equal "$($f.kbs[0]) $($f.retriedAfterRestart) $($f.errorSource)" 'KB890830 True windowsUpdate' 'retry and source reported'
 }
 
 $tests['engine 1.3.0: an exception in the engine''s own Windows Update call (0x80131508) is recorded as an engine error, with a new session next time'] = {
@@ -528,7 +603,9 @@ $tests['engine 1.3.0: an exception in the engine''s own Windows Update call (0x8
     $u = New-SimUpdate KB890830
     $r = (& $script:RealWduInstall @($u)).Results[$u.Id]
     Assert-Equal "$($r.Result) $($r.Source) $(Format-WduHResult $r.HResult)" 'Failed engine 0x80131508' 'result'
-    Assert-True ($r.Exception -match 'IndexOutOfRangeException: Index was outside') 'exception kept'
+    Assert-True ($r.Exception -match 'install: build update collection raised System.IndexOutOfRangeException 0x80131508: Index was outside') 'exception kept, with the operation'
+    Assert-Equal "$($r.ExceptionInfo.operation)|$($r.ExceptionInfo.type)" 'install: build update collection|System.IndexOutOfRangeException' 'structured exception record'
+    Assert-True ([int] $r.ExceptionInfo.line -gt 0 -and $r.ExceptionInfo.stack) 'line number and stack trace recorded'
     Assert-Equal "$($script:Session)" '' 'the next attempt uses a new Windows Update session'
     $script:Session = 'stale session'
     $d = (& $script:RealWduDownload @($u))[$u.Id]
@@ -539,7 +616,381 @@ $tests['engine 1.3.0: an exception in the engine''s own Windows Update call (0x8
     $a = @{ count = 1; title = $u.Title; kbs = @('KB890830') }
     Register-WduFailure $u $a $c 'install' 'Failed' $r.HResult $r
     Assert-Equal "$($a.lastErrorSource) $($a.lastHResult)" 'engine 0x80131508' 'attempt record'
-    Assert-True ($script:Activity.lastError -match 'failed in the engine \(0x80131508 COR_E_INDEXOUTOFRANGE.*not a Windows Update result\); IndexOutOfRangeException') 'message names the engine, the code and the exception'
+    Assert-Equal $a.lastCategory 'EngineException' 'category'
+    Assert-True ($script:Activity.lastError -match 'call failed \(EngineException: 0x80131508 COR_E_INDEXOUTOFRANGE.*not a Windows Update result\); .*IndexOutOfRangeException') 'message names the category, the code and the exception'
+}
+
+# ------------------------------------------------------------------------------------------------
+# Engine 2.0.0: root cause of 0x80131508, readiness, passes, isolation, verification
+# ------------------------------------------------------------------------------------------------
+
+function New-TestStringColl { $sc = New-Object -ComObject 'Microsoft.Update.StringColl'; [void] $sc.Add('a'); [void] $sc.Add('b'); return , $sc }
+
+$tests['engine 2.0.0 ROOT CAUSE (live COM, read-only): a WUA collection returned without the comma is unrolled and its assignment throws 0x80131508; New-WduCollection keeps it intact'] = {
+    # Real Windows Update Agent objects; nothing is searched, downloaded or installed.
+    $session = New-Object -ComObject 'Microsoft.Update.Session'
+    # The 2.0.0 path first: an empty collection survives the return and is accepted by the setter.
+    $good = $session.CreateUpdateInstaller()
+    $coll = New-WduCollection @()
+    Assert-True ($null -ne $coll -and $coll -isnot [array]) 'New-WduCollection returns the collection itself, even when empty'
+    Assert-WduCollection $coll 0
+    $good.Updates = $coll
+    Assert-Equal $good.Updates.Count 0 'the installer accepted the real collection'
+    # The 1.0.0-1.3.0 pattern on a separate installer object.
+    $installer = $session.CreateUpdateInstaller()
+    function Get-Unrolled { $c = New-Object -ComObject 'Microsoft.Update.StringColl'; [void] $c.Add('only'); $c }   # the 1.0.0-1.3.0 pattern
+    $unrolled = Get-Unrolled
+    Assert-True ($unrolled -is [string]) 'the pipeline unrolls a one-item COM collection into its item'
+    $err = $null
+    try { $installer.Updates = $unrolled } catch { $err = $_ }
+    Assert-True ($err) 'assigning the unrolled value fails'
+    $info = ConvertFrom-WduError $err 'install: assign updates to installer'
+    Assert-Equal "$($info.type) $($info.hresult)" 'System.IndexOutOfRangeException 0x80131508' 'exactly the field error: IndexOutOfRangeException 0x80131508'
+    Assert-True ($info.line -gt 0 -and $info.statement.Contains('Updates = $unrolled')) 'the exception record names the line and statement'
+    # Invoke-WduOperation keeps an enumerable COM object intact through its own return.
+    $kept = Invoke-WduOperation 'test: keep collection' { New-TestStringColl }
+    Assert-True ($kept -isnot [array] -and $kept.Count -eq 2) 'operation wrapper does not unroll a two-item collection'
+}
+
+$tests['engine 2.0.0: Assert-WduCollection rejects unrolled values, null and wrong counts as engine defects'] = {
+    foreach ($case in @(@{ v = $null; m = 'null' }, @{ v = @('a', 'b'); m = 'unrolled' }, @{ v = 'single'; m = 'expected an update collection' })) {
+        $msg = ''
+        try { Assert-WduCollection $case.v 1 } catch { $msg = $_.Exception.Message }
+        Assert-True ($msg -like "*$($case.m)*") "rejected: $($case.m) ($msg)"
+    }
+    $msg = ''
+    try { Assert-WduCollection (New-TestStringColl) 3 } catch { $msg = $_.Exception.Message }
+    Assert-True ($msg -like '*holds 2 update(s), expected 3*') 'count mismatch'
+}
+
+$tests['engine 2.0.0: per-update results are mapped by update identity, never by position; a missing result is reported, not invented'] = {
+    $items = @('id-B', 'id-A')
+    $coll = New-Object psobject -Property @{ Count = 2 }
+    $coll | Add-Member ScriptMethod Item { param($i) [pscustomobject]@{ Identity = [pscustomobject]@{ UpdateID = $items[$i] } } }
+    $res = New-Object psobject
+    $res | Add-Member ScriptMethod GetUpdateResult { param($i) if ($i -eq 0) { [pscustomobject]@{ ResultCode = 4; HResult = -2145124330 } } else { [pscustomobject]@{ ResultCode = 2; HResult = 0 } } }
+    $map = Read-WduResults $coll $res @(@{ Id = 'id-A' }, @{ Id = 'id-B' }, @{ Id = 'id-C' })
+    Assert-Equal "$($map['id-A'].Result) $($map['id-B'].Result)" 'Succeeded Failed' 'mapped by identity'
+    Assert-Equal "$($map['id-C'].Result) $($map['id-C'].Category)" 'Missing EngineException' 'missing result reported'
+}
+
+$tests['engine 2.0.0: the field failure (16 updates, same engine exception) is ONE engine error, never 16 installer failures; the stage stops without resets'] = {
+    $kbs = 1..16 | ForEach-Object { 'KB59{0:D5}' -f $_ }
+    Reset-Sim @($kbs | ForEach-Object { New-SimUpdate $_ })
+    $script:Sim.EngineException = 100
+    $c = New-TestConfig
+    $o = Invoke-Boots $c
+    Assert-Equal $o[-1] 'Finished:Failed' 'stops'
+    $r = Get-Result $c
+    Assert-Equal "$($r.category) $(@($r.failed).Count) $($r.counts.failed) $(@($r.engineExceptions).Count)" 'EngineException 0 0 2' 'no installer failures; two identical engine exceptions'
+    Assert-Equal @($r.notAttempted).Count 16 'remaining updates reported as not attempted'
+    Assert-Equal $script:Sim.Resets 0 'components never reset for an engine exception'
+    Assert-Equal (@($script:Sim.InstallBatches | ForEach-Object { @($_).Count }) -join ',') '16,1' 'batch, then one isolated update, then stop'
+    Assert-True ($r.engineExceptions[0].operation -eq 'install: assign updates to installer' -and $r.engineExceptions[0].line -eq 777) 'operation and line reported'
+    Assert-True ($r.technicianAction -like '*not reported as failed installations*') 'technician action'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $c.dataRoot 'state\windows-update.done'))) 'no completion marker for a stopped stage'
+    Assert-True $script:Sim.TaskRemoved 'the task is removed, so the application stage is not held back'
+    $st = Get-Content -LiteralPath (Join-Path $c.dataRoot 'Updates\state.json') -Raw | ConvertFrom-Json
+    Assert-Equal ([int] ($st.attempts.PSObject.Properties | ForEach-Object { $_.Value.count } | Measure-Object -Maximum).Maximum) 0 'no update attempt was used up by the engine exception'
+}
+
+$tests['engine 2.0.0: a transient engine exception is retried and the updates then install'] = {
+    Reset-Sim @((New-SimUpdate KB5910001), (New-SimUpdate KB5910002))
+    $script:Sim.EngineException = 1
+    $c = New-TestConfig
+    $o = Invoke-Boots $c
+    Assert-Equal $o[-1] 'Finished:Succeeded' 'installs'
+    $r = Get-Result $c
+    Assert-Equal "$(@($r.installed).Count) $(@($r.engineExceptions).Count)" '2 1' 'both installed, one engine exception recorded'
+}
+
+$tests['engine 2.0.0: a WUA call failing for a whole batch is isolated one update at a time'] = {
+    Reset-Sim @((New-SimUpdate KB5920001), (New-SimUpdate KB5920002), (New-SimUpdate KB5920003))
+    $script:Sim.BatchCallFails = $true
+    $c = New-TestConfig
+    $o = Invoke-Boots $c
+    Assert-Equal $o[-1] 'Finished:Succeeded' 'every update installs on its own'
+    Assert-Equal (@($script:Sim.InstallBatches | ForEach-Object { @($_).Count }) -join ',') '3,1,1,1' 'batch then singles'
+    Assert-Equal @((Get-Result $c).installed).Count 3 'three installed'
+}
+
+$tests['engine 2.0.0: passes run in order - A prerequisites alone, B normal, C optional and each driver on its own, D verification'] = {
+    Reset-Sim @(
+        (New-SimUpdate KB5930001 -Driver -Optional),
+        (New-SimUpdate KB5930002),
+        (New-SimUpdate KB5930003 -Title '2026-11 Servicing Stack Update for Windows 11'),
+        (New-SimUpdate KB4052623 -Title 'Update for Microsoft Defender Antivirus antimalware platform'),
+        (New-SimUpdate KB5930004 -Optional),
+        (New-SimUpdate KB5930005 -Driver))
+    $c = New-TestConfig @{ drivers = 'include'; optionalUpdates = 'install' }
+    $o = Invoke-Boots $c
+    Assert-Equal $o[-1] 'Finished:Succeeded' 'outcome'
+    $b = @($script:Sim.InstallBatches | ForEach-Object { (@($_) | Sort-Object) -join '+' })
+    Assert-Equal ($b -join ' | ') 'KB4052623+KB5930003 | KB5930002 | KB5930004 | KB5930001 | KB5930005' 'A, then B, then C (optional software together, drivers one by one)'
+    $r = Get-Result $c
+    Assert-Equal (@($r.passes | ForEach-Object { $_.pass }) -join '') 'ABCD' 'pass history'
+    Assert-Equal "$($r.readiness.status) $($r.readiness.bootstrapNeeded) $(@($r.readiness.prerequisites).Count)" 'Ready True 2' 'prerequisites detected at readiness'
+    $d = @($r.drivers | Where-Object { $_.title -like '*KB5930005*' })[0]
+    Assert-Equal "$($d.device.model) $($d.device.hardwareID)" 'Device for KB5930005 PCI\VEN_8086&DEV_KB5930005' 'driver recorded with its device'
+}
+
+$tests['engine 2.0.0: readiness - no prerequisite needed is detected, not assumed'] = {
+    Reset-Sim @((New-SimUpdate KB5940001))
+    $c = New-TestConfig
+    Assert-Equal (Invoke-WduMain $c) 'Finished:Succeeded' 'outcome'
+    $r = Get-Result $c
+    Assert-Equal "$($r.readiness.status) $($r.readiness.bootstrapNeeded) $($r.readiness.searchAttempts) $($r.readiness.restartDone)" 'Ready False 1 False' 'readiness record'
+    Assert-Equal $r.readiness.services.wuauserv.startType 'Manual' 'service states recorded'
+}
+
+$tests['engine 2.0.0: readiness - a restart already pending is taken once before anything is installed'] = {
+    Reset-Sim @((New-SimUpdate KB5950001))
+    $script:Sim.RebootPending = $true
+    $c = New-TestConfig
+    $o = Invoke-Boots $c
+    Assert-Equal ($o -join ',') 'Rebooting,Finished:Succeeded' 'one readiness restart, then installed'
+    Assert-Equal $script:Sim.Updates[0].InstallCalls 1 'installed once, after the restart'
+    $r = Get-Result $c
+    Assert-True ($r.restarts[0].reason -like '*already pending*readiness*') 'restart history records why'
+    Assert-Equal $r.readiness.rebootPendingAtStart $true 'recorded'
+}
+
+$tests['engine 2.0.0: readiness - the Windows Update service disabled ends as NotReady without searching'] = {
+    Reset-Sim @((New-SimUpdate KB5960001))
+    $script:Sim.Disabled = @('wuauserv')
+    $c = New-TestConfig
+    Assert-Equal (Invoke-WduMain $c) 'Finished:Failed' 'outcome'
+    $r = Get-Result $c
+    Assert-Equal "$($r.category) $($script:Sim.Searches)" 'NotReady 0' 'NotReady, nothing searched'
+    Assert-True ($r.technicianAction -like '*wuauserv*Manual*') 'what to do'
+}
+
+$tests['engine 2.0.0: readiness - searches failing while the agent initialises are retried (bounded), then it is ready'] = {
+    Reset-Sim @((New-SimUpdate KB5970001))
+    $script:Sim.ScanThrows = 2
+    $script:Sim.ScanHResult = -2145124322   # 0x8024001E WU_E_SERVICE_STOP
+    $c = New-TestConfig
+    Assert-Equal (Invoke-WduMain $c) 'Finished:Succeeded' 'outcome'
+    $r = Get-Result $c
+    Assert-Equal "$($r.readiness.searchAttempts) $($script:Sim.Resets)" '3 0' 'ready after the third search, no reset'
+    Assert-True ($r.readiness.lastSearchError -like '*NotReady*0x8024001E*') 'last readiness error categorised'
+}
+
+$tests['engine 2.0.0: pass D - superseded updates are reported as no longer offered; devices with problems listed'] = {
+    Reset-Sim @((New-SimUpdate KB5980001 'ok-supersedes' -Supersedes KB5980002), (New-SimUpdate KB5980002 -Optional))
+    $script:Sim.Devices = @([ordered]@{ name = 'PCI Memory Controller'; deviceId = 'PCI\VEN_8086&DEV_51A3'; problemCode = 28; hardwareIds = @('PCI\VEN_8086&DEV_51A3') })
+    $c = New-TestConfig @{ optionalUpdates = 'install' }
+    $o = Invoke-Boots $c
+    Assert-Equal $o[-1] 'Finished:Succeeded' 'outcome'
+    $v = (Get-Result $c).verification
+    Assert-Equal "$(@($v.noLongerOffered).Count) $($v.noLongerOffered[0].kbs[0]) $($v.noLongerOffered[0].category)" '1 KB5980002 Superseded' 'superseded update reported'
+    Assert-Equal "$(@($v.devicesWithProblems).Count) $($v.devicesWithProblems[0].problemCode)" '1 28' 'device problem listed'
+    Assert-Equal "$($v.remainingOffered) $(@($v.installedStillOffered).Count)" '0 0' 'nothing left; installed updates no longer offered'
+}
+
+$tests['engine 2.0.0: failure categories'] = {
+    $com = [ordered]@{ type = 'System.Runtime.InteropServices.COMException' }
+    $net = [ordered]@{ type = 'System.IndexOutOfRangeException' }
+    $cases = @(
+        @('0x80131508', 'install', 'engine', $net, 'EngineException'),
+        @('0x80240017', 'install', 'windowsUpdate', $null, 'NotApplicable'),
+        @('0x8024402C', 'download', 'windowsUpdate', $null, 'TransientNetwork'),
+        @('0x80246007', 'download', 'windowsUpdate', $null, 'DownloadFailure'),
+        @('0x80240016', 'install', 'windowsUpdate', $null, 'ServicingBusy'),
+        @('0x80070BC9', 'install', 'windowsUpdate', $null, 'RebootRequired'),
+        @('0x80070422', 'install', 'windowsUpdate', $null, 'NotReady'),
+        @('0x80240020', 'install', 'windowsUpdate', $null, 'TechnicianRequired'),
+        @('0x800F0922', 'install', 'windowsUpdate', $null, 'InstallerFailure'),
+        @('0x80131508', 'install', 'windowsUpdate', $null, 'InstallerFailure'),
+        @('0x8024000B', 'install', 'engine', $com, 'ComApiException'),
+        @('0x80249999', 'search', 'engine', $com, 'SearchFailure'),
+        @('0x80249999', 'install', 'windowsUpdate', $null, 'NativeResultFailure'))
+    foreach ($x in $cases) { Assert-Equal (Get-WduCategory $x[0] $x[1] $x[2] $x[3]) $x[4] "$($x[0]) $($x[1]) $($x[2])" }
+    Assert-True (Test-WduResetWarranted @('0x80248007') @()) 'data store error warrants a reset'
+    Assert-True (-not (Test-WduResetWarranted @('0x80131508', '0x80240017', '0x8024402C') @('EngineException', 'NotApplicable', 'TransientNetwork'))) 'engine, not-applicable and network never do'
+}
+
+$tests['engine 2.0.0: exception records carry operation, type, HRESULT, line, statement and stack'] = {
+    function Invoke-Failing { $arr = [int[]] @(1, 2); $arr[5] = 3 }
+    $e = $null
+    try { Invoke-Failing } catch { $e = $_ }
+    $i = ConvertFrom-WduError $e 'test operation'
+    Assert-Equal "$($i.operation)|$($i.type)|$($i.hresult)" 'test operation|System.IndexOutOfRangeException|0x80131508' 'type and HRESULT of the real exception'
+    Assert-True ($i.line -gt 0 -and $i.statement.Contains('$arr[5] = 3') -and $i.stack -like '*Invoke-Failing*') 'line, statement and stack'
+    Assert-Equal (Get-WduExceptionSignature $i) "test operation|System.IndexOutOfRangeException|$($i.line)" 'signature'
+}
+
+$tests['engine 2.0.0 retry hooks: a retry run uses its own folder and marker; the original run is untouched'] = {
+    Reset-Sim @((New-SimUpdate KB5990001))
+    $c = New-TestConfig @{ workFolder = 'UpdateRetry\run1'; markerName = 'windows-update-retry.done' }
+    New-Item -ItemType Directory -Path (Join-Path $c.dataRoot 'Updates') -Force | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $c.dataRoot 'Updates\result.json'), '{"status":"CompletedWithFailures"}')
+    Assert-Equal (Invoke-WduMain $c) 'Finished:Succeeded' 'outcome'
+    Assert-True (Test-Path -LiteralPath (Join-Path $c.dataRoot 'UpdateRetry\run1\result.json')) 'result in the retry folder'
+    Assert-True (Test-Path -LiteralPath (Join-Path $c.dataRoot 'state\windows-update-retry.done')) 'retry marker'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $c.dataRoot 'state\windows-update.done'))) 'deployment marker not written'
+    Assert-Equal (Get-Content -LiteralPath (Join-Path $c.dataRoot 'Updates\result.json') -Raw) '{"status":"CompletedWithFailures"}' 'original result untouched'
+}
+
+$tests['engine 2.1.0 retry hooks: selection normal installs every Windows update the policy allows (also optional and previews) but no driver; drivers skips everything else'] = {
+    $ups = @((New-SimUpdate KB5991001), (New-SimUpdate KB5991002 -Driver), (New-SimUpdate KB5991003 -Optional), (New-SimUpdate KB5991004 -Driver -Optional),
+             (New-SimUpdate KB5991005 -Optional -Title '2026-11 Cumulative Update Preview for Windows 11 Version 25H2 for x64-based Systems (KB5991005)'))
+    Reset-Sim $ups
+    $c = New-TestConfig @{ drivers = 'include'; optionalUpdates = 'install'; previewUpdates = $true; selection = 'normal' }
+    Assert-Equal (Invoke-WduMain $c) 'Finished:Succeeded' 'normal outcome'
+    Assert-Equal (@((Get-Result $c).installed | ForEach-Object { $_.kbs[0] } | Sort-Object) -join ',') 'KB5991001,KB5991003,KB5991005' 'every Windows update, no driver'
+    Assert-True (@((Get-Result $c).skipped | Where-Object { $_.reason -like 'not selected for this retry (Windows updates only, no drivers)' }).Count -eq 2) 'the drivers reported as not selected'
+    Assert-Equal "$((Get-Result $c).updateState) $((Get-Result $c).summary.notSelected) $((Get-Result $c).summary.excluded)" 'UpdatesRemaining 2 0' 'drivers left for another retry: updates remain, never "up to date"'
+    Reset-Sim @((New-SimUpdate KB5991001), (New-SimUpdate KB5991002 -Driver), (New-SimUpdate KB5991003 -Optional), (New-SimUpdate KB5991004 -Driver -Optional))
+    $c = New-TestConfig @{ drivers = 'include'; optionalUpdates = 'install'; selection = 'drivers' }
+    Assert-Equal (Invoke-WduMain $c) 'Finished:Succeeded' 'drivers outcome'
+    Assert-Equal (@((Get-Result $c).installed | ForEach-Object { $_.kbs[0] } | Sort-Object) -join ',') 'KB5991002,KB5991004' 'only drivers, optional ones included'
+}
+
+<# Engine 2.1.0: the field mix of the spare computer, every category Windows Update offers. #>
+function New-MixedUpdates {
+    @(
+        (New-SimUpdate KB5990001 -Title '2026-11 Servicing Stack Update for Windows 11 Version 25H2 for x64-based Systems (KB5990001)'),
+        (New-SimUpdate KB5990002 -Title '2026-11 Cumulative Update for Windows 11 Version 25H2 for x64-based Systems (KB5990002)'),
+        (New-SimUpdate KB5990003 -Title '2026-11 Cumulative Update for .NET Framework 3.5 and 4.8.1 for Windows 11, version 25H2 for x64 (KB5990003)'),
+        (New-SimUpdate KB2267602 -Title 'Security Intelligence Update for Microsoft Defender Antivirus - KB2267602 (Version 1.441.1.0) - Current Channel (Broad)'),
+        (New-SimUpdate KB890830 -Title 'Windows Malicious Software Removal Tool x64 - v5.137 (KB890830)'),
+        (New-SimUpdate KB5990004 -Optional -Title '2026-11 Cumulative Update Preview for Windows 11 Version 25H2 for x64-based Systems (KB5990004)'),
+        (New-SimUpdate KB5990005 -Optional -Title '2026-11 Cumulative Update Preview for .NET Framework 3.5 and 4.8.1 for Windows 11, version 25H2 for x64 (KB5990005)'),
+        (New-SimUpdate DRV0001 -Driver -Title 'Intel - System - 10.1.1.44'),
+        (New-SimUpdate DRV0002 -Driver -Optional -Title 'Intel - System - 2.2.100.1'),
+        (New-SimUpdate DRV0003 -Driver -Title 'Contoso - Firmware - 1.2.3')
+    )
+}
+
+$tests['engine 2.1.0 classes: servicing stack, cumulative, .NET, Defender intelligence, MSRT, Windows and .NET previews, drivers and firmware'] = {
+    $expect = [ordered]@{ KB5990001 = 'servicingStack'; KB5990002 = 'cumulative'; KB5990003 = 'dotnet'; KB2267602 = 'defenderIntelligence'; KB890830 = 'msrt'
+                          KB5990004 = 'windowsPreview'; KB5990005 = 'dotnetPreview'; DRV0001 = 'driver'; DRV0002 = 'driver'; DRV0003 = 'firmware' }
+    foreach ($u in New-MixedUpdates) {
+        Set-WduUpdateClass $u
+        Assert-Equal $u.Class $expect[$u.Kbs[0]] "class of $($u.Title)"
+    }
+    $insider = New-SimUpdate KB1 -Title 'Windows 11 Insider Preview Quality Update (26220.9836)'
+    $insider.IsInsider = $true; Set-WduUpdateClass $insider
+    Assert-Equal "$($insider.Class) $($insider.IsPreview)" 'insider False' 'an Insider build is never a preview update'
+}
+
+$tests['engine 2.1.0 standard mode: every category installed (previews and optional drivers included), firmware never; the result says Up to date'] = {
+    Reset-Sim (New-MixedUpdates)
+    $c = New-TestConfig @{ drivers = 'include'; optionalUpdates = 'install'; previewUpdates = $true }
+    Assert-Equal (Invoke-WduMain $c) 'Finished:Succeeded' 'outcome'
+    $r = Get-Result $c
+    Assert-Equal (@($r.installed | ForEach-Object { $_.kbs[0] } | Sort-Object) -join ',') 'DRV0001,DRV0002,KB2267602,KB5990001,KB5990002,KB5990003,KB5990004,KB5990005,KB890830' 'everything but the firmware'
+    Assert-True (@($r.skipped | Where-Object { $_.kbs[0] -eq 'DRV0003' -and $_.reason -eq 'firmware (never installed automatically)' -and $_.class -eq 'firmware' }).Count -eq 1) 'firmware excluded and reported'
+    Assert-Equal "$($r.policy.previewUpdates) $($r.engineVersion)" 'True 2.1.0' 'policy and version recorded'
+    Assert-Equal (@($r.installed | Where-Object { $_.preview } | ForEach-Object { $_.class } | Sort-Object) -join ',') 'dotnetPreview,windowsPreview' 'previews marked in the installed list'
+    Assert-Equal $r.updateState 'UpToDateUnderPolicy' 'the firmware stays offered: up to date under the selected policy'
+    Assert-Equal "$($r.summary.installed) $($r.summary.excluded) $($r.summary.previewsExcluded) $($r.summary.remaining)" '9 1 0 0' 'summary counts'
+}
+
+$tests['engine 2.1.0 previews off: only the Windows and .NET previews are excluded; optional drivers and every other update still install'] = {
+    Reset-Sim (New-MixedUpdates)
+    $c = New-TestConfig @{ drivers = 'include'; optionalUpdates = 'install'; previewUpdates = $false }
+    Assert-Equal (Invoke-WduMain $c) 'Finished:Succeeded' 'outcome'
+    $r = Get-Result $c
+    Assert-Equal (@($r.installed | ForEach-Object { $_.kbs[0] } | Sort-Object) -join ',') 'DRV0001,DRV0002,KB2267602,KB5990001,KB5990002,KB5990003,KB890830' 'previews (and firmware) left out, optional driver installed'
+    Assert-Equal (@($r.skipped | Where-Object { $_.reason -eq 'preview update (policy: preview updates excluded)' } | ForEach-Object { $_.kbs[0] } | Sort-Object) -join ',') 'KB5990004,KB5990005' 'previews reported as intentionally excluded'
+    Assert-Equal $r.updateState 'PreviewUpdatesExcluded' 'state: previews intentionally excluded'
+    Assert-Equal $r.summary.previewsExcluded 2 'counted'
+}
+
+$tests['engine 2.1.0 configuration written before schema 10: previews follow optionalUpdates'] = {
+    foreach ($case in @(@('install', 'True'), @('skip', 'False'))) {
+        Reset-Sim @((New-SimUpdate KB5990004 -Optional -Title '2026-11 Cumulative Update Preview for Windows 11 Version 25H2 (KB5990004)'))
+        $c = New-TestConfig @{ optionalUpdates = $case[0] }
+        if ($c.ContainsKey('previewUpdates')) { $c.Remove('previewUpdates') }
+        [void] (Invoke-WduMain $c)
+        Assert-Equal "$((Get-Result $c).policy.previewUpdates)" $case[1] "optionalUpdates=$($case[0])"
+    }
+}
+
+$tests['engine 2.1.0 Settings refresh: after the last pass the Update Orchestrator is asked to check, completion is recorded by its timestamp, the GUI is never claimed'] = {
+    Reset-Sim @((New-SimUpdate KB5990002))
+    $c = New-TestConfig @{}
+    Assert-Equal (Invoke-WduMain $c) 'Finished:Succeeded' 'outcome'
+    $r = Get-Result $c
+    $sr = $r.settingsRefresh
+    Assert-Equal "$($sr.available) $($sr.requested) $($sr.completed) $($sr.settingsDisplayVerified)" 'True True True False' 'requested and completed; display not verified'
+    Assert-True ([DateTime] $sr.lastSuccessfulScanAfter -gt [DateTime] $sr.lastSuccessfulScanBefore) 'the orchestrator time advanced'
+    Assert-Equal $script:Sim.OrchestratorScans 1 'one request'
+    Assert-True ((Get-Content -LiteralPath (Join-Path $c.dataRoot 'Updates\logs\engine.log') -Raw) -match 'Settings refresh 1: available True, requested True, completed True') 'logged'
+    # Windows installing by itself after the check: the engine waits before searching again.
+    Reset-Sim @((New-SimUpdate KB5990002))
+    $script:Sim.BusyAfterScan = 2
+    $c = New-TestConfig @{}
+    Assert-Equal (Invoke-WduMain $c) 'Finished:Succeeded' 'outcome after waiting'
+    Assert-Equal (Get-Result $c).settingsRefresh.waitedForWindowsInstallerSeconds 60 'waited while Windows installed'
+    Assert-Equal $script:Sim.Busy 0 'the installer was idle before the next search'
+}
+
+$tests['engine 2.1.0 Settings refresh makes a new update applicable: it is installed, a second refresh follows, then verification (bounded)'] = {
+    $late = New-SimUpdate KB5990009 -Title '2026-11 Cumulative Update for .NET Framework (KB5990009)'
+    $late.AppearsAfterRefresh = $true
+    Reset-Sim @((New-SimUpdate KB5990002), $late)
+    $c = New-TestConfig @{}
+    Assert-Equal (Invoke-WduMain $c) 'Finished:Succeeded' 'outcome'
+    $r = Get-Result $c
+    Assert-Equal (@($r.installed | ForEach-Object { $_.kbs[0] } | Sort-Object) -join ',') 'KB5990002,KB5990009' 'the update found by the refresh was installed'
+    Assert-Equal "$($script:Sim.OrchestratorScans) $($r.settingsRefresh.attempt)" '2 2' 'two refreshes at most'
+    Assert-Equal $r.updateState 'UpToDate' 'up to date'
+}
+
+$tests['engine 2.1.0 Settings refresh unavailable or refused: honest message, the WUA verification still decides, never a failure'] = {
+    Reset-Sim @((New-SimUpdate KB5990002))
+    $script:Sim.OrchestratorAvailable = $false
+    $c = New-TestConfig @{}
+    Assert-Equal (Invoke-WduMain $c) 'Finished:Succeeded' 'unavailable: still Succeeded'
+    $sr = (Get-Result $c).settingsRefresh
+    Assert-Equal "$($sr.available) $($sr.requested) $($sr.completed)" 'False False False' 'not available'
+    Assert-True ($sr.message -like '*Windows 11 24H2*final search is the verification*') 'says why and what verifies instead'
+    # The API exists but cannot be created (for example access denied): the real error, not "needs 24H2".
+    Reset-Sim @((New-SimUpdate KB5990002))
+    function Get-WduOrchestrator { $script:WduOrchestratorError = 'UnauthorizedAccessException: Access is denied.'; return $null }
+    try {
+        $c = New-TestConfig @{}
+        [void] (Invoke-WduMain $c)
+        Assert-True ((Get-Result $c).settingsRefresh.message -like "*could not be used (UnauthorizedAccessException: Access is denied.)*") 'real reason reported'
+    } finally { Remove-Item Function:\Get-WduOrchestrator }
+    Assert-Equal (Get-WduOrchestrator) 'sim-orchestrator' 'simulation restored'
+    Reset-Sim @((New-SimUpdate KB5990002))
+    $script:Sim.OrchestratorRefuses = $true
+    $c = New-TestConfig @{}
+    Assert-Equal (Invoke-WduMain $c) 'Finished:Succeeded' 'refused: still Succeeded'
+    Assert-True ((Get-Result $c).settingsRefresh.message -like 'Windows refused the scan request*') 'refusal recorded'
+    Reset-Sim @((New-SimUpdate KB5990002))
+    $script:Sim.OrchestratorCompletes = $false
+    $c = New-TestConfig @{ settingsRefreshMinutes = 1 }
+    Assert-Equal (Invoke-WduMain $c) 'Finished:Succeeded' 'timeout: still Succeeded'
+    $sr = (Get-Result $c).settingsRefresh
+    Assert-Equal "$($sr.requested) $($sr.completed)" 'True False' 'requested, not completed'
+    Assert-True ($sr.message -like '*did not report a completed check within 1 minutes*') 'timeout recorded'
+    Reset-Sim @((New-SimUpdate KB5990002))
+    $c = New-TestConfig @{ settingsRefresh = $false }
+    [void] (Invoke-WduMain $c)
+    Assert-Equal "$($script:Sim.OrchestratorScans) $($null -eq (Get-Result $c).settingsRefresh)" '0 True' 'can be turned off'
+}
+
+$tests['engine 2.1.0 update state: restart required, completed with failures, updates remaining (need a person), installation incomplete, verification unavailable'] = {
+    Reset-Sim @((New-SimUpdate KB5990002 -Behavior 'fail'))
+    $c = New-TestConfig @{ maxAttemptsPerUpdate = 1 }
+    [void] (Invoke-WduMain $c)
+    $r = Get-Result $c
+    Assert-Equal "$($r.updateState) $($r.summary.installFailed) $($r.summary.remaining)" 'CompletedWithFailures 1 1' 'failure'
+    Assert-Equal (Get-WduUpdateState 'Succeeded' ([ordered]@{ installed = @(); failed = @(); skipped = @(); requiresInteraction = @(); verification = [ordered]@{ rebootPending = $true; noLongerOffered = @() } })).state 'RestartRequired' 'restart pending'
+    Assert-Equal (Get-WduUpdateState 'CompletedWithFollowUp' ([ordered]@{ installed = @(); failed = @(); skipped = @(); requiresInteraction = @(@{ title = 'x' }); verification = [ordered]@{ rebootPending = $false; noLongerOffered = @() } })).state 'UpdatesRemaining' 'needs a person'
+    Assert-Equal (Get-WduUpdateState 'Failed' ([ordered]@{ installed = @(); failed = @(); skipped = @(); requiresInteraction = @() })).state 'InstallationIncomplete' 'stopped'
+    Assert-Equal (Get-WduUpdateState 'Succeeded' ([ordered]@{ installed = @(); failed = @(); skipped = @(); requiresInteraction = @() })).state 'VerificationUnavailable' 'no verification: never up to date'
+    $nav = Get-WduUpdateState 'CompletedWithFailures' ([ordered]@{ installed = @(); failed = @(@{ category = 'NotApplicable' }, @{ category = 'DownloadFailure' }); skipped = @(); requiresInteraction = @(); verification = [ordered]@{ rebootPending = $false; noLongerOffered = @(@{ title = 'old' }) } })
+    Assert-Equal "$($nav.summary.notApplicable) $($nav.summary.downloadFailed) $($nav.summary.installFailed) $($nav.summary.superseded)" '1 1 0 1' 'not applicable, download failed and superseded counted apart'
+}
+
+$tests['engine 2.1.0 safety: the tests never reach the real Update Orchestrator'] = {
+    Assert-Equal (Get-WduOrchestrator) 'sim-orchestrator' 'the boundary is simulated in this suite'
 }
 
 $tests['Get-WduConfig fills defaults and normalises KB numbers'] = {
@@ -551,6 +1002,7 @@ $tests['Get-WduConfig fills defaults and normalises KB numbers'] = {
     Assert-Equal $cfg.retryDelaySeconds 120 'retry delay default'
     Assert-Equal $cfg.lockWaitMinutes 60 'coordination default for configs written before 1.1.0'
     Assert-Equal ($cfg.excludedKbs -join ',') 'KB5000001' 'normalised KB'
+    Assert-Equal "$($cfg.readinessSearchAttempts) $($cfg.maxEngineExceptions) $($cfg.readinessRestart) $($cfg.verifyDevices)" '4 2 True True' 'engine 2.0.0 defaults'
     Remove-Item -LiteralPath $p
 }
 

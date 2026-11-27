@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 10,
+  "schemaVersion": 11,
   "profileName": "Owner default",
   "setup": {
     "languageMode": "unattended",
@@ -79,6 +79,7 @@
     "drivers": "followPolicy",
     "featureUpdates": "skip",
     "optionalUpdates": "install",
+    "previewUpdates": true,
     "microsoftUpdate": false,
     "maxReboots": 10,
     "maxAttemptsPerUpdate": 3,

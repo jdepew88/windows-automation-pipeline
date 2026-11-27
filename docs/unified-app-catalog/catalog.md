@@ -164,10 +164,10 @@ Microsoft Office LTSC stays a separate, optional choice (its own card on the App
 ## Compatibility: nothing saved changes by itself
 
 - Revision 1 of the built-in profiles (the Phase 10 definitions) is frozen in `src/data/apps/profiles-v1.json`; revision 2 is `profiles.json`.
-- A deployment records the revision it uses (`applications.selection.profileRevision`, profile schema 10). The v9→v10 migration sets revision 1 for every older profile, with a note, so it selects exactly the applications it did before. **Use the new profile defaults** (Applications page, Quick Deployment step 2, and the Application Manager's Profiles tab) adopts revision 2 explicitly; ticked profiles, devices, additions and removals are kept.
+- A deployment records the revision it uses (`applications.selection.profileRevision`, profile schema 11). The v10→v11 migration sets revision 1 for every older profile, with a note, so it selects exactly the applications it did before. **Use the new profile defaults** (Applications page, Quick Deployment step 2, and the Application Manager's Profiles tab) adopts revision 2 explicitly; ticked profiles, devices, additions and removals are kept.
 - A saved custom profile records the revision its parent profiles refer to (`builtinRevision`). One saved before the rebuild keeps resolving its parents in revision 1 even inside a new deployment (they appear as "… (earlier defaults)"); its card offers **Use the new defaults**.
 - Saved profiles whose id became a built-in id (`student-office`, `remote-support`) are renamed by the migration and in the browser library, and every reference follows.
-- Profile schema 10 is also used by the unmerged `feature/disk-preparation` branch: whichever merges second renumbers its migration.
+- Schema 10 is main's preview-update setting (Windows Update 2.1.0); this branch's profile revision became schema 11 when main was merged in. The unmerged `feature/disk-preparation` branch also numbers its migration 10 and must renumber when it merges.
 
 Revision 1, for reference:
 

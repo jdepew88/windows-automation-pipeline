@@ -27,6 +27,7 @@ export const HEALTH_CATEGORIES = [
   { id: 'network', name: 'Network' },
   { id: 'storage', name: 'Storage' },
   { id: 'customizations', name: 'Windows settings' },
+  { id: 'hardwareSoftware', name: 'Manufacturer software' },
   { id: 'recovery', name: 'Recovery and outstanding work' },
 ] as const;
 export type HealthCategoryId = (typeof HEALTH_CATEGORIES)[number]['id'];
@@ -47,6 +48,109 @@ export const PHASE5_OUTCOME_MAP: Record<string, { finding: (typeof FINDING_STATU
 };
 
 const str = z.string();
+const int = z.number().int();
+
+/** Health engine 1.1.0: how an application's installation was verified (never from an exit code alone). */
+export const APP_VERIFICATION_STATES = ['InstalledAndVerified', 'InstallerSucceededUnverified', 'Missing', 'Failed', 'ManualActionRequired', 'NotSelected', 'Pending', 'Deferred'] as const;
+/** The update engine's (2.1.0) final state, and the finding the health engine makes of it. Never "Pass" because installation finished. */
+export const UPDATE_STATES = ['UpToDate', 'UpToDateUnderPolicy', 'PreviewUpdatesExcluded', 'RestartRequired', 'UpdatesRemaining', 'InstallationIncomplete', 'CompletedWithFailures', 'VerificationUnavailable'] as const;
+export const UPDATE_STATE_FINDING: Record<(typeof UPDATE_STATES)[number], 'Pass' | 'Warning' | 'Fail' | 'Unverifiable'> = {
+  UpToDate: 'Pass',
+  UpToDateUnderPolicy: 'Pass',
+  PreviewUpdatesExcluded: 'Pass',
+  RestartRequired: 'Warning',
+  UpdatesRemaining: 'Warning',
+  InstallationIncomplete: 'Fail',
+  CompletedWithFailures: 'Fail',
+  VerificationUnavailable: 'Unverifiable',
+};
+export const RETRY_RUN_STATES = ['Finished', 'RunningOrAwaitingRestart', 'StoppedBeforeFinishing'] as const;
+export const DEVICE_COMPARISON_STATES = ['NowHealthy', 'StillHasProblem', 'NotPresent'] as const;
+export const MANUFACTURER_UTILITIES = ['nvidiaApp', 'amdAdrenalin', 'amdRyzenMaster'] as const;
+
+/** One engine result.json (the deployment's or a retry run's); fields of engine 2.1.0 are '' or null when absent. */
+const UpdateResultViewSchema = z
+  .object({
+    source: str,
+    label: str,
+    engineVersion: str,
+    status: str,
+    updateState: str,
+    updateStateText: str,
+    startedUtc: str,
+    finishedUtc: str,
+    installed: int.min(0),
+    failed: int.min(0),
+    summary: z.record(z.string(), int).nullable(),
+    verification: z.object({ remainingOffered: int.nullable(), noLongerOffered: int.min(0), devicesWithProblems: int.min(0), rebootPending: z.boolean().nullable() }).strict().nullable(),
+  })
+  .strict();
+
+export const WindowsUpdateHealthSchema = z
+  .object({
+    partOfDeployment: z.boolean(),
+    checkedUtc: str,
+    original: UpdateResultViewSchema.nullable(),
+    current: UpdateResultViewSchema.nullable(),
+    policy: z
+      .object({ source: str, featureUpdates: str, optionalUpdates: str, drivers: str, previewUpdates: z.boolean().nullable(), previewSource: z.enum(['policy', 'configuration', 'optionalUpdates', 'unknown']), maxAttemptsPerUpdate: int.nullable() })
+      .strict()
+      .nullable(),
+    settingsRefresh: z
+      .object({ from: str, available: z.boolean(), requested: z.boolean(), completed: z.boolean(), attempt: str, requestedUtc: str, completedUtc: str, lastSuccessfulScanBefore: str, lastSuccessfulScanAfter: str, settingsDisplayVerified: z.literal(false), message: str })
+      .strict()
+      .nullable(),
+    orchestrator: z.object({ available: z.boolean(), lastSuccessfulScanUtc: str, isScanning: z.boolean().nullable(), isWorking: z.boolean().nullable() }).strict().nullable(),
+    retries: z.array(z.object({ runId: str, selection: str, final: str, state: z.enum(RETRY_RUN_STATES), taskPresent: z.boolean(), engineVersion: str, status: str, updateState: str, installed: int.min(0), failed: int.min(0), finishedUtc: str, findingId: str }).strict()),
+    originalFailures: z.array(z.object({ title: str, kbs: z.array(str), category: str, class: str, lastHResult: str, laterInstalled: z.boolean(), installedUtc: str, installedBy: str, findingId: str }).strict()),
+    drivers: z.array(z.object({ title: str, model: str, hardwareId: str, result: str, installedBy: str }).strict()),
+    liveScan: z.object({ performed: z.boolean(), required: int.min(0), optional: int.min(0), drivers: int.min(0), feature: int.min(0) }).strict().nullable(),
+  })
+  .strict();
+
+export const DeviceComparisonSchema = z
+  .object({ name: str, hardwareIds: z.array(str), deviceId: str, previousProblemCode: int, currentProblemCode: int.nullable(), state: z.enum(DEVICE_COMPARISON_STATES), source: str, findingId: str })
+  .strict();
+
+export const OfficeHealthSchema = z
+  .object({
+    selected: z.literal(true),
+    product: str,
+    displayName: str,
+    expectedProductReleaseId: str,
+    present: z.boolean().nullable(),
+    productReleaseIds: z.array(str),
+    version: str,
+    platform: str,
+    engineStatus: str,
+    engineVerified: z.boolean(),
+    result: z.enum(['InstalledAndVerified', 'DifferentProduct', 'Pending', 'InstallerSucceededUnverified', 'Missing', 'Unverifiable']),
+    activation: z.object({ requested: str, status: str, verified: z.boolean(), message: str, source: str }).strict(),
+    checkedUtc: str,
+  })
+  .strict();
+
+/** A manufacturer utility recommendation: information only, never installed automatically. */
+export const HardwareSoftwareSchema = z
+  .object({
+    id: z.enum(MANUFACTURER_UTILITIES),
+    utility: str,
+    vendor: str,
+    recommended: z.literal(true),
+    detectedHardware: str,
+    compatibility: str,
+    installed: z.boolean().nullable(),
+    installedVersion: str,
+    automaticInstall: z.literal(false),
+    automaticInstallReason: str,
+    manualAction: str,
+    url: z.string().url(),
+    signIn: str,
+    notes: str,
+    findingId: str,
+    checkedUtc: str,
+  })
+  .strict();
 const FINDING_ID = /^[a-z][a-z0-9]*(\.[A-Za-z0-9_:+-]+)+$/;
 
 export const HealthFindingSchema = z
@@ -104,6 +208,7 @@ export const HealthReportSchema = z
           foundIn: str,
           version: str,
           result: str,
+          verification: z.enum(APP_VERIFICATION_STATES),
           findingId: str,
         })
         .strict(),
@@ -121,6 +226,10 @@ export const HealthReportSchema = z
       .strict()
       .nullable(),
     history: z.array(z.object({ file: str, generatedUtc: str, status: str }).strict()),
+    windowsUpdate: WindowsUpdateHealthSchema.nullable(),
+    deviceComparison: z.array(DeviceComparisonSchema),
+    office: OfficeHealthSchema.nullable(),
+    hardwareSoftware: z.array(HardwareSoftwareSchema),
   })
   .strict();
 export type HealthReport = z.infer<typeof HealthReportSchema>;
@@ -175,6 +284,23 @@ export const HEALTH_REPORT_JSON_SCHEMA = {
     },
     sources: { type: 'array', items: { type: 'object', properties: { state: { enum: [...SOURCE_STATES] } } } },
     checklist: { type: 'array', items: { type: 'object', properties: { state: { enum: [...CHECKLIST_STATES] } } } },
+    applications: { type: 'array', items: { type: 'object', properties: { verification: { enum: [...APP_VERIFICATION_STATES] } } } },
+    windowsUpdate: {
+      type: ['object', 'null'],
+      description:
+        'Health engine 1.1.0: the update engine results (deployment and every Retry Windows Update run) as recorded; "current" is the most recent finished one. "original" stays the historical record; originalFailures says which were installed later (retry result or Windows Update history). settingsRefresh.settingsDisplayVerified is always false.',
+      properties: {
+        current: { type: ['object', 'null'], properties: { updateState: { type: 'string', description: `One of ${UPDATE_STATES.join(', ')}, or empty for update engines before 2.1.0` } } },
+        retries: { type: 'array', items: { type: 'object', properties: { state: { enum: [...RETRY_RUN_STATES] } } } },
+      },
+    },
+    deviceComparison: { type: 'array', description: 'Devices the deployment reported with problems, compared with Device Manager now.', items: { type: 'object', properties: { state: { enum: [...DEVICE_COMPARISON_STATES] } } } },
+    office: { type: ['object', 'null'], description: 'Microsoft Office when this deployment selected it: Click-to-Run registry; activation as the activation stage recorded it (never a key or a KMS host).' },
+    hardwareSoftware: {
+      type: 'array',
+      description: 'Optional manufacturer utilities recommended for the detected hardware. Information only: automaticInstall is always false.',
+      items: { type: 'object', properties: { id: { enum: [...MANUFACTURER_UTILITIES] }, automaticInstall: { const: false } } },
+    },
   },
 } as const;
 
@@ -252,8 +378,8 @@ export function sampleHealthReport(mode: 'technician' | 'customer', notes = ''):
       categories: cats,
       findings,
       applications: [
-        { key: 'winget:git.git', name: 'Git', source: 'winget', packageIdentifier: 'Git.Git', method: 'winget', kind: 'automatic', required: true, scope: 'machine', engineStatus: 'Succeeded', lifecycle: 'Succeeded', attempts: 1, detection: 'Installed', independent: 'Found', foundIn: 'machine', version: '2.51.0', result: 'InstalledVerified', findingId: 'app.winget:git.git' },
-        { key: 'catalog:rustdesk', name: 'RustDesk', source: 'catalog', packageIdentifier: '', method: 'manual', kind: 'manual', required: false, scope: 'unknown', engineStatus: 'RequiresInteraction', lifecycle: 'ManualActionRequired', attempts: 0, detection: '', independent: 'NotFound', foundIn: '', version: '', result: 'ManualInstallationRequired', findingId: 'app.catalog:rustdesk' },
+        { key: 'winget:git.git', name: 'Git', source: 'winget', packageIdentifier: 'Git.Git', method: 'winget', kind: 'automatic', required: true, scope: 'machine', engineStatus: 'Succeeded', lifecycle: 'Succeeded', attempts: 1, detection: 'Installed', independent: 'Found', foundIn: 'machine', version: '2.51.0', result: 'InstalledVerified', verification: 'InstalledAndVerified', findingId: 'app.winget:git.git' },
+        { key: 'catalog:rustdesk', name: 'RustDesk', source: 'catalog', packageIdentifier: '', method: 'manual', kind: 'manual', required: false, scope: 'unknown', engineStatus: 'RequiresInteraction', lifecycle: 'ManualActionRequired', attempts: 0, detection: '', independent: 'NotFound', foundIn: '', version: '', result: 'ManualInstallationRequired', verification: 'ManualActionRequired', findingId: 'app.catalog:rustdesk' },
       ],
       outstanding: [],
       manualActions: [{ id: 'app.catalog:rustdesk', text: 'RustDesk: install it from https://rustdesk.com/download.', url: 'https://rustdesk.com/download' }],
@@ -270,6 +396,10 @@ export function sampleHealthReport(mode: 'technician' | 'customer', notes = ''):
       limitations: ['Sample data: the website does not know the target computer.'],
       comparison: null,
       history: [],
+      windowsUpdate: null,
+      deviceComparison: [],
+      office: null,
+      hardwareSoftware: [],
     } satisfies HealthReport,
   };
 }
