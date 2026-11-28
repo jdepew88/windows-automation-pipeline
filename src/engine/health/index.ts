@@ -6,6 +6,7 @@ import { resolveIdentity } from '../naming';
 import { DATA_ROOT, resolveDrivers, ongoingPolicyDeferred } from '../windows-update';
 import { applicationsActive, applicationsConfig } from '../applications';
 import { resolveSelection } from '../applications/selection';
+import { verifySpec, type VerifySpec } from '../applications/catalog';
 import { settingsRestoreActive } from '../migration/plan';
 import { adapterById } from '../migration/adapters';
 import { driversActive } from '../drivers';
@@ -22,7 +23,7 @@ export * from './contract';
  * reads the engines' own results as evidence, never as proof.
  */
 
-export const HEALTH_ENGINE_VERSION = '1.1.0';
+export const HEALTH_ENGINE_VERSION = '1.2.0';
 export const HEALTH_DIR = 'scripts/health';
 export const HEALTH_ENGINE_FILE = 'DeploymentHealth.ps1';
 export const HEALTH_CONFIG_FILE = 'health-config.json';
@@ -109,6 +110,12 @@ export function healthConfig(p: Profile) {
   const scopeOf = new Map(sel.packages.map((x) => [x.key, x.catalog?.scope ?? (x.ref.scope || 'unknown')]));
   const catalogName = new Map(sel.packages.map((x) => [x.key, x.catalog?.displayName ?? '']));
   const signIn = new Set(sel.packages.filter((x) => x.accountSignIn).map((x) => x.key));
+  /**
+   * Health engine 1.2.0: the same installation evidence the application engine checks (the catalog's
+   * verify block via verifySpec), so the audit and the engine agree on what "installed" means. Older
+   * health-config.json files lack it; the engine then falls back to names and WinGet records.
+   */
+  const verifyOf = new Map<string, VerifySpec>(sel.packages.map((x) => [x.key, verifySpec(x.catalog)]));
   const items = cfg
     ? [
         ...cfg.packages.map((x) => ({
@@ -127,8 +134,9 @@ export function healthConfig(p: Profile) {
           signIn: signIn.has(x.key),
           instructions: '',
           url: '',
+          verify: (x.verify as VerifySpec | undefined) ?? verifyOf.get(x.key) ?? {},
         })),
-        ...cfg.manual.map((x) => ({ key: x.key, operationId: `app:${x.key}`, name: x.displayName, names: [x.displayName], source: 'catalog', packageIdentifier: '', method: 'manual', kind: 'manual' as const, required: false, scope: 'unknown', version: '', shortcut: '', signIn: signIn.has(x.key), instructions: x.instructions, url: x.url })),
+        ...cfg.manual.map((x) => ({ key: x.key, operationId: `app:${x.key}`, name: x.displayName, names: [x.displayName], source: 'catalog', packageIdentifier: '', method: 'manual', kind: 'manual' as const, required: false, scope: 'unknown', version: '', shortcut: '', signIn: signIn.has(x.key), instructions: x.instructions, url: x.url, verify: verifyOf.get(x.key) ?? {} })),
         ...cfg.additionalSoftware.map((x) => ({
           key: `additional:${x.id.toLowerCase()}`,
           operationId: `additional:${x.id}`,
@@ -145,6 +153,7 @@ export function healthConfig(p: Profile) {
           signIn: false,
           instructions: x.execution === 'automatic' ? '' : `Install ${x.name} by hand${x.downloadUrl ? ` from ${x.downloadUrl}` : ''}.`,
           url: x.downloadUrl,
+          verify: {} as VerifySpec,
         })),
       ]
     : [];
@@ -243,6 +252,8 @@ Use (Windows PowerShell 5.1, as administrator)
       20 NeedsAttention, 30 Incomplete, 50 Unverifiable, 60 Failed)
   ... -Mode Dashboard      verifies, then opens the technician report
   ... -ScanUpdates         also asks Windows Update which updates are still available (read-only)
+  ... -CheckAppUpdates     also lists WinGet updates for the selected applications (read-only
+                           "winget upgrade"; run it as the deployment user: not possible as SYSTEM)
   ... -Mode CleanupBackups lists the retained settings backup; -ConfirmCleanup <backup id> removes
                            it, only when no restoration is outstanding (never the USB copy)
   ... -Mode ExportDiagnostics  a ZIP with the reports and sanitized logs (no backups, no passwords)
@@ -251,6 +262,16 @@ It can be run at any time later, without replaying the deployment:
   powershell.exe -ExecutionPolicy Bypass -File "${HEALTH_TOOL}" -Mode Verify
   powershell.exe -ExecutionPolicy Bypass -File "${HEALTH_TOOL}" -Mode Dashboard
 Verify writes only its reports (plus a line in the deployment log and an Application event).
+
+Applications (health engine 1.2.0) are verified with the same evidence the application engine
+checks: uninstall records (machine-wide, 32-bit and the deployment user's own when that user's
+registry is loaded; a user's registry is never loaded by this tool), Store packages (registered or
+provisioned), files (including the deployment user's profile) and registry values. The engine's
+own result is shown as history. An application is never reported as installed without evidence,
+and never as missing only because a machine-wide uninstall record is absent: per-user evidence that
+cannot be read yet (user signed out, no profile yet, another account) is reported as pending. The
+Visual C++ runtimes are listed by family and architecture (x86 and x64 separately; 32-bit
+applications need the x86 runtime on 64-bit Windows).
 
 Also audited (read-only): the Windows Update state the update engine recorded (2.1.0), its
 policy (feature, optional, preview updates, drivers) and final Settings refresh, every Retry

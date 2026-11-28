@@ -7,16 +7,22 @@
           "PackageIdentifier": "Google.Chrome"
         },
         {
-          "PackageIdentifier": "VideoLAN.VLC"
-        },
-        {
           "PackageIdentifier": "7zip.7zip"
         },
         {
-          "PackageIdentifier": "CodeSector.TeraCopy"
+          "PackageIdentifier": "VideoLAN.VLC"
+        },
+        {
+          "PackageIdentifier": "Notepad++.Notepad++"
         },
         {
           "PackageIdentifier": "Bitwarden.Bitwarden"
+        },
+        {
+          "PackageIdentifier": "SumatraPDF.SumatraPDF"
+        },
+        {
+          "PackageIdentifier": "DuongDieuPhap.ImageGlass"
         },
         {
           "PackageIdentifier": "Microsoft.VCRedist.2015+.x64"
@@ -44,7 +50,7 @@
     {
       "Packages": [
         {
-          "PackageIdentifier": "9MSPC6MP8FM4"
+          "PackageIdentifier": "9NKSQGP7F2NH"
         }
       ],
       "SourceDetails": {

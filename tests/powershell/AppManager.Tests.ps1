@@ -459,7 +459,7 @@ $tests['install queue: one at a time, verified afterwards, one failure keeps the
     Assert-Equal "$($git.result) $($git.verification) $($git.resultVersion) $($git.exitCode)" 'Succeeded Verified 2.47.0 0x00000000' 'Git installed and verified'
     Assert-Equal "$($git.format) $($git.version) $($git.catalogId) $($git.requestedBy)" "$($script:WamFormat) 1 git PC\owner" 'versioned record'
     $bad = $recs | Where-Object { $_.packageId -eq 'Bad.Download' }
-    Assert-Equal "$($bad.result) $($bad.exitCode) $($bad.failureClass) $($bad.retryable)" 'Failed 0x8A150008 Network True' 'failure captured, retryable'
+    Assert-Equal "$($bad.result) $($bad.exitCode) $($bad.failureClass) $($bad.retryable)" 'Failed 0x8A150008 Download True' 'failure captured, retryable (0x8A150008 DOWNLOAD_FAILED is a Download failure since engine 1.6.0)'
     Assert-Equal ($recs | Where-Object { $_.packageId -eq 'VideoLAN.VLC' }).result 'Succeeded' 'VLC still installed after the failure'
     foreach ($k in 'startedUtc', 'finishedUtc', 'action', 'priorVersion', 'source', 'restartRequired', 'attempt', 'retryOf', 'command', 'manualAction') { Assert-True ($git.ContainsKey($k)) "record has $k" }
     $order = @($script:Sim.Calls | Where-Object { $_ -match '^install ' } | ForEach-Object { ($_ -split ' ')[2] })
@@ -487,7 +487,7 @@ $tests['installer outcomes: restart, cancellation, declined UAC, agreements, has
     Assert-True ($r['C.Cancel'].result -eq 'ManualActionRequired' -and $r['C.Cancel'].manualAction) 'cancelled needs a person'
     Assert-True ($r['U.Uac'].result -eq 'Cancelled' -and $r['U.Uac'].manualAction -match 'UAC') 'declined UAC'
     Assert-True ($r['A.Eula'].result -eq 'AgreementRequired' -and $r['A.Eula'].manualAction -match 'licence') 'agreement never accepted for the user'
-    Assert-True ($r['H.Hash'].result -eq 'Failed' -and $r['H.Hash'].failureClass -eq 'Integrity' -and -not $r['H.Hash'].retryable) 'hash mismatch never retried'
+    Assert-True ($r['H.Hash'].result -eq 'Failed' -and $r['H.Hash'].failureClass -eq 'HashMismatch' -and -not $r['H.Hash'].retryable) 'hash mismatch never retried (class HashMismatch since engine 1.6.0, was Integrity)'
     Assert-Equal "$($r['L.Lies'].result) $($r['L.Lies'].verification)" 'Uncertain NotFound' 'independent verification'
     Assert-True (@($script:Sim.Calls | Where-Object { $_ -match 'accept-package-agreements' }).Count -eq 0) 'no agreement accepted without the user'
 }

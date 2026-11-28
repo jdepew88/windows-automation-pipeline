@@ -179,7 +179,41 @@ export const MIGRATIONS: Record<number, Migration> = {
       note: previews ? undefined : 'Preview updates (separate from the other optional updates since schema version 10) stay off for this profile, as before.',
     };
   },
+
+  // v11: the built-in application profiles were rebuilt (revision 2). An older profile keeps the
+  // revision-1 definitions, so it selects exactly the applications it did before; adopting the new
+  // defaults is an explicit button under Applications. Saved custom profiles whose id is now a
+  // built-in id get a free id, and every reference to them follows.
+  10: (input) => {
+    const apps = isObj(input.applications) ? { ...input.applications } : undefined;
+    const sel = apps && isObj(apps.selection) ? { ...apps.selection } : undefined;
+    if (!apps || !sel) return { value: input };
+    if (sel.profileRevision === undefined) sel.profileRevision = 1;
+    const custom = Array.isArray(sel.profiles) ? (sel.profiles as unknown[]).filter(isObj) : [];
+    const taken = new Set<string>([...V11_NEW_BUILTIN_IDS, ...custom.map((p) => String(p.id))]);
+    const renamed = new Map<string, string>();
+    for (const id of V11_NEW_BUILTIN_IDS) {
+      if (!custom.some((p) => p.id === id)) continue;
+      let n = 2;
+      while (taken.has(`${id}-${n}`)) n++;
+      renamed.set(id, `${id}-${n}`);
+      taken.add(`${id}-${n}`);
+    }
+    if (renamed.size) {
+      const map = (v: unknown) => (typeof v === 'string' ? (renamed.get(v) ?? v) : v);
+      sel.profiles = (sel.profiles as unknown[]).map((p) => (isObj(p) ? { ...p, id: map(p.id), inherits: Array.isArray(p.inherits) ? p.inherits.map(map) : p.inherits } : p));
+      if (Array.isArray(sel.selectedProfiles)) sel.selectedProfiles = sel.selectedProfiles.map(map);
+      if (isObj(sel.addedWith)) sel.addedWith = Object.fromEntries(Object.entries(sel.addedWith).map(([k, v]) => [k, Array.isArray(v) ? v.map(map) : v]));
+    }
+    return {
+      value: { ...input, applications: { ...apps, selection: sel } },
+      note: `The built-in application profiles were rebuilt (Core Essentials, Gamer, Student / Office, Remote Support and others). This older profile keeps the applications its profiles selected before; choose "Use the new profile defaults" under Applications to adopt them.${renamed.size ? ` Saved profile id(s) ${[...renamed].map(([a, b]) => `"${a}" → "${b}"`).join(', ')} were renamed because they are now built-in profile ids.` : ''}`,
+    };
+  },
 };
+
+/** Built-in profile ids that first appeared in revision 2 (schema version 11). */
+const V11_NEW_BUILTIN_IDS = ['student-office', 'remote-support'];
 
 /** The six (empty) built-in profiles of schema version 3, for the v2→v3 step. */
 const V3_BUILTIN_PROFILES = [

@@ -52,9 +52,11 @@ export interface PolicyEntry {
 export function catalogPolicy(entries: readonly CatalogEntry[] = CATALOG) {
   const packages: PolicyEntry[] = [];
   for (const e of entries) {
-    if (!e.packageIdentifier) continue;
-    for (const id of [e.packageIdentifier, ...(e.alternateIds ?? [])])
-      packages.push({ id, catalogId: e.id, name: e.displayName, removal: e.removal ?? 'normal', upgrade: e.upgrade ?? 'winget', kind: e.kind ?? 'application' });
+    // A manual entry (no package of its own) is still recognised by its alternate WinGet ids, for
+    // example Battle.net installed earlier through WinGet; it is never upgraded unattended.
+    const manual = !e.packageIdentifier;
+    for (const id of [...(e.packageIdentifier ? [e.packageIdentifier] : []), ...(e.alternateIds ?? [])])
+      packages.push({ id, catalogId: e.id, name: e.displayName, removal: e.removal ?? 'normal', upgrade: manual ? 'manual' : (e.upgrade ?? 'winget'), kind: e.kind ?? 'application' });
   }
   return { format: POLICY_FORMAT, version: 1, catalogUpdated: CATALOG_UPDATED, packages };
 }

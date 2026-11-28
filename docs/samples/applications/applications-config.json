@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "engineVersion": "1.5.0",
+  "engineVersion": "1.6.0",
   "dataRoot": "C:\\ProgramData\\WindowsDeploymentBuilder",
   "taskPath": "\\WindowsDeploymentBuilder\\",
   "taskName": "Applications",
@@ -50,20 +50,10 @@
       "displayName": "Google Chrome",
       "version": "",
       "scope": "",
-      "interaction": "unknown",
+      "interaction": "silent",
       "after": [],
-      "method": "winget"
-    },
-    {
-      "key": "winget:videolan.vlc",
-      "packageIdentifier": "VideoLAN.VLC",
-      "source": "winget",
-      "displayName": "VLC media player",
-      "version": "",
-      "scope": "",
-      "interaction": "unknown",
-      "after": [],
-      "method": "winget"
+      "method": "winget",
+      "verify": {}
     },
     {
       "key": "winget:7zip.7zip",
@@ -72,20 +62,34 @@
       "displayName": "7-Zip",
       "version": "",
       "scope": "",
-      "interaction": "unknown",
+      "interaction": "silent",
       "after": [],
-      "method": "winget"
+      "method": "winget",
+      "verify": {}
     },
     {
-      "key": "winget:codesector.teracopy",
-      "packageIdentifier": "CodeSector.TeraCopy",
+      "key": "winget:videolan.vlc",
+      "packageIdentifier": "VideoLAN.VLC",
       "source": "winget",
-      "displayName": "TeraCopy",
+      "displayName": "VLC media player",
       "version": "",
       "scope": "",
-      "interaction": "unknown",
+      "interaction": "silent",
       "after": [],
-      "method": "winget"
+      "method": "winget",
+      "verify": {}
+    },
+    {
+      "key": "winget:notepad++.notepad++",
+      "packageIdentifier": "Notepad++.Notepad++",
+      "source": "winget",
+      "displayName": "Notepad++",
+      "version": "",
+      "scope": "",
+      "interaction": "silent",
+      "after": [],
+      "method": "winget",
+      "verify": {}
     },
     {
       "key": "winget:bitwarden.bitwarden",
@@ -94,9 +98,49 @@
       "displayName": "Bitwarden",
       "version": "",
       "scope": "",
-      "interaction": "unknown",
+      "interaction": "silent",
       "after": [],
-      "method": "winget"
+      "method": "winget",
+      "verify": {
+        "appx": [
+          "8bitSolutionsLLC.bitwardendesktop"
+        ]
+      }
+    },
+    {
+      "key": "winget:sumatrapdf.sumatrapdf",
+      "packageIdentifier": "SumatraPDF.SumatraPDF",
+      "source": "winget",
+      "displayName": "SumatraPDF",
+      "version": "",
+      "scope": "",
+      "interaction": "silent",
+      "after": [],
+      "method": "winget",
+      "verify": {
+        "uninstall": [
+          "SumatraPDF",
+          "SumatraPDF (ARM64 portable)",
+          "SumatraPDF (x64 portable)",
+          "SumatraPDF (x86 portable)"
+        ]
+      }
+    },
+    {
+      "key": "winget:duongdieuphap.imageglass",
+      "packageIdentifier": "DuongDieuPhap.ImageGlass",
+      "source": "winget",
+      "displayName": "ImageGlass",
+      "version": "",
+      "scope": "",
+      "interaction": "silent",
+      "after": [],
+      "method": "winget",
+      "verify": {
+        "appx": [
+          "DuongDieuPhap.ImageGlass"
+        ]
+      }
     },
     {
       "key": "winget:microsoft.vcredist.2015+.x64",
@@ -105,9 +149,19 @@
       "displayName": "Visual C++ Redistributable 2015-2026 (x64)",
       "version": "",
       "scope": "",
-      "interaction": "unknown",
+      "interaction": "silent",
       "after": [],
-      "method": "winget"
+      "method": "winget",
+      "verify": {
+        "registry": [
+          {
+            "key": "HKLM\\SOFTWARE\\Microsoft\\VisualStudio\\14.0\\VC\\Runtimes\\X64",
+            "name": "Installed",
+            "equals": "1",
+            "view": "64"
+          }
+        ]
+      }
     },
     {
       "key": "winget:microsoft.vcredist.2015+.x86",
@@ -116,9 +170,19 @@
       "displayName": "Visual C++ Redistributable 2015-2026 (x86)",
       "version": "",
       "scope": "",
-      "interaction": "unknown",
+      "interaction": "silent",
       "after": [],
-      "method": "winget"
+      "method": "winget",
+      "verify": {
+        "registry": [
+          {
+            "key": "HKLM\\SOFTWARE\\Microsoft\\VisualStudio\\14.0\\VC\\Runtimes\\X86",
+            "name": "Installed",
+            "equals": "1",
+            "view": "32"
+          }
+        ]
+      }
     },
     {
       "key": "winget:git.git",
@@ -127,9 +191,10 @@
       "displayName": "Git",
       "version": "",
       "scope": "",
-      "interaction": "unknown",
+      "interaction": "silent",
       "after": [],
-      "method": "winget"
+      "method": "winget",
+      "verify": {}
     },
     {
       "key": "winget:microsoft.wsl",
@@ -138,9 +203,14 @@
       "displayName": "Windows Subsystem for Linux",
       "version": "",
       "scope": "",
-      "interaction": "unknown",
+      "interaction": "silent",
       "after": [],
-      "method": "winget"
+      "method": "winget",
+      "verify": {
+        "appx": [
+          "MicrosoftCorporationII.WindowsSubsystemForLinux"
+        ]
+      }
     },
     {
       "key": "winget:docker.dockerdesktop",
@@ -149,22 +219,26 @@
       "displayName": "Docker Desktop",
       "version": "",
       "scope": "",
-      "interaction": "unknown",
+      "interaction": "silent",
       "after": [
         "winget:microsoft.wsl"
       ],
-      "method": "winget"
+      "method": "winget",
+      "verify": {}
     },
     {
-      "key": "msstore:9mspc6mp8fm4",
-      "packageIdentifier": "9MSPC6MP8FM4",
+      "key": "msstore:9nksqgp7f2nh",
+      "packageIdentifier": "9NKSQGP7F2NH",
       "source": "msstore",
-      "displayName": "Microsoft Whiteboard",
+      "displayName": "WhatsApp",
       "version": "",
       "scope": "",
-      "interaction": "unknown",
+      "interaction": "silent",
       "after": [],
-      "method": "msstore"
+      "method": "msstore",
+      "verify": {
+        "perUser": true
+      }
     }
   ],
   "unresolved": [],

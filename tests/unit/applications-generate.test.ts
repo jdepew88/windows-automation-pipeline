@@ -28,11 +28,11 @@ import { commandLines, embedded, errorsOf, generateOk, noApps, profile } from '.
 const fixture = (name: string) => readFileSync(new URL(`./fixtures/${name}`, import.meta.url), 'utf8');
 const M1_XML = fixture('m1-owner-default-alex.xml');
 const ref = (packageIdentifier: string, source = 'winget', extra: Partial<PackageRef> = {}): PackageRef => ({ packageIdentifier, source, displayName: packageIdentifier, version: '', scope: '', ...extra });
-// Exactly Git + Whiteboard (no Core Essentials), as in Phase 3.
+// Exactly Git + a Store app (WhatsApp; Phase 3/4 used Whiteboard, removed from the catalog in 2026-11) (no Core Essentials), as in Phase 3.
 const withApps = (mutate?: (p: Profile) => void) =>
   profile((p) => {
     noApps(p);
-    p.applications.selection.added.push(ref('Git.Git', 'winget', { displayName: 'Git' }), ref('9MSPC6MP8FM4', 'msstore', { displayName: 'Whiteboard' }));
+    p.applications.selection.added.push(ref('Git.Git', 'winget', { displayName: 'Git' }), ref('9NKSQGP7F2NH', 'msstore', { displayName: 'WhatsApp' }));
     mutate?.(p);
   });
 const item = (extra: Partial<AdditionalItem> = {}): AdditionalItem => ({
@@ -141,7 +141,7 @@ describe('answer file with applications selected', () => {
     expect(JSON.parse(e.get('applications-config.json')!)).toEqual(applicationsConfig(withApps()));
     const native = JSON.parse(e.get('winget-packages.json')!);
     expect(validateWinGetDocument(native)).toEqual([]);
-    expect(importWinGetJson(e.get('winget-packages.json')!).packages.map((p) => p.packageIdentifier)).toEqual(['Git.Git', '9MSPC6MP8FM4']);
+    expect(importWinGetJson(e.get('winget-packages.json')!).packages.map((p) => p.packageIdentifier)).toEqual(['Git.Git', '9NKSQGP7F2NH']);
   });
 
   it('works without Windows Update automation (no waiting)', () => {
@@ -177,7 +177,7 @@ describe('engine configuration and commands', () => {
       retry: { automatic: true, continueAfterFailure: true, baseDelaySeconds: 60, maxDelaySeconds: 900, jitterRatio: 0.2, maxNetworkDeferrals: 6 },
       coordination: { policy: 'updatesFirst', windowsUpdate: { enabled: true, stateFile: 'C:\\ProgramData\\WindowsDeploymentBuilder\\Updates\\state.json' } },
     });
-    expect(c.packages.map((p) => `${p.source}:${p.packageIdentifier}`)).toEqual(['winget:Git.Git', 'msstore:9MSPC6MP8FM4']);
+    expect(c.packages.map((p) => `${p.source}:${p.packageIdentifier}`)).toEqual(['winget:Git.Git', 'msstore:9NKSQGP7F2NH']);
     expect(c.unresolved).toEqual([]);
   });
 

@@ -1,6 +1,7 @@
 /**
- * Source of src/data/apps/catalog.json (Phase 4.2, extended in Phase 10). Run:
- *   node scripts/catalog-source.mjs docs/phase-4-2-application-profiles/verification-2026-10-21.json docs/phase-10-application-manager/winget-verification-2026-10-25.json > src/data/apps/catalog.json
+ * Source of src/data/apps/catalog.json (Phase 4.2, extended in Phase 10 and in the unified-catalog
+ * expansion of 2026-11-26). Run:
+ *   node scripts/catalog-source.mjs docs/phase-4-2-application-profiles/verification-2026-10-21.json docs/phase-10-application-manager/winget-verification-2026-10-25.json docs/unified-app-catalog/winget-verification-2026-11-26.json > src/data/apps/catalog.json
  * <verified.json> is the parsed output of the read-only verification pass (winget show for every
  * winget/msstore entry, plus --architecture x64/arm64/x86 probes); see
  * docs/phase-4-2-application-profiles/catalog.md. Installer type, architectures and licence are
@@ -294,32 +295,39 @@ const phase10 = [
   ['logitech-myharmony', 'Logitech MyHarmony', 'peripherals', 'Logitech.MyHarmony', 'Configures Logitech Harmony remote controls.', { kind: 'manufacturer', hardware: { requirement: 'A Logitech Harmony remote', vendors: ['Logitech'] }, notes: 'Logitech has discontinued Harmony remotes; the service may stop working.' }],
 ];
 
-// Manual follow-ups: verified official sources, no WinGet or Store package (checked CHECKED).
+// Manual follow-ups: verified official sources, no WinGet or Store package (checked CHECKED; the
+// entries with `rechecked` were checked again on 2026-11-26 against winget-pkgs aca69c38, see
+// docs/unified-app-catalog/winget-verification-2026-11-26.json).
 const manual = [
   ['rustdesk', 'RustDesk', 'remote', 'Open-source remote support; installed manually because no package exists in WinGet or the Microsoft Store.', {
-    reason: 'No RustDesk package in the WinGet community repository (winget search, winget show RustDesk.RustDesk and the winget-pkgs manifests folder) or the Microsoft Store.',
+    reason: 'No RustDesk package in WinGet or the Microsoft Store. Rechecked 2026-11-26: no manifests/r/RustDesk folder in winget-pkgs (aca69c38); "winget search RustDesk" finds nothing in the winget and msstore sources.',
     instructions: 'Download the signed Windows installer from RustDesk\'s official GitHub releases and install it. Leave unattended access off: do not set a permanent password; the customer approves each session.',
     url: 'https://github.com/rustdesk/rustdesk/releases/latest',
+    rechecked: true,
   }],
   ['filezilla', 'FileZilla Client', 'networking', 'FTP/SFTP client.', {
-    reason: 'FileZilla is not in the WinGet community repository (TimKosse.FileZilla.Client: not found; no manifests folder) or the Microsoft Store.',
+    reason: 'FileZilla is not in the WinGet community repository (no manifests/t/TimKosse folder, rechecked 2026-11-26) or the Microsoft Store.',
     instructions: 'Download the plain installer from the "show all" download page (the default download can bundle offers) and install it.',
     url: 'https://filezilla-project.org/download.php?show_all=1',
+    rechecked: true,
   }],
   ['freefilesync', 'FreeFileSync', 'files', 'Folder comparison and mirroring, for example backups to an external drive.', {
-    reason: 'FreeFileSync is not in the WinGet community repository (FreeFileSync.FreeFileSync: not found) or the Microsoft Store.',
+    reason: 'FreeFileSync is not in the WinGet community repository (no manifests/f/FreeFileSync folder, rechecked 2026-11-26) or the Microsoft Store.',
     instructions: 'Download the installer from the official website and install it.',
     url: 'https://freefilesync.org/download.php',
+    rechecked: true,
   }],
   ['spybot', 'Spybot - Search & Destroy', 'security', 'On-demand anti-spyware scanner (free edition).', {
-    reason: 'Only Spybot Anti-Beacon is in WinGet; Search & Destroy is not in WinGet or the Microsoft Store.',
+    reason: 'Only Spybot Anti-Beacon is in WinGet; Search & Destroy is not in WinGet (rechecked 2026-11-26) or the Microsoft Store.',
     instructions: 'Download Spybot - Search & Destroy (free edition) from the official website and install it.',
     url: 'https://www.safer-networking.org/',
+    rechecked: true,
   }],
   ['launchbox', 'LaunchBox', 'gaming', 'Game library frontend.', {
-    reason: 'No verified LaunchBox package in WinGet or the Microsoft Store.',
+    reason: 'No verified LaunchBox package in WinGet (no manifests/l/LaunchBox folder, rechecked 2026-11-26) or the Microsoft Store.',
     instructions: 'Download LaunchBox from the official website (the download form asks for an e-mail address) and install it.',
     url: 'https://www.launchbox-app.com/download',
+    rechecked: true,
   }],
   ['vmware-workstation', 'VMware Workstation Pro', 'virtualization', 'Virtual machines (free for personal, commercial and educational use since version 17.5.2).', {
     reason: 'No VMware Workstation Pro package in the WinGet community repository (manifests/v/VMware has only SpringToolSuite, checked 2026-10-25). Broadcom distributes the installer only to signed-in accounts of its support portal.',
@@ -333,22 +341,156 @@ const manual = [
   }],
 ];
 
+/*
+ * Unified catalog expansion (2026-11-26): widely used Windows applications for the rebuilt profiles,
+ * each with the exact WinGet identifier found in the WinGet community repository
+ * (docs/unified-app-catalog/winget-verification-2026-11-26.json, scripts/verify-winget-ids.ts,
+ * winget-pkgs aca69c38). Every installer there has a SHA-256. Packages whose only installers are
+ * portable archives were left out (their executable is not recorded here). Remote-support tools are
+ * installed only: unattended access, passwords and accounts are never configured.
+ * [id, displayName, category, packageIdentifier, description, extra]
+ */
+const AGREEMENT_NOTE = 'The package has a licence agreement, which WinGet accepts during the unattended installation (--accept-package-agreements).';
+const LOCAL_AI = { requirement: 'A recent GPU or at least 16 GB of RAM for useful local models', vendors: [] };
+const expansion = [
+  // Documents, PDF & study
+  ['sumatrapdf', 'SumatraPDF', 'documents', 'SumatraPDF.SumatraPDF', 'Small, fast reader for PDF, e-book (EPUB, MOBI) and comic files.', {}],
+  ['onlyoffice', 'ONLYOFFICE Desktop Editors', 'documents', 'ONLYOFFICE.DesktopEditors', 'Free office suite (documents, spreadsheets, presentations) that keeps close to the Microsoft Office file formats.', {}],
+  ['pdfsam', 'PDFsam Basic', 'documents', 'PDFsam.PDFsam', 'Splits, merges, rotates and extracts pages of PDF files.', {}],
+  ['naps2', 'NAPS2', 'documents', 'Cyanfish.NAPS2', 'Scans paper documents to PDF or images, with text recognition.', {}],
+  ['zotero', 'Zotero', 'documents', 'DigitalScholar.Zotero', 'Collects, organises and cites research sources, and adds citations to Word and LibreOffice documents.', {}],
+  ['anki', 'Anki', 'documents', 'Anki.Anki', 'Flashcards with spaced repetition for studying.', {}],
+  ['evernote', 'Evernote', 'documents', 'Evernote.Evernote', 'Notes, web clippings and to-do lists synchronised across devices. Needs an Evernote account.', { accountSignIn: true }],
+  // Communication
+  ['signal', 'Signal', 'communication', 'OpenWhisperSystems.Signal', 'Private messaging and calls. Linking it to a phone is left to the user.', { accountSignIn: true }],
+  ['viber', 'Viber', 'communication', 'Rakuten.Viber', 'Messaging and calls. Linking it to a phone is left to the user.', { accountSignIn: true }],
+  ['webex', 'Webex', 'communication', 'Cisco.Webex', 'Cisco Webex meetings, calling and messaging. Nothing is signed in.', { accountSignIn: true }],
+  // Security, passwords & VPN
+  ['keepassxc', 'KeePassXC', 'security', 'KeePassXCTeam.KeePassXC', 'Offline password manager: the password database is a local file. No database is created.', {}],
+  ['1password', '1Password', 'security', 'AgileBits.1Password', 'Password manager (subscription). Installed only: no account or vault is set up.', { accountSignIn: true }],
+  ['proton-pass', 'Proton Pass', 'security', 'Proton.ProtonPass', 'Password manager by Proton, with a free plan. Installed only: nothing is signed in.', { accountSignIn: true }],
+  ['proton-vpn', 'Proton VPN', 'security', 'Proton.ProtonVPN', 'VPN client with a free plan. Installed only: nothing is signed in and nothing connects.', { accountSignIn: true, reboot: 'mayRequire' }],
+  ['mullvad-vpn', 'Mullvad VPN', 'security', 'MullvadVPN.MullvadVPN', 'Paid VPN client. Installed only: no account number is entered and nothing connects.', { accountSignIn: true }],
+  ['cryptomator', 'Cryptomator', 'security', 'Cryptomator.Cryptomator', 'Encrypts files before they reach a cloud drive. No vault is created.', {}],
+  ['veracrypt', 'VeraCrypt', 'security', 'IDRIX.VeraCrypt', 'Disk and container encryption. Nothing is encrypted by the deployment.', {
+    kind: 'driver',
+    reboot: 'mayRequire',
+    notes: AGREEMENT_NOTE,
+    selectionWarning: 'Encrypting the Windows drive with VeraCrypt blocks Windows feature updates until it is decrypted; BitLocker is usually the better choice on Windows 11 Pro.',
+  }],
+  ['yubico-authenticator', 'Yubico Authenticator', 'security', 'Yubico.Authenticator', 'Shows the one-time codes stored on a YubiKey.', { hardware: { requirement: 'A YubiKey security key', vendors: ['Yubico'] } }],
+  // Remote access & support (installed only: nothing is configured for unattended access)
+  ['anydesk', 'AnyDesk', 'remote', 'AnyDesk.AnyDesk', 'Remote support and remote access. Installed only: unattended access stays off and no password is set; the user accepts each session.', { removal: 'caution', notes: 'Free for personal use only; commercial use needs a licence.' }],
+  ['chrome-remote-desktop', 'Chrome Remote Desktop Host', 'remote', 'Google.ChromeRemoteDesktopHost', 'Google\'s remote-access host. Installed only: remote access is not turned on and no PIN is set (that needs a Google account).', { kind: 'service', accountSignIn: true }],
+  ['moonlight', 'Moonlight', 'remote', 'MoonlightGameStreamingProject.Moonlight', 'Streams games from a PC running Sunshine to this computer.', {}],
+  ['sunshine', 'Sunshine', 'remote', 'LizardByte.Sunshine', 'Self-hosted game-streaming host for Moonlight clients.', { kind: 'service', notes: 'Installs a streaming service; its web page asks for a new username and password at first start. Nothing is paired or exposed by the deployment.' }],
+  ['mremoteng', 'mRemoteNG', 'remote', 'mRemoteNG.mRemoteNG', 'Tabbed connection manager for RDP, SSH, VNC and Telnet sessions.', {}],
+  ['mobaxterm', 'MobaXterm Home', 'remote', 'Mobatek.MobaXterm', 'Terminal with SSH, an X11 server, an SFTP browser and network tools (free Home edition).', {}],
+  // Music
+  ['aimp', 'AIMP', 'music', 'AIMP.AIMP', 'Lightweight audio player with a good equaliser and playlist handling.', {}],
+  ['musicbrainz-picard', 'MusicBrainz Picard', 'music', 'MusicBrainz.Picard', 'Identifies music files by their audio fingerprint and fills in tags and cover art.', {}],
+  ['tidal', 'TIDAL', 'music', 'TIDALMusicAS.TIDAL', 'High-fidelity music streaming. Needs a TIDAL subscription.', { accountSignIn: true }],
+  ['amazon-music', 'Amazon Music', 'music', 'Amazon.Music', 'Amazon Music streaming. Needs an Amazon account.', { accountSignIn: true }],
+  ['deezer', 'Deezer', 'music', 'Deezer.Deezer', 'Music streaming. Needs a Deezer account.', { accountSignIn: true }],
+  ['exact-audio-copy', 'Exact Audio Copy', 'music', 'AndreWiethoff.ExactAudioCopy', 'Accurate audio CD ripping with error detection.', { interaction: 'mayPrompt' }],
+  // Audio & video production
+  ['voicemeeter', 'Voicemeeter', 'creative', 'VB-Audio.Voicemeeter', 'Virtual audio mixer for routing microphones and application audio (streaming, calls).', {
+    kind: 'driver',
+    removal: 'caution',
+    reboot: 'mayRequire',
+    selectionWarning: 'Installs virtual audio devices; they work after the next restart.',
+  }],
+  ['reaper', 'REAPER', 'creative', 'Cockos.REAPER', 'Digital audio workstation for recording and mixing (60-day evaluation, then an inexpensive licence).', {}],
+  ['musescore', 'MuseScore Studio', 'creative', 'Musescore.Musescore', 'Music notation: write, play back and print sheet music.', {}],
+  ['shotcut', 'Shotcut', 'creative', 'Meltytech.Shotcut', 'Free, open-source video editor.', {}],
+  ['kdenlive', 'Kdenlive', 'creative', 'KDE.Kdenlive', 'Open-source video editor with a multi-track timeline and effects.', {}],
+  ['blender', 'Blender', 'creative', 'BlenderFoundation.Blender', '3D modelling, animation, rendering and video editing.', { hardware: { requirement: 'A dedicated graphics card is recommended', vendors: [] } }],
+  ['freecad', 'FreeCAD', 'creative', 'FreeCAD.FreeCAD', 'Parametric 3D CAD modeller for engineering and 3D printing.', {}],
+  // Photos & imaging
+  ['krita', 'Krita', 'media', 'KDE.Krita', 'Digital painting and illustration.', {}],
+  ['inkscape', 'Inkscape', 'media', 'Inkscape.Inkscape', 'Vector graphics editor (SVG) for logos, illustrations and diagrams.', {}],
+  ['paint-net', 'Paint.NET', 'media', 'dotPDN.PaintDotNet', 'Easy image and photo editor with layers and effects.', {}],
+  ['darktable', 'darktable', 'media', 'darktable.darktable', 'RAW photo developer and photo workflow.', {}],
+  ['digikam', 'digiKam', 'media', 'KDE.digiKam', 'Photo management for large collections: albums, tags, faces and metadata.', {}],
+  ['figma', 'Figma', 'media', 'Figma.Figma', 'Interface and graphic design (desktop app). Needs a Figma account.', { accountSignIn: true }],
+  ['sharex', 'ShareX', 'media', 'ShareX.ShareX', 'Screenshots, screen recordings and annotations with many capture options.', {}],
+  ['greenshot', 'Greenshot', 'media', 'Greenshot.Greenshot', 'Lightweight screenshot tool with quick annotations.', {}],
+  ['screentogif', 'ScreenToGif', 'media', 'NickeManarin.ScreenToGif', 'Records the screen, webcam or a sketch board to an animated GIF or video.', {}],
+  // Media players & video
+  ['mpc-hc', 'MPC-HC', 'video', 'clsid2.mpc-hc', 'Lightweight, classic media player (the maintained clsid2 builds).', {}],
+  ['potplayer', 'PotPlayer', 'video', 'Daum.PotPlayer', 'Feature-rich media player.', {}],
+  ['plex', 'Plex', 'video', 'Plex.Plex', 'Plex app for media from a Plex Media Server and free streaming channels. Needs a Plex account.', { accountSignIn: true }],
+  ['jellyfin-media-player', 'Jellyfin Media Player', 'video', 'Jellyfin.JellyfinMediaPlayer', 'Desktop client for a Jellyfin media server.', {}],
+  ['mkvtoolnix', 'MKVToolNix', 'video', 'MoritzBunkus.MKVToolNix', 'Creates, edits and inspects Matroska (MKV) files.', {}],
+  ['mediainfo', 'MediaInfo', 'video', 'MediaArea.MediaInfo.GUI', 'Shows the codec, bitrate and other technical details of video and audio files.', {}],
+  // Gaming
+  ['heroic', 'Heroic Games Launcher', 'gaming', 'HeroicGamesLauncher.HeroicGamesLauncher', 'Open-source launcher for Epic Games, GOG and Amazon game libraries. No account is signed in.', { accountSignIn: true, kind: 'launcher' }],
+  ['amazon-games', 'Amazon Games', 'gaming', 'Amazon.Games', 'Amazon Games launcher (Prime Gaming). No account is signed in.', { accountSignIn: true, kind: 'launcher' }],
+  ['itch', 'itch', 'gaming', 'ItchIo.Itch', 'itch.io launcher for independent games. No account is signed in.', { accountSignIn: true, kind: 'launcher' }],
+  ['msi-afterburner', 'MSI Afterburner', 'gaming', 'Guru3D.Afterburner', 'Graphics card monitoring, fan control and overclocking (works with most brands).', { selectionWarning: 'Overclocking can make a computer unstable. Nothing is changed by the deployment.' }],
+  ['prism-launcher', 'Prism Launcher', 'gaming', 'PrismLauncher.PrismLauncher', 'Open-source Minecraft launcher for several instances and mod packs. Needs a Microsoft account that owns Minecraft.', { accountSignIn: true, kind: 'launcher' }],
+  ['minecraft-launcher', 'Minecraft Launcher', 'gaming', 'Mojang.MinecraftLauncher', 'Mojang\'s official Minecraft launcher. Needs a Microsoft account that owns Minecraft.', { accountSignIn: true, kind: 'launcher' }],
+  ['geforce-now', 'GeForce NOW', 'gaming', 'Nvidia.GeForceNow', 'NVIDIA\'s cloud gaming app: plays games you own on Steam, Epic and other stores from NVIDIA\'s servers. Needs an NVIDIA account.', { accountSignIn: true, kind: 'launcher' }],
+  // Files, archives & backup
+  ['peazip', 'PeaZip', 'files', 'Giorgiotani.Peazip', 'Open-source archive manager for ZIP, 7z, RAR and many other formats.', {}],
+  ['winrar', 'WinRAR', 'files', 'RARLab.WinRAR', 'Archive manager for RAR and ZIP.', { notes: 'Shareware: after the 40-day trial it keeps working but asks for a licence.' }],
+  ['total-commander', 'Total Commander', 'files', 'Ghisler.TotalCommander', 'Two-pane file manager.', { notes: 'Shareware: shows a reminder until it is registered.' }],
+  ['files-app', 'Files', 'files', 'FilesCommunity.Files', 'Modern open-source file manager with tabs and panes.', {}],
+  ['duplicati', 'Duplicati', 'files', 'Duplicati.Duplicati', 'Encrypted, scheduled backups to external drives or cloud storage. No backup job is created.', { kind: 'service' }],
+  ['kopia', 'KopiaUI', 'files', 'Kopia.KopiaUI', 'Fast, encrypted snapshot backups (Kopia with its desktop interface). No repository is created.', {}],
+  ['aomei-backupper', 'AOMEI Backupper Standard', 'files', 'AOMEI.Backupper.Standard', 'Disk, partition and file backup and cloning (free Standard edition).', { interaction: 'mayPrompt', reboot: 'mayRequire', notes: 'The free edition shows offers for the paid editions.' }],
+  ['treesize-free', 'TreeSize Free', 'storage', 'JAMSoftware.TreeSize.Free', 'Shows which folders use the most disk space.', {}],
+  // System maintenance & diagnostics
+  ['cpu-z', 'CPU-Z', 'utilities', 'CPUID.CPU-Z', 'Processor, memory and motherboard details.', {}],
+  ['gpu-z', 'GPU-Z', 'utilities', 'TechPowerUp.GPU-Z', 'Graphics card details and sensors.', {}],
+  ['bleachbit', 'BleachBit', 'utilities', 'BleachBit.BleachBit', 'Frees disk space by deleting caches and temporary files.', { selectionWarning: 'Choose what to clean carefully: some options delete browser sessions, saved passwords or logs. Nothing is cleaned by the deployment.' }],
+  ['speccy', 'Speccy', 'utilities', 'Piriform.Speccy', 'System information summary: hardware, temperatures and Windows details.', { interaction: 'mayPrompt', notes: 'The installer may offer other Piriform software.' }],
+  ['bluescreenview', 'BlueScreenView', 'utilities', 'NirSoft.BlueScreenView', 'Reads crash dump files to show which driver caused a blue screen.', {}],
+  ['ddu', 'Display Driver Uninstaller', 'utilities', 'Wagnardsoft.DisplayDriverUninstaller', 'Removes a graphics driver completely before a clean reinstall.', { selectionWarning: 'Meant to be run in Safe Mode when a graphics driver is broken; it removes the display driver. Nothing is run by the deployment.' }],
+  ['bulk-crap-uninstaller', 'Bulk Crap Uninstaller', 'utilities', 'Klocman.BulkCrapUninstaller', 'Removes many programs at once, including their leftovers (open source).', {}],
+  // Network tools
+  ['advanced-ip-scanner', 'Advanced IP Scanner', 'networking', 'Famatech.AdvancedIPScanner', 'Finds the devices on a local network and their shared folders and services.', {}],
+  ['angry-ip-scanner', 'Angry IP Scanner', 'networking', 'angryziber.AngryIPScanner', 'Fast open-source network and port scanner.', {}],
+  ['openvpn-connect', 'OpenVPN Connect', 'networking', 'OpenVPNTechnologies.OpenVPNConnect', 'OpenVPN client for a company or home VPN. No connection profile is imported.', { removal: 'caution' }],
+  ['speedtest', 'Speedtest by Ookla', 'networking', 'Ookla.Speedtest.Desktop', 'Measures internet download and upload speed and latency.', {}],
+  // Development
+  ['visual-studio-community', 'Visual Studio Community', 'development', 'Microsoft.VisualStudio.Community', 'Microsoft\'s free IDE for C#, C++ and .NET (current version). Workloads are chosen later in the Visual Studio Installer.', { kind: 'sdk', reboot: 'mayRequire', notes: 'Free for individuals, education, open source and small teams; larger organisations need Professional or Enterprise.' }],
+  ['go', 'Go', 'development', 'GoLang.Go', 'The Go programming language.', { kind: 'sdk' }],
+  ['rustup', 'Rustup (Rust)', 'development', 'Rustlang.Rustup', 'Installer and version manager for the Rust toolchain.', { kind: 'sdk', notes: 'Building Rust programs on Windows also needs the Visual Studio C++ build tools.' }],
+  ['jetbrains-toolbox', 'JetBrains Toolbox', 'development', 'JetBrains.Toolbox', 'Installs and updates JetBrains IDEs (IntelliJ IDEA, PyCharm and others).', { kind: 'launcher' }],
+  ['dbeaver', 'DBeaver Community', 'development', 'DBeaver.DBeaver.Community', 'Database client for PostgreSQL, MySQL, SQLite, SQL Server and many others.', {}],
+  ['windsurf', 'Windsurf', 'development', 'Codeium.Windsurf', 'AI code editor. Its AI features need an account.', { accountSignIn: true }],
+  ['zed', 'Zed', 'development', 'ZedIndustries.Zed', 'Fast, collaborative code editor.', {}],
+  ['nvm-windows', 'NVM for Windows', 'development', 'CoreyButler.NVMforWindows', 'Installs and switches between several Node.js versions.', { notes: 'Use it instead of the Node.js LTS package, not together with it: NVM manages Node.js itself.' }],
+  ['neovim', 'Neovim', 'development', 'Neovim.Neovim', 'Extensible terminal text editor based on Vim.', {}],
+  ['postman', 'Postman', 'development', 'Postman.Postman', 'API client for testing HTTP APIs. Nothing is signed in.', { accountSignIn: true }],
+  ['miniconda', 'Miniconda', 'development', 'Anaconda.Miniconda3', 'Minimal conda installer for Python data-science environments.', { kind: 'sdk', notes: 'Free for individuals and small organisations; check the Anaconda terms for larger commercial use.' }],
+  ['android-studio', 'Android Studio', 'development', 'Google.AndroidStudio', 'Google\'s IDE for Android apps. The Android SDK is downloaded at first start.', { kind: 'sdk', notes: AGREEMENT_NOTE }],
+  ['podman-desktop', 'Podman Desktop', 'virtualization', 'RedHat.Podman-Desktop', 'Graphical tool for containers and Kubernetes with Podman (an alternative to Docker Desktop).', { notes: 'Runs its container machine in WSL 2.' }],
+  // AI
+  ['gpt4all', 'GPT4All', 'ai', 'nomic.gpt4all', 'Runs large language models locally with a chat interface. Models are downloaded separately.', { notes: AGREEMENT_NOTE, hardware: LOCAL_AI }],
+  // Cloud & device integration
+  ['proton-drive', 'Proton Drive', 'cloud', 'Proton.ProtonDrive', 'Encrypted cloud storage by Proton. Nothing is signed in or synchronised.', { accountSignIn: true }],
+  ['mega', 'MEGA Desktop App', 'cloud', 'Mega.MEGASync', 'MEGA cloud storage sync client. Nothing is signed in or synchronised.', { accountSignIn: true }],
+  ['nextcloud', 'Nextcloud Desktop', 'cloud', 'Nextcloud.NextcloudDesktop', 'Sync client for a Nextcloud server. No server is configured.', { accountSignIn: true }],
+  ['pcloud', 'pCloud Drive', 'cloud', 'pCloudAG.pCloudDrive', 'pCloud cloud storage as a drive in File Explorer. Nothing is signed in.', { accountSignIn: true, reboot: 'mayRequire' }],
+  ['box-drive', 'Box Drive', 'cloud', 'Box.Box', 'Box cloud storage in File Explorer (common in businesses). Nothing is signed in.', { accountSignIn: true }],
+  ['kde-connect', 'KDE Connect', 'cloud', 'KDE.KDEConnect', 'Links an Android phone to the PC over Wi-Fi: notifications, file sharing, clipboard and remote input.', {}],
+  ['localsend', 'LocalSend', 'cloud', 'LocalSend.LocalSend', 'Sends files between phones and computers on the same network, without an account or the internet.', {}],
+];
+
 const excluded = [
   ['Brave', 'Brave.Brave', 'Owner decision: Chrome is the universal browser; Firefox and Edge stay optional.'],
   ['Vivaldi', undefined, 'Owner decision: not offered.'],
   ['Pidgin', undefined, 'Owner decision: not offered.'],
   ['Dropbox', undefined, 'Owner decision: Google Drive and OneDrive are offered instead.'],
   ['SugarSync', undefined, 'Owner decision: not offered.'],
-  ['Foxit Reader', undefined, 'Owner decision: Adobe Acrobat Reader is offered.'],
+  ['Foxit Reader', undefined, 'Owner decision: SumatraPDF and Adobe Acrobat Reader are offered.'],
   ['PDF24 Creator', undefined, 'Owner decision: not offered.'],
   ['CutePDF', undefined, 'Owner decision: not offered.'],
   ['Ghostscript', undefined, 'Owner decision: not offered.'],
-  ['SumatraPDF', 'SumatraPDF.SumatraPDF', 'Owner decision: not offered.'],
-  ['Paint.NET', undefined, 'Owner decision: not offered.'],
-  ['Krita', 'KDE.Krita', 'Owner decision: not offered.'],
+  // 2026-11-26: SumatraPDF, Paint.NET, Krita, Greenshot and ShareX were moved into the catalog (owner decision).
   ['IrfanView', 'IrfanSkiljan.IrfanView', 'Owner decision: XnView MP is offered.'],
-  ['Greenshot', 'Greenshot.Greenshot', 'Owner decision: not offered.'],
-  ['ShareX', undefined, 'Owner decision: not offered.'],
   ['WinDirStat', undefined, 'WizTree is preferred.'],
   ['Apple TV', undefined, 'Owner decision: not offered.'],
   // Phase 10: in the owner's inventory (verified WinGet identifiers) but not applications to offer.
@@ -387,9 +529,15 @@ function removalOf(id, category, kind, x) {
   return 'normal';
 }
 
+// Unified catalog expansion: the read-only check of 2026-11-26 (a third verification file).
+const EXPANSION_CHECKED = '2026-11-26';
+const expansionRepo = JSON.parse(readFileSync(process.argv[4], 'utf8'));
+const inExpansion = new Map(expansionRepo.results.filter((r) => r.found).map((r) => [r.id.toLowerCase(), r]));
+const expansionMethod = (r) => `winget-pkgs ${expansionRepo.commit.slice(0, 8)} (${expansionRepo.commitDate.slice(0, 10)}): ${r.path} ${r.latestVersion}, publisher ${r.publisher || 'not stated'}`.slice(0, 400);
+
 /** Fields shared by every entry (Phase 10 metadata); the repository record gives publisher, detection names and upgrade behaviour. */
-function common(id, category, source, packageIdentifier, x, fallbackPublisher = '') {
-  const r = packageIdentifier ? inRepo.get(packageIdentifier.toLowerCase()) : undefined;
+function common(id, category, source, packageIdentifier, x, fallbackPublisher = '', record = undefined) {
+  const r = record ?? (packageIdentifier ? inRepo.get(packageIdentifier.toLowerCase()) : undefined);
   const kind = x.kind ?? (LAUNCHERS.has(id) ? 'launcher' : KIND_BY_CATEGORY[category] ?? 'application');
   for (const a of x.alternateIds ?? []) if (!inRepo.has(a.toLowerCase())) throw new Error(`${id}: alternate identifier ${a} was not verified`);
   const names = (r?.appsAndFeaturesNames ?? []).map((n) => n.slice(0, 100)).slice(0, 10);
@@ -440,33 +588,39 @@ for (const [id, displayName, category, source, packageIdentifier, description, x
   };
   out.push(e);
 }
-for (const [id, displayName, category, packageIdentifier, description, x] of phase10) {
-  const r = inRepo.get(packageIdentifier.toLowerCase());
-  if (!r) throw new Error(`${id}: ${packageIdentifier} was not verified in the WinGet repository`);
-  if (r.canonicalId !== packageIdentifier) throw new Error(`${id}: ${packageIdentifier} differs from the repository's ${r.canonicalId}`);
-  const scopes = r.scopes ?? [];
-  out.push({
-    id,
-    displayName,
-    packageIdentifier,
-    source: 'winget',
-    category,
-    description,
-    ...(r.packageUrl?.startsWith('https://') ? { website: r.packageUrl } : {}),
-    architectures: (r.architectures ?? []).map((a) => ARCH[a]).filter(Boolean),
-    scope: scopes.length === 1 ? scopes[0] : scopes.length > 1 ? 'either' : 'unknown',
-    installerType: (r.installerTypes ?? [])[0] ?? 'unknown',
-    license: (r.license || 'Not stated').slice(0, 120),
-    requires: x.requires ?? [],
-    interaction: x.interaction ?? 'unknown',
-    accountSignIn: !!x.accountSignIn,
-    reboot: x.reboot ?? 'unknown',
-    ...(x.notes ? { notes: x.notes } : {}),
-    ...(x.selectionWarning ? { selectionWarning: x.selectionWarning } : {}),
-    ...common(id, category, 'winget', packageIdentifier, x),
-    validation: { status: 'verified', checkedAt: P10_CHECKED, method: repoMethod(r) },
-  });
+/** A WinGet entry built from a repository verification record (Phase 10 and the 2026-11-26 expansion). */
+function fromRepository(list, records, checkedAt, method) {
+  for (const [id, displayName, category, packageIdentifier, description, x] of list) {
+    const r = records.get(packageIdentifier.toLowerCase());
+    if (!r) throw new Error(`${id}: ${packageIdentifier} was not verified in the WinGet repository`);
+    if (r.canonicalId !== packageIdentifier) throw new Error(`${id}: ${packageIdentifier} differs from the repository's ${r.canonicalId}`);
+    if (!r.allHashed) throw new Error(`${id}: not every installer of ${packageIdentifier} has a SHA-256`);
+    const scopes = r.scopes ?? [];
+    out.push({
+      id,
+      displayName,
+      packageIdentifier,
+      source: 'winget',
+      category,
+      description,
+      ...(r.packageUrl?.startsWith('https://') ? { website: r.packageUrl } : {}),
+      architectures: (r.architectures ?? []).map((a) => ARCH[a]).filter(Boolean),
+      scope: scopes.length === 1 ? scopes[0] : scopes.length > 1 ? 'either' : 'unknown',
+      installerType: (r.installerTypes ?? [])[0] ?? 'unknown',
+      license: (r.license || 'Not stated').slice(0, 120),
+      requires: x.requires ?? [],
+      interaction: x.interaction ?? 'unknown',
+      accountSignIn: !!x.accountSignIn,
+      reboot: x.reboot ?? 'unknown',
+      ...(x.notes ? { notes: x.notes } : {}),
+      ...(x.selectionWarning ? { selectionWarning: x.selectionWarning } : {}),
+      ...common(id, category, 'winget', packageIdentifier, x, '', r),
+      validation: { status: 'verified', checkedAt, method: method(r) },
+    });
+  }
 }
+fromRepository(phase10, inRepo, P10_CHECKED, repoMethod);
+fromRepository(expansion, inExpansion, EXPANSION_CHECKED, expansionMethod);
 for (const [id, displayName, category, description, m] of manual) {
   out.push({
     id,
@@ -486,15 +640,15 @@ for (const [id, displayName, category, description, m] of manual) {
     reboot: 'unknown',
     manual: { reason: m.reason, instructions: m.instructions, url: m.url },
     ...common(id, category, 'none', null, m),
-    validation: { status: 'manual', checkedAt: id === 'vmware-workstation' ? P10_CHECKED : CHECKED, method: m.reason },
+    validation: { status: 'manual', checkedAt: m.rechecked ? EXPANSION_CHECKED : id === 'vmware-workstation' ? P10_CHECKED : CHECKED, method: m.reason },
   });
 }
 process.stdout.write(
   JSON.stringify(
     {
-      $comment: `Generated by scripts/catalog-source.mjs from the read-only verifications of ${CHECKED} (docs/phase-4-2-application-profiles/catalog.md) and ${P10_CHECKED} (docs/phase-10-application-manager/catalog.md). Listing an app here neither selects nor installs it.`,
+      $comment: `Generated by scripts/catalog-source.mjs from the read-only verifications of ${CHECKED} (docs/phase-4-2-application-profiles/catalog.md), ${P10_CHECKED} (docs/phase-10-application-manager/catalog.md) and ${EXPANSION_CHECKED} (docs/unified-app-catalog/catalog.md). Listing an app here neither selects nor installs it.`,
       catalogVersion: 2,
-      updated: P10_CHECKED,
+      updated: EXPANSION_CHECKED,
       entries: out,
       excluded: excluded.map(([name, packageIdentifier, reason]) => ({ name, ...(packageIdentifier ? { packageIdentifier } : {}), reason })),
     },

@@ -40,6 +40,14 @@
                                  backups are never included (every entry is checked afterwards)
       -Action Verify             Phase 9: verifies the deployment against Windows itself
                                  (DeploymentHealth.ps1, read-only) and writes the health reports
+      -Action ReverifyApplications
+                                 READ-ONLY: checks every selected application again for its
+                                 installation evidence (ApplicationEngine.ps1 -Mode Verify, a
+                                 separate process); installs nothing. Exit 0 all verified, 10 some
+                                 pending (sign-in, restart, user profile), 20 some failed, 1 not possible
+      -Action CheckAppUpdates    READ-ONLY: the health audit with a WinGet listing of available updates
+                                 for the selected applications (DeploymentHealth.ps1 -CheckAppUpdates;
+                                 run it as the deployment user: WinGet cannot list them as SYSTEM)
       -Action RetryWindowsUpdate [-UpdateMode Status|Scan|RetryUpdates|RetryDrivers|RetryAll|ExportDiagnostics|HealthAudit]
                                  Retry Windows Update with the corrected engine 2.0.0
                                  (scripts\windows-update\Invoke-WindowsUpdateRetry.ps1): a separate
@@ -63,7 +71,7 @@
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('Menu', 'Status', 'PendingActions', 'RetryFailed', 'Retry', 'Resume', 'RestoreSettings', 'AddDrivers', 'ExportDiagnostics', 'Verify', 'Activate', 'CheckActivation', 'RetryWindowsUpdate')]
+    [ValidateSet('Menu', 'Status', 'PendingActions', 'RetryFailed', 'Retry', 'Resume', 'RestoreSettings', 'AddDrivers', 'ExportDiagnostics', 'Verify', 'Activate', 'CheckActivation', 'RetryWindowsUpdate', 'ReverifyApplications', 'CheckAppUpdates')]
     [string] $Action = 'Menu',
     [ValidateSet('Status', 'Scan', 'RetryUpdates', 'RetryDrivers', 'RetryAll', 'ExportDiagnostics', 'HealthAudit')]
     [string] $UpdateMode = 'Status',
@@ -677,6 +685,41 @@ function Invoke-WdrAction {
             $text = $(if ($Json) { [pscustomobject]@{ Outcome = $r.Outcome; Message = $r.Message } | ConvertTo-Json -Depth 4 } else { "$($Action): $($r.Outcome). $($r.Message)" })
             return @{ Text = $text; Exit = [int] $script:RecoveryExit[$r.Outcome] }
         }
+        'ReverifyApplications' {
+            # Read-only: the application engine re-checks its evidence in its own process (it installs nothing in this mode).
+            $engine = Join-Path $Paths.Package 'scripts\applications\ApplicationEngine.ps1'
+            $config = Join-Path $Paths.Package 'scripts\applications\applications-config.json'
+            if (-not (Test-Path -LiteralPath $engine) -or -not (Test-Path -LiteralPath $config)) { return @{ Text = 'Application verification is not part of this deployment package (no application stage).'; Exit = 1 } }
+            $out = Invoke-WdrAppVerifyTool $engine $config
+            $what = switch ($out.Exit) {
+                0 { 'Every selected application was verified (evidence found on this computer).' }
+                10 { 'Some applications are still pending: their evidence appears after a sign-in or a restart, or lies in a user profile that is not available now. Nothing was installed.' }
+                20 { 'Some applications failed verification: the installer reported success, but no evidence was found. Nothing was installed; see the list above, then "Retry one application" if needed.' }
+                default { "The application engine could not re-verify (exit code $($out.Exit)); it may predate engine 1.6.0. Use 9 (Health audit) instead." }
+            }
+            $text = (@($out.Text) + @('', "Reverify applications (read-only): $what")) -join "`r`n"
+            return @{ Text = $text; Exit = $(if ($out.Exit -in 0, 10, 20) { [int] $out.Exit } else { 1 }) }
+        }
+        'CheckAppUpdates' {
+            # Read-only: the health audit with a WinGet update listing (never an installation).
+            $cfg = Read-WddJson (Join-Path $Paths.Package 'scripts\health\health-config.json')
+            if (-not (Get-Command Invoke-WdhVerify -ErrorAction SilentlyContinue) -or -not $cfg) { return @{ Text = 'The health audit is not part of this deployment package; use the Application Manager to list updates.'; Exit = 1 } }
+            $v = Invoke-WdhVerify $Manifest $Paths $cfg 'Recovery' -CheckAppUpdates
+            $u = $v.Report['appUpdates']
+            if ($Json) { return @{ Text = ($u | ConvertTo-Json -Depth 6); Exit = 0 } }
+            $lines = @('Application updates (read-only; nothing is installed)')
+            if (-not $u) { $lines += '  Not available in this version of the health audit.' }
+            elseif ($u['status'] -ne 'ok') { $lines += "  Not checked ($($u['status'])): $($u['note'])" }
+            else {
+                foreach ($x in @($u['items'])) { if ($x) { $lines += "  $($x['name']) ($($x['id'])): $($x['installed']) -> $($x['available'])" } }
+                if (-not @($u['items']).Count) { $lines += '  No update is listed for the selected applications.' }
+                if ($u['otherAvailable']) { $lines += "  $($u['otherAvailable']) other package(s) on this computer also have updates." }
+                if ($u['note']) { $lines += "  $($u['note'])" }
+                $lines += '  Install updates with the Application Manager (Updates), which shows every command first.'
+            }
+            $lines += "Report: $(Join-Path $v.Directory 'technician-report.html')"
+            return @{ Text = ($lines -join "`r`n"); Exit = $(if ($u -and $u['status'] -eq 'ok') { 0 } else { 1 }) }
+        }
         'Verify' {
             $cfg = Read-WddJson (Join-Path $Paths.Package 'scripts\health\health-config.json')
             if (-not (Get-Command Invoke-WdhVerify -ErrorAction SilentlyContinue) -or -not $cfg) { return @{ Text = 'Verification is not part of this deployment package.'; Exit = 1 } }
@@ -732,6 +775,25 @@ function Invoke-WdrUpdateRetryTool {
     @{ Text = $text; Exit = $code }
 }
 
+<#
+    Runs ApplicationEngine.ps1 -Mode Verify in its own process (replaceable in tests). Verify mode is
+    read-only: it re-checks every package's installation evidence and rewrites only its result, never
+    installs. Returns @{ Text; Exit } (0 all verified, 10 pending, 20 failed, other: not possible).
+#>
+function Invoke-WdrAppVerifyTool {
+    param([string] $Engine, [string] $Config)
+    $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $argList = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $Engine, '-Mode', 'Verify', '-ConfigPath', $Config)
+    # Windows PowerShell 5.1 turns a native stderr line into a terminating error under 'Stop'.
+    $eap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $text = @(& $ps @argList 2>&1 | ForEach-Object { [string] $_ })
+        $code = $LASTEXITCODE
+    } finally { $ErrorActionPreference = $eap }
+    @{ Text = $text; Exit = $code }
+}
+
 function Show-WdrMenu {
     param([hashtable] $Manifest, [hashtable] $Paths)
     while ($true) {
@@ -739,12 +801,16 @@ function Show-WdrMenu {
         Write-Output (Format-WdrStatus (Get-WdrStatus $Manifest $Paths))
         Write-Output ''
         Write-Output 'Windows Deployment Recovery'
-        Write-Output '  1  Refresh status            4  Retry one application'
-        Write-Output '  2  Retry failed operations   5  Resume interrupted provisioning'
-        Write-Output '  3  View pending actions      6  Export diagnostic report'
+        Write-Output ' Read-only (installs and changes nothing):'
+        Write-Output '  1  Refresh status            3  View pending actions      6  Export diagnostic report'
+        Write-Output '  9  Health audit: verify the computer now (writes only its report)'
+        Write-Output '  V  Reverify applications: check every selected application again for its evidence'
+        Write-Output '  C  Check for application updates (WinGet list; installs nothing)'
+        Write-Output ' Installs or changes this computer:'
+        Write-Output '  2  Retry failed operations   4  Retry one application     5  Resume interrupted provisioning'
         Write-Output '  7  Restore application settings from a backup folder'
         Write-Output '  8  Add driver packages from a folder (for example a network driver)'
-        Write-Output '  9  Health audit: verify the computer now (read-only; writes only its report)'
+        Write-Output ' Submenus:'
         Write-Output '  U  Windows Update: status, check, retry updates or drivers, diagnostics'
         if ($Manifest.ContainsKey('activation') -and $Manifest.activation) { Write-Output '  A  Activation: check the licensing state, or activate Windows or Office' }
         Write-Output '  0  Exit'
@@ -763,6 +829,8 @@ function Show-WdrMenu {
             '7' { Invoke-WdrAction $Manifest $Paths 'RestoreSettings' -BackupPath (Read-Host 'Backup folder or .zip (for example E:\WindowsDeployment\backups\WDB-AppBackup-...)') }
             '8' { Invoke-WdrAction $Manifest $Paths 'AddDrivers' -DriverPath (Read-Host 'Folder with INF driver packages (for example E:\Drivers\Network)') }
             '9' { Invoke-WdrAction $Manifest $Paths 'Verify' }
+            { $_ -ieq 'V' } { Invoke-WdrAction $Manifest $Paths 'ReverifyApplications' }
+            { $_ -ieq 'C' } { Invoke-WdrAction $Manifest $Paths 'CheckAppUpdates' }
             { $_ -ieq 'U' } {
                 Write-Output '  Read-only:  S Status, recovery history and hardware problems   C Check for updates (search only)'
                 Write-Output '              H Health audit   E Export diagnostics'
@@ -777,7 +845,7 @@ function Show-WdrMenu {
                 else { Invoke-WdrAction $Manifest $Paths 'CheckActivation' }
             }
             '0' { return }
-            default { @{ Text = 'Choose 0-9.'; Exit = 0 } }
+            default { @{ Text = 'Choose 0-9, V, C or U.'; Exit = 0 } }
         }
         if ($r) { Write-Output ''; Write-Output $r.Text }
     }

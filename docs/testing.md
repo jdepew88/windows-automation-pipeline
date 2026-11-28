@@ -123,6 +123,11 @@ Unit test coverage by acceptance criterion:
 - **Office LTSC and activation (schema 9)**: `office.test.ts`, `Office.Tests.ps1` (in `npm run test:ps`),
   `office.spec.ts` and the Office installer in `Acl.Tests.ps1`; see
   [office-ltsc-and-activation.md](office-ltsc-and-activation.md).
+- **Unified catalog and profile revisions (schema 10)**: `unified-catalog.test.ts` (one catalog for both
+  tools, discoverability, revision 2 profiles, additive selection, exact ZIP, migration of older
+  deployments and saved profiles) and `unified-catalog.spec.ts`; the revision 1 definitions stay pinned
+  by `app-profiles.test.ts` and `catalog-phase10.test.ts`. See
+  [unified-app-catalog/catalog.md](unified-app-catalog/catalog.md).
 - **Phase 4.3 (Quick Deployment, update policy timing, Wi-Fi provisioning, catalog layouts)**:
   `quick.test.ts`, `quick.spec.ts`, the new `Deployment.Tests.ps1` scenarios and `Wifi.Tests.ps1`
   (also run by `npm run test:ps`); see

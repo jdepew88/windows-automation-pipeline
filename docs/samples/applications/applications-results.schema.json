@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://windows-deployment-builder.local/schemas/applications-result.v2.json",
   "title": "Windows Deployment Builder application stage result",
-  "description": "Written by ApplicationEngine.ps1 to C:\\ProgramData\\WindowsDeploymentBuilder\\Applications\\result.json when the stage reaches a final status. Every selected package appears in \"packages\" with a terminal status, or \"Pending\" when it was not attempted. Schema 2 (engine 1.2.0) adds each operation's lifecycle, failure class and attempt history, and \"outstanding\": the work the deployment recovery tool can retry or resume.",
+  "description": "Written by ApplicationEngine.ps1 to C:\\ProgramData\\WindowsDeploymentBuilder\\Applications\\result.json when the stage reaches a final status. Every selected package appears in \"packages\" with a terminal status, or \"Pending\" when it was not attempted. Schema 2 (engine 1.2.0) adds each operation's lifecycle, failure class and attempt history, and \"outstanding\": the work the deployment recovery tool can retry or resume. Engine 1.6.0 adds package-aware verification (verification, verificationEvidence, verificationNote, outcome; only InstalledVerified is a success), the hash-mismatch record, re-verification and the Visual C++ runtime inventory; result.json is rewritten when a pending verification is checked again (next start, or -Mode Verify).",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -162,6 +162,14 @@
         "pending": {
           "type": "integer",
           "minimum": 0
+        },
+        "verificationPending": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "verificationFailed": {
+          "type": "integer",
+          "minimum": 0
         }
       }
     },
@@ -189,7 +197,11 @@
           "waitingFor",
           "totalAttempts",
           "manualRetries",
-          "history"
+          "history",
+          "verification",
+          "verificationEvidence",
+          "verificationNote",
+          "outcome"
         ],
         "properties": {
           "key": {
@@ -206,6 +218,54 @@
           },
           "installerExitCode": {
             "type": "string"
+          },
+          "installedVersion": {
+            "type": "string"
+          },
+          "hashMismatch": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "packageIdentifier",
+              "source",
+              "version",
+              "message",
+              "occurrences",
+              "sourceUpdated",
+              "staleDownloadsRemoved",
+              "retried"
+            ],
+            "properties": {
+              "packageIdentifier": {
+                "type": "string"
+              },
+              "source": {
+                "type": "string"
+              },
+              "version": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "occurrences": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "sourceUpdated": {
+                "type": "boolean"
+              },
+              "staleDownloadsRemoved": {
+                "type": "array",
+                "maxItems": 4,
+                "items": {
+                  "type": "string"
+                }
+              },
+              "retried": {
+                "type": "boolean"
+              }
+            }
           },
           "status": {
             "enum": [
@@ -258,7 +318,11 @@
               "",
               "Success",
               "Restart",
+              "RebootRequired",
               "Network",
+              "Download",
+              "Source",
+              "Installer",
               "Transient",
               "Timeout",
               "Resource",
@@ -269,9 +333,13 @@
               "User",
               "Manual",
               "Elevation",
+              "HashMismatch",
+              "Blocked",
+              "Unavailable",
               "Dependency",
               "Budget",
-              "Interrupted"
+              "Interrupted",
+              "Verification"
             ]
           },
           "retryable": {
@@ -319,6 +387,67 @@
                 "message"
               ]
             }
+          },
+          "verification": {
+            "enum": [
+              "Verified",
+              "Pending",
+              "Failed",
+              "NotApplicable"
+            ],
+            "description": "Engine 1.6.0: Verified (installation evidence found), Pending (expected after a sign-in or restart, or the user profile is not available yet; checked again), Failed (the installer reported success, no evidence), NotApplicable."
+          },
+          "verificationEvidence": {
+            "type": "array",
+            "maxItems": 12,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "detail",
+                "where",
+                "version"
+              ],
+              "properties": {
+                "kind": {
+                  "enum": [
+                    "winget",
+                    "uninstall",
+                    "appx",
+                    "file",
+                    "registry"
+                  ]
+                },
+                "detail": {
+                  "type": "string"
+                },
+                "where": {
+                  "type": "string",
+                  "pattern": "^(machine|provisioned|user:.{0,256})$"
+                },
+                "version": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "verificationNote": {
+            "type": "string"
+          },
+          "outcome": {
+            "enum": [
+              "InstalledVerified",
+              "InstallerSucceededVerificationPending",
+              "InstallerSucceededVerificationFailed",
+              "InstallationFailed",
+              "PackageUnavailable",
+              "UnattendedUnsupported",
+              "Skipped",
+              "RestartOrSignInRequired",
+              "ManualSetupRequired"
+            ],
+            "description": "Engine 1.6.0: only InstalledVerified is a success."
           }
         }
       }
@@ -345,7 +474,11 @@
           "waitingFor",
           "totalAttempts",
           "manualRetries",
-          "history"
+          "history",
+          "verification",
+          "verificationEvidence",
+          "verificationNote",
+          "outcome"
         ],
         "properties": {
           "id": {
@@ -405,7 +538,11 @@
               "",
               "Success",
               "Restart",
+              "RebootRequired",
               "Network",
+              "Download",
+              "Source",
+              "Installer",
               "Transient",
               "Timeout",
               "Resource",
@@ -416,9 +553,13 @@
               "User",
               "Manual",
               "Elevation",
+              "HashMismatch",
+              "Blocked",
+              "Unavailable",
               "Dependency",
               "Budget",
-              "Interrupted"
+              "Interrupted",
+              "Verification"
             ]
           },
           "retryable": {
@@ -466,6 +607,67 @@
                 "message"
               ]
             }
+          },
+          "verification": {
+            "enum": [
+              "Verified",
+              "Pending",
+              "Failed",
+              "NotApplicable"
+            ],
+            "description": "Engine 1.6.0: Verified (installation evidence found), Pending (expected after a sign-in or restart, or the user profile is not available yet; checked again), Failed (the installer reported success, no evidence), NotApplicable."
+          },
+          "verificationEvidence": {
+            "type": "array",
+            "maxItems": 12,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "detail",
+                "where",
+                "version"
+              ],
+              "properties": {
+                "kind": {
+                  "enum": [
+                    "winget",
+                    "uninstall",
+                    "appx",
+                    "file",
+                    "registry"
+                  ]
+                },
+                "detail": {
+                  "type": "string"
+                },
+                "where": {
+                  "type": "string",
+                  "pattern": "^(machine|provisioned|user:.{0,256})$"
+                },
+                "version": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "verificationNote": {
+            "type": "string"
+          },
+          "outcome": {
+            "enum": [
+              "InstalledVerified",
+              "InstallerSucceededVerificationPending",
+              "InstallerSucceededVerificationFailed",
+              "InstallationFailed",
+              "PackageUnavailable",
+              "UnattendedUnsupported",
+              "Skipped",
+              "RestartOrSignInRequired",
+              "ManualSetupRequired"
+            ],
+            "description": "Engine 1.6.0: only InstalledVerified is a success."
           }
         }
       }
@@ -531,7 +733,11 @@
               "",
               "Success",
               "Restart",
+              "RebootRequired",
               "Network",
+              "Download",
+              "Source",
+              "Installer",
               "Transient",
               "Timeout",
               "Resource",
@@ -542,9 +748,13 @@
               "User",
               "Manual",
               "Elevation",
+              "HashMismatch",
+              "Blocked",
+              "Unavailable",
               "Dependency",
               "Budget",
-              "Interrupted"
+              "Interrupted",
+              "Verification"
             ]
           },
           "retryable": {
@@ -732,7 +942,11 @@
               "",
               "Success",
               "Restart",
+              "RebootRequired",
               "Network",
+              "Download",
+              "Source",
+              "Installer",
               "Transient",
               "Timeout",
               "Resource",
@@ -743,9 +957,13 @@
               "User",
               "Manual",
               "Elevation",
+              "HashMismatch",
+              "Blocked",
+              "Unavailable",
               "Dependency",
               "Budget",
-              "Interrupted"
+              "Interrupted",
+              "Verification"
             ]
           },
           "retryable": {
@@ -816,6 +1034,67 @@
         },
         "message": {
           "type": "string"
+        }
+      }
+    },
+    "reverification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "starts",
+        "sinceUtc",
+        "lastUtc"
+      ],
+      "properties": {
+        "starts": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sinceUtc": {
+          "type": "string"
+        },
+        "lastUtc": {
+          "type": "string"
+        }
+      }
+    },
+    "runtimes": {
+      "type": "array",
+      "description": "Engine 1.6.0: Visual C++ runtimes found on the computer (uninstall records and the 2015+ runtime keys), read-only.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "family",
+          "architecture",
+          "version",
+          "displayName",
+          "source"
+        ],
+        "properties": {
+          "family": {
+            "type": "string"
+          },
+          "architecture": {
+            "enum": [
+              "x86",
+              "x64",
+              "arm64",
+              "unknown"
+            ]
+          },
+          "version": {
+            "type": "string"
+          },
+          "displayName": {
+            "type": "string"
+          },
+          "source": {
+            "enum": [
+              "uninstall",
+              "runtimeKey"
+            ]
+          }
         }
       }
     }

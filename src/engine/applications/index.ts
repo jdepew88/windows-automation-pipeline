@@ -8,6 +8,7 @@ import { DATA_ROOT, RESULT_FILE as WU_RESULT_FILE, TASK_NAME as WU_TASK_NAME, TA
 import { allProfiles, installable, manualItems, resolveSelection, type PlannedPackage, type SelectionResult } from './selection';
 import { exportWinGetJson } from './winget-json';
 import { exportAppProfiles } from './profiles';
+import { verifySpec, type VerifySpec } from './catalog';
 import { RESULTS_JSON_SCHEMA } from './results';
 import { migrationConfig, restorePlanText, settingsRestoreActive, settingsRestoreConfig, migrationActive } from '../migration/plan';
 import { DRIVER_STAGE } from '../drivers/contract';
@@ -19,7 +20,7 @@ import { DRIVER_STAGE } from '../drivers/contract';
  * native WinGet package list, which the engine reads at run time.
  */
 
-export const APP_ENGINE_VERSION = '1.5.0';
+export const APP_ENGINE_VERSION = '1.6.0';
 export const APP_STAGING_DIR = 'C:\\Windows\\Setup\\Scripts\\Applications';
 export const APP_ROOT = `${DATA_ROOT}\\Applications`;
 export const APP_TASK_NAME = 'Applications';
@@ -156,8 +157,11 @@ export interface ApplicationsConfig {
     /** Engine 1.1.0: winget | msstore | portable (portable = winget package + Start menu shortcut). */
     method: 'winget' | 'msstore' | 'portable';
     portable?: { executable: string; shortcut: string };
+    /** Engine 1.6.0: installation evidence from the catalog (verifySpec); empty = WinGet's own record only. */
+    verify: VerifySpec;
   }[];
-  unresolved: { key: string; packageIdentifier: string; source: string; displayName: string; reason: string }[];
+  /** removed: an app removed from the automated catalog (reported as Skipped, not a failure). */
+  unresolved: { key: string; packageIdentifier: string; source: string; displayName: string; reason: string; removed?: true }[];
   /** Engine 1.1.0: catalog entries without an unattended installation, reported as manual follow-ups. */
   manual: { key: string; displayName: string; instructions: string; url: string }[];
   /** Engine 1.1.0: apps a profile selects but the customer deselected, reported as SkippedByUser. */
@@ -220,10 +224,11 @@ export function applicationsConfig(p: Profile, sel: SelectionResult = resolveSel
       after: x.after,
       method: x.method === 'portable' ? ('portable' as const) : x.ref.source.toLowerCase() === 'msstore' ? ('msstore' as const) : ('winget' as const),
       ...(x.method === 'portable' && x.catalog?.portable ? { portable: { ...x.catalog.portable } } : {}),
+      verify: verifySpec(x.catalog),
     })),
     unresolved: sel.packages
       .filter((x) => x.resolution === 'unresolved')
-      .map((x) => ({ key: x.key, packageIdentifier: x.ref.packageIdentifier, source: x.ref.source, displayName: x.displayName, reason: x.reason ?? '' })),
+      .map((x) => ({ key: x.key, packageIdentifier: x.ref.packageIdentifier, source: x.ref.source, displayName: x.displayName, reason: x.reason ?? '', ...(x.excludedFromCatalog?.removed ? { removed: true as const } : {}) })),
     manual: manualItems(sel).map((x) => ({ key: x.key, displayName: x.displayName, instructions: x.catalog?.manual?.instructions ?? 'Install it manually.', url: x.catalog?.manual?.url ?? '' })),
     deselected: sel.removed
       .filter((x) => x.resolution !== 'unresolved')
@@ -290,10 +295,15 @@ export function planPreview(p: Profile, sel: SelectionResult = resolveSelection(
     if (n) lines.push(`     ${n}`);
     if (x.interaction !== 'required') lines.push(`     winget ${wingetArguments('install', x.ref).join(' ')}`);
   });
-  const unresolved = sel.packages.filter((x) => x.resolution === 'unresolved');
+  const unresolved = sel.packages.filter((x) => x.resolution === 'unresolved' && !x.excludedFromCatalog?.removed);
   if (unresolved.length) {
     lines.push('', 'Not installed (unresolved; reported as Unavailable):');
     for (const x of unresolved) lines.push(`  - ${x.displayName} [${x.ref.source}: ${x.ref.packageIdentifier}]: ${x.reason}`);
+  }
+  const removed = sel.packages.filter((x) => x.resolution === 'unresolved' && x.excludedFromCatalog?.removed);
+  if (removed.length) {
+    lines.push('', 'Not installed (removed from the automated catalog; reported as Skipped):');
+    for (const x of removed) lines.push(`  - ${x.displayName} [${x.ref.source}: ${x.ref.packageIdentifier}]: ${x.reason}`);
   }
   const manual = manualItems(sel);
   if (manual.length) {
@@ -340,6 +350,9 @@ Manual use (elevated Windows PowerShell 5.1, signed in as the target user, all f
   powershell.exe -ExecutionPolicy Bypass -File .\\${APP_BOOTSTRAP_FILE} -Mode Check
   powershell.exe -ExecutionPolicy Bypass -File .\\${APP_ENGINE_FILE} -Mode Plan
       (read-only: WinGet state, installed/available per package and the exact command)
+  powershell.exe -ExecutionPolicy Bypass -File ${APP_ROOT}\\${APP_ENGINE_FILE} -Mode Verify
+      (engine 1.6.0: re-verifies every package from installation evidence, installs nothing;
+       exit 0 verified, 10 pending, 20 failed or not installed, 1 engine running)
   powershell.exe -ExecutionPolicy Bypass -File .\\${APP_INSTALLER_FILE}
   powershell.exe -ExecutionPolicy Bypass -File .\\${APP_INSTALLER_FILE} -Uninstall
 

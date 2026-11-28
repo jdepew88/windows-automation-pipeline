@@ -50,8 +50,66 @@ export const PHASE5_OUTCOME_MAP: Record<string, { finding: (typeof FINDING_STATU
 const str = z.string();
 const int = z.number().int();
 
-/** Health engine 1.1.0: how an application's installation was verified (never from an exit code alone). */
-export const APP_VERIFICATION_STATES = ['InstalledAndVerified', 'InstallerSucceededUnverified', 'Missing', 'Failed', 'ManualActionRequired', 'NotSelected', 'Pending', 'Deferred'] as const;
+/**
+ * How an application's installation was verified (never from an exit code alone). Health engine 1.1.0
+ * states, extended compatibly by 1.2.0 (package-aware evidence from the catalog's verify block):
+ *   InstalledAndVerified                   evidence found NOW (uninstall record, Store package, file, registry value)
+ *   InstallerSucceededVerificationPending  the installer succeeded; no evidence yet, and it can only appear later
+ *                                          (after sign-in or a restart, or in the deployment user's profile, which
+ *                                          cannot be read now: signed out, no profile yet, or another account)
+ *   InstallerSucceededVerificationFailed   the installer succeeded, the evidence could be checked, and none was found
+ *   InstallerSucceededUnverified           health engine 1.1.0 only (older reports); 1.2.0 reports the two above
+ *   PackageUnavailable / UnattendedUnsupported  the package was not offered, or cannot be installed without a person
+ */
+export const APP_VERIFICATION_STATES = [
+  'InstalledAndVerified',
+  'InstallerSucceededVerificationPending',
+  'InstallerSucceededVerificationFailed',
+  'InstallerSucceededUnverified',
+  'Missing',
+  'Failed',
+  'PackageUnavailable',
+  'UnattendedUnsupported',
+  'ManualActionRequired',
+  'NotSelected',
+  'Pending',
+  'Deferred',
+] as const;
+/** Kinds of installation evidence (the application engine 1.6.0 uses the same names in result.json). */
+export const APP_EVIDENCE_KINDS = ['winget', 'uninstall', 'appx', 'file', 'registry'] as const;
+/** One piece of evidence: where is "machine", "user:<account>" or "provisioned" (a Store package staged for every user). */
+export const AppEvidenceSchema = z.object({ kind: z.enum(APP_EVIDENCE_KINDS), detail: z.string(), where: z.string(), version: z.string() }).strict();
+/** Visual C++ runtime families the inventory distinguishes (2015+ is the shared v14 runtime: 2015-2022 and later). */
+export const RUNTIME_FAMILIES = ['2015+', '2013', '2012', '2010', '2008', '2005'] as const;
+const RUNTIME_ARCHS = ['x64', 'x86', 'arm64'] as const;
+export const RuntimeInventorySchema = z
+  .object({
+    checkedUtc: z.string(),
+    osArchitecture: z.string(),
+    available: z.boolean(),
+    source: z.string(),
+    items: z.array(z.object({ family: z.enum(RUNTIME_FAMILIES), architecture: z.enum(RUNTIME_ARCHS), version: z.string(), displayName: z.string(), where: z.string() }).strict()),
+    selected: z.array(z.object({ key: z.string(), name: z.string(), family: z.enum(RUNTIME_FAMILIES), architecture: z.enum(RUNTIME_ARCHS), present: z.boolean(), version: z.string() }).strict()),
+    notes: z.array(z.string()),
+    findingId: z.string(),
+  })
+  .strict();
+/** Health engine 1.2.0, -CheckAppUpdates: a read-only "winget upgrade" listing (never as SYSTEM, never an installation). */
+export const APP_UPDATE_CHECK_STATES = ['ok', 'notAsSystem', 'wingetUnavailable', 'failed'] as const;
+export const AppUpdatesSchema = z
+  .object({
+    checkedUtc: z.string(),
+    status: z.enum(APP_UPDATE_CHECK_STATES),
+    runAs: z.string(),
+    asDeploymentUser: z.boolean().nullable(),
+    exitCode: z.string(),
+    items: z.array(z.object({ key: z.string(), name: z.string(), id: z.string(), installed: z.string(), available: z.string(), source: z.string() }).strict()),
+    otherAvailable: z.number().int().min(0),
+    problems: z.array(z.string()),
+    note: z.string(),
+    findingId: z.string(),
+  })
+  .strict();
 /** The update engine's (2.1.0) final state, and the finding the health engine makes of it. Never "Pass" because installation finished. */
 export const UPDATE_STATES = ['UpToDate', 'UpToDateUnderPolicy', 'PreviewUpdatesExcluded', 'RestartRequired', 'UpdatesRemaining', 'InstallationIncomplete', 'CompletedWithFailures', 'VerificationUnavailable'] as const;
 export const UPDATE_STATE_FINDING: Record<(typeof UPDATE_STATES)[number], 'Pass' | 'Warning' | 'Fail' | 'Unverifiable'> = {
@@ -210,6 +268,14 @@ export const HealthReportSchema = z
           result: str,
           verification: z.enum(APP_VERIFICATION_STATES),
           findingId: str,
+          /** Health engine 1.2.0 (absent from older reports): the evidence found now, and the engine's own record of it (history). */
+          evidence: z.array(AppEvidenceSchema).optional(),
+          engineEvidence: z.array(AppEvidenceSchema).optional(),
+          /** Application engine 1.6.0 fields as recorded ('' for older engines). */
+          outcome: str.optional(),
+          engineVerification: str.optional(),
+          failureClass: str.optional(),
+          verificationNote: str.optional(),
         })
         .strict(),
     ),
@@ -230,6 +296,9 @@ export const HealthReportSchema = z
     deviceComparison: z.array(DeviceComparisonSchema),
     office: OfficeHealthSchema.nullable(),
     hardwareSoftware: z.array(HardwareSoftwareSchema),
+    /** Health engine 1.2.0 (absent from older reports). */
+    runtimes: RuntimeInventorySchema.nullable().optional(),
+    appUpdates: AppUpdatesSchema.nullable().optional(),
   })
   .strict();
 export type HealthReport = z.infer<typeof HealthReportSchema>;
@@ -284,7 +353,28 @@ export const HEALTH_REPORT_JSON_SCHEMA = {
     },
     sources: { type: 'array', items: { type: 'object', properties: { state: { enum: [...SOURCE_STATES] } } } },
     checklist: { type: 'array', items: { type: 'object', properties: { state: { enum: [...CHECKLIST_STATES] } } } },
-    applications: { type: 'array', items: { type: 'object', properties: { verification: { enum: [...APP_VERIFICATION_STATES] } } } },
+    applications: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          verification: { enum: [...APP_VERIFICATION_STATES] },
+          evidence: { type: 'array', description: 'Health engine 1.2.0: evidence found now (kind, detail, where: machine | user:<account> | provisioned, version).', items: { type: 'object', properties: { kind: { enum: [...APP_EVIDENCE_KINDS] } } } },
+          engineEvidence: { type: 'array', description: "The application engine's own verification evidence as recorded (history, not the current state)." },
+          outcome: { type: 'string', description: 'Application engine 1.6.0 outcome as recorded, or empty.' },
+        },
+      },
+    },
+    runtimes: {
+      type: ['object', 'null'],
+      description: 'Health engine 1.2.0: Visual C++ runtimes in the uninstall records, by family and architecture (x86 and x64 are separate: 32-bit applications need the x86 runtime on 64-bit Windows).',
+      properties: { items: { type: 'array', items: { type: 'object', properties: { family: { enum: [...RUNTIME_FAMILIES] }, architecture: { enum: [...RUNTIME_ARCHS] } } } } },
+    },
+    appUpdates: {
+      type: ['object', 'null'],
+      description: 'Health engine 1.2.0 with -CheckAppUpdates: a read-only "winget upgrade" listing for the selected applications. Not possible as SYSTEM (status notAsSystem). Nothing is installed.',
+      properties: { status: { enum: [...APP_UPDATE_CHECK_STATES] } },
+    },
     windowsUpdate: {
       type: ['object', 'null'],
       description:
@@ -378,7 +468,7 @@ export function sampleHealthReport(mode: 'technician' | 'customer', notes = ''):
       categories: cats,
       findings,
       applications: [
-        { key: 'winget:git.git', name: 'Git', source: 'winget', packageIdentifier: 'Git.Git', method: 'winget', kind: 'automatic', required: true, scope: 'machine', engineStatus: 'Succeeded', lifecycle: 'Succeeded', attempts: 1, detection: 'Installed', independent: 'Found', foundIn: 'machine', version: '2.51.0', result: 'InstalledVerified', verification: 'InstalledAndVerified', findingId: 'app.winget:git.git' },
+        { key: 'winget:git.git', name: 'Git', source: 'winget', packageIdentifier: 'Git.Git', method: 'winget', kind: 'automatic', required: true, scope: 'machine', engineStatus: 'Succeeded', lifecycle: 'Succeeded', attempts: 1, detection: 'Installed', independent: 'Found', foundIn: 'machine', version: '2.51.0', result: 'InstalledVerified', verification: 'InstalledAndVerified', findingId: 'app.winget:git.git', evidence: [{ kind: 'uninstall', detail: 'Uninstall record "Git"', where: 'machine', version: '2.51.0' }, { kind: 'file', detail: '%ProgramFiles%\\Git\\cmd\\git.exe', where: 'machine', version: '2.51.0.1' }], outcome: 'InstalledVerified' },
         { key: 'catalog:rustdesk', name: 'RustDesk', source: 'catalog', packageIdentifier: '', method: 'manual', kind: 'manual', required: false, scope: 'unknown', engineStatus: 'RequiresInteraction', lifecycle: 'ManualActionRequired', attempts: 0, detection: '', independent: 'NotFound', foundIn: '', version: '', result: 'ManualInstallationRequired', verification: 'ManualActionRequired', findingId: 'app.catalog:rustdesk' },
       ],
       outstanding: [],

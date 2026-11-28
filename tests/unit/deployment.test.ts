@@ -24,13 +24,13 @@ import type { Profile } from '../../src/engine/schema/profile';
 const nodeSha = (b: Uint8Array | string) => createHash('sha256').update(b).digest('hex').toUpperCase();
 const dec = new TextDecoder();
 
-// Exactly Git + Whiteboard (no Core Essentials), as in Phase 4.
+// Exactly Git + a Store app (WhatsApp; Phase 3/4 used Whiteboard, removed from the catalog in 2026-11) (no Core Essentials), as in Phase 4.
 const withApps = (mutate?: (p: Profile) => void) =>
   profile((p) => {
     noApps(p);
     p.applications.selection.added.push(
       { packageIdentifier: 'Git.Git', source: 'winget', displayName: 'Git', version: '', scope: '' },
-      { packageIdentifier: '9MSPC6MP8FM4', source: 'msstore', displayName: 'Whiteboard', version: '', scope: '' },
+      { packageIdentifier: '9NKSQGP7F2NH', source: 'msstore', displayName: 'WhatsApp', version: '', scope: '' },
     );
     mutate?.(p);
   });
@@ -179,6 +179,7 @@ describe('customer application selections', () => {
       sel.profiles.push({ id: 'home', name: 'Home', category: 'custom', description: '', builtin: false, inherits: [], packages: [ref('Mozilla.Firefox', 'Firefox'), ref('7zip.7zip', '7-Zip')] });
       sel.profiles.push({ id: 'extra', name: 'Extra', category: 'custom', description: '', builtin: false, inherits: [], packages: [ref('Valve.Steam', 'Steam'), ref('7ZIP.7ZIP', '7-Zip')] });
       sel.selectedProfiles = ['home', 'gaming', 'extra'];
+      sel.profileRevision = 1; // Gaming = Steam + Epic (revision 1; an older saved deployment)
       sel.added.push(ref('Adobe.Acrobat.Reader.64-bit', 'Acrobat Reader'));
       sel.removed.push('winget:epicgames.epicgameslauncher');
     });

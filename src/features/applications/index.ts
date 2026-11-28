@@ -214,6 +214,9 @@ export function validate(p: Profile, issues: Issue[]): void {
 
   const r = resolveSelection(sel);
   for (const x of r.packages.filter((x) => x.resolution === 'unresolved')) {
+    // Removed from the automated catalog: the notice below warns; the deployment still generates
+    // (the app stays in the profile for reference and is never installed).
+    if (x.excludedFromCatalog?.removed) continue;
     if (isKnownSource(x.ref.source.toLowerCase())) err(path, `${x.displayName}: ${x.reason} Remove it or correct the identifier.`);
     else warn(path, `${x.displayName}: ${x.reason}`);
   }

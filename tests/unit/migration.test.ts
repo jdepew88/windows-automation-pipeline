@@ -245,8 +245,9 @@ describe('migration profiles (review -> named profile on top of a base profile)'
     ]);
 
   it('builds an expanded Network Engineer profile; the built-in profile is never changed', () => {
-    const before = structuredClone(builtinProfile('network-engineer'));
-    const p = profile();
+    // Revision 1 (an older deployment): Network Engineer includes General Developer there.
+    const before = structuredClone(builtinProfile('network-engineer', 1));
+    const p = profile((x) => (x.applications.selection.profileRevision = 1));
     const i = inv();
     const items = matchInventory(i);
     const d = defaultDecisions(items);
@@ -264,7 +265,7 @@ describe('migration profiles (review -> named profile on top of a base profile)'
     expect(r.profile.excluded).toEqual(['winget:wiresharkfoundation.wireshark']);
     expect(r.manualAdded).toBe(1);
     expect(p.additionalSoftware.items.at(-1)).toMatchObject({ id: `migration-${byName('Contoso Field Tool').id}`, execution: 'manual', name: 'Contoso Field Tool' });
-    expect(builtinProfile('network-engineer')).toEqual(before);
+    expect(builtinProfile('network-engineer', 1)).toEqual(before);
     const keys = resolveSelection(p.applications.selection).packages.map((x) => x.key);
     expect(keys).toContain('winget:git.git');
     expect(keys).toContain('winget:example.tool');
@@ -273,6 +274,17 @@ describe('migration profiles (review -> named profile on top of a base profile)'
     expect(p.applications.selection.selectedProfiles).not.toContain('network-engineer');
     expect(p.migration.enabled).toBe(true);
     expect(p.migration.decisions.find((x) => x.displayName === 'Contoso Field Tool')!.key).toMatch(/^additional:migration-app-/);
+  });
+
+  it('revision 2: the base is resolved at the deployment\'s own revision, so excluding an app new in v2 Core is kept', () => {
+    const p = profile((x) => (x.applications.selection.profileRevision = 2));
+    const i = inventory([wg('Notepad++', 'Notepad++.Notepad++'), wg('Git', 'Git.Git')]);
+    const items = matchInventory(i);
+    const d = defaultDecisions(items);
+    d.set(items.find((x) => x.app.displayName === 'Notepad++')!.id, { decision: 'exclude', confirmed: false });
+    const r = applyMigration(p, i, items, d, { name: 'Revision Two PC', baseProfile: 'core' });
+    expect(r.profile.excluded).toContain('winget:notepad++.notepad++');
+    expect(resolveSelection(p.applications.selection).packages.map((x) => x.key)).not.toContain('winget:notepad++.notepad++');
   });
 
   it('other names are allowed (Gaming Desktop, Customer Office PC); a clash gets a suffix', () => {
@@ -371,11 +383,11 @@ describe('deployment generation with a restoration plan', () => {
     return p;
   }
 
-  it('settings wait for their applications; the plan pins the backup; the engine is 1.5.0', () => {
+  it('settings wait for their applications; the plan pins the backup; the engine is 1.6.0', () => {
     const p = migrated();
     expect(settingsRestoreActive(p)).toBe(true);
     const c = applicationsConfig(p);
-    expect(c.engineVersion).toBe('1.5.0');
+    expect(c.engineVersion).toBe('1.6.0');
     expect(c.settingsRestore).toEqual({
       backupId: 'a1b2c3d4e5f60718',
       manifestSha256: p.migration.backup!.manifestSha256,

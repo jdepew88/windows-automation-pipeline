@@ -54,16 +54,40 @@
     one-time task, limited run level, the same validated arguments); an installer hash mismatch is
     retried once, integrityRetryMinutes later, after "winget source update" - the hash is still
     checked, and a second mismatch is final.
+
+    Engine 1.6.0 (package-aware verification): an installer's exit code is never proof of an
+    installation. Every package is verified from evidence, in this order: WinGet's own record
+    ("winget list --id <id> --exact"), uninstall records (64-bit, 32-bit/WOW6432Node and the
+    deployment user's hive) by display-name prefix, AppX packages (registered for the user, or
+    provisioned), files under known roots (with their file version) and exact registry values, as
+    the catalog's "verify" block names them (Test-WdaVerification; every probe is a small replaceable
+    function). Each package carries verification (Verified | Pending | Failed | NotApplicable), its
+    evidence, a note and an outcome (InstalledVerified, InstallerSucceededVerificationPending,
+    InstallerSucceededVerificationFailed, InstallationFailed, PackageUnavailable,
+    UnattendedUnsupported, Skipped, RestartOrSignInRequired, ManualSetupRequired). Only verified
+    installations count as success. Pending verifications (after a sign-in or a restart, or while
+    the user's profile is not available) are re-checked at the engine's next start; the task stays
+    registered for that (bounded), and -Mode Verify re-checks everything without installing.
+    Failure classes name the cause (Network, Download, Source, HashMismatch, Installer,
+    Verification, Unavailable, RebootRequired, Blocked, ...). A hash mismatch records WinGet's exact
+    message, refreshes that source, removes only that package's stale download folder and is tried
+    once more; the hash check always applies. Get-WdaRuntimeInventory lists Visual C++ runtimes.
     Modes:
-      Run   (default) Full engine.
-      Plan  Read-only dry run: WinGet check, installed/available state and the exact command for
-            every package. Installs nothing, writes nothing, needs no elevation.
-      Retry Technician recovery (called by DeploymentRecovery.ps1): reopens failed or unfinished
-            operations of this deployment for another run. Installs nothing itself.
+      Run    (default) Full engine.
+      Plan   Read-only dry run: WinGet check, installed/available state and the exact command for
+             every package. Installs nothing, writes nothing, needs no elevation.
+      Retry  Technician recovery (called by DeploymentRecovery.ps1): reopens failed or unfinished
+             operations of this deployment for another run. Installs nothing itself.
+      Verify Engine 1.6.0: re-verifies every package from evidence. Installs nothing, registers no
+             task and changes no package status: only verification, verificationEvidence,
+             verificationNote, outcome and detection are updated in state.json, and result.json is
+             rewritten when the stage has finished. Exit code 0 = everything verified (or not
+             applicable), 10 = a verification is pending, 20 = a verification failed or a package
+             is not installed, 1 = the engine is running or an error occurred.
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('Run', 'Plan', 'Retry')]
+    [ValidateSet('Run', 'Plan', 'Retry', 'Verify')]
     [string] $Mode = 'Run',
     [string] $ConfigPath = '',
     # Retry mode only: operation ids ("app:winget:git.git", "additional:<id>") or -AllFailed / -PendingOnly.
@@ -76,7 +100,7 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-$script:EngineVersion = '1.5.0'
+$script:EngineVersion = '1.6.0'
 $script:StateVersion = 3
 $script:EventSource = 'WindowsDeploymentBuilder'
 $script:LogFile = $null
@@ -91,37 +115,51 @@ $script:SafeToken = '^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$|^--[a-z][a-z-]{1,40}$|^
 $script:PortableExe = '^[A-Za-z0-9][A-Za-z0-9._+*-]{0,79}\.exe$'
 $script:ShortcutName = '^[A-Za-z0-9][A-Za-z0-9 ._()+-]{0,59}$'
 $script:CatalogKey = '^catalog:[a-z0-9][a-z0-9-]{0,47}$'
+# Engine 1.6.0: the catalog's verify block (catalog.ts VERIFY_FILE / VERIFY_REGISTRY_KEY / appx names), validated again here.
+$script:VerifyFile = '^%(ProgramFiles|ProgramFiles\(x86\)|ProgramData|LocalAppData|AppData)%(\\[A-Za-z0-9 ._()+-]{1,80}){1,6}$'
+$script:VerifyRegistryKey = '^HKLM\\SOFTWARE(\\[A-Za-z0-9 ._+-]{1,80}){1,8}$'
+$script:VerifyRegistryName = '^[A-Za-z0-9 ._-]{1,60}$'
+$script:AppxName = '^[A-Za-z0-9][A-Za-z0-9.-]{2,99}$'
+# Accounts with a profile: local/domain (S-1-5-21-...) and Microsoft Entra ID (S-1-12-1-...) users; never SYSTEM or a service.
+$script:UserSid = '^S-1-(5-21|12-1)(-\d{1,10}){2,8}$'
+$script:VerificationStates = @('Verified', 'Pending', 'Failed', 'NotApplicable')
+$script:Outcomes = @('InstalledVerified', 'InstallerSucceededVerificationPending', 'InstallerSucceededVerificationFailed', 'InstallationFailed', 'PackageUnavailable', 'UnattendedUnsupported', 'Skipped', 'RestartOrSignInRequired', 'ManualSetupRequired')
+# Re-verification after the stage has finished (sign-in, restart): bounded by starts and days.
+$script:ReverifyMaxStarts = 48
+$script:ReverifyMaxDays = 7
 
 # WinGet HRESULTs (AppInstallerErrors.h) -> Status, Retry, Restart (none|later|now|initiated), Text, Class.
-# Class (Phase 5): Success, Restart, Network, Transient, Resource (retried automatically while the
-# budget lasts, Resource only where Retry is true), Permanent, Integrity, Policy, User (never retried
-# automatically; Integrity and Policy failures are never weakened by a retry).
+# Class (Phase 5, named by cause since engine 1.6.0): Success, RebootRequired; retried automatically
+# while the budget lasts: Network, Download, Source, Installer, Transient, Resource (only where Retry
+# is true), Unknown; never retried automatically: Unavailable, HashMismatch (one delayed retry from a
+# refreshed source, the hash still checked), Blocked (policy), Permanent, User, Elevation. Engine
+# 1.6.0 adds Verification (the installer reported success, but no evidence was found) on the package.
 $script:ExitCodes = @{
     '0x00000000' = @('Succeeded', $false, 'none', 'Installed.', 'Success')
     '0x8A150061' = @('AlreadyInstalled', $false, 'none', 'Already installed (PACKAGE_ALREADY_INSTALLED).', 'Success')
     '0x8A15010D' = @('AlreadyInstalled', $false, 'none', 'Already installed (INSTALL_ALREADY_INSTALLED).', 'Success')
     '0x8A15002B' = @('AlreadyInstalled', $false, 'none', 'Installed; no applicable upgrade (UPDATE_NOT_APPLICABLE).', 'Success')
     '0x8A15010E' = @('AlreadyInstalled', $false, 'none', 'A newer version is already installed (INSTALL_DOWNGRADE).', 'Success')
-    '0x8A150109' = @('RequiresRestart', $false, 'later', 'Installed; a restart is required to finish (INSTALL_REBOOT_REQUIRED_TO_FINISH).', 'Restart')
-    '0x8A15010A' = @('RequiresRestart', $true, 'now', 'A restart is required before it can install (INSTALL_REBOOT_REQUIRED_FOR_INSTALL).', 'Restart')
-    '0x8A15010B' = @('RequiresRestart', $false, 'initiated', 'The installer started a restart (INSTALL_REBOOT_INITIATED).', 'Restart')
-    '0x00000BC2' = @('RequiresRestart', $false, 'later', 'Installed; a restart is required to finish (3010).', 'Restart')
-    '0x00000669' = @('RequiresRestart', $false, 'initiated', 'The installer started a restart (1641).', 'Restart')
-    '0x8A150014' = @('Unavailable', $false, 'none', 'No package with this identifier in the source (NO_APPLICATIONS_FOUND).', 'Permanent')
-    '0x8A150113' = @('Unavailable', $false, 'none', 'The package does not support this system (INSTALL_SYSTEM_NOT_SUPPORTED).', 'Permanent')
+    '0x8A150109' = @('RequiresRestart', $false, 'later', 'Installed; a restart is required to finish (INSTALL_REBOOT_REQUIRED_TO_FINISH).', 'RebootRequired')
+    '0x8A15010A' = @('RequiresRestart', $true, 'now', 'A restart is required before it can install (INSTALL_REBOOT_REQUIRED_FOR_INSTALL).', 'RebootRequired')
+    '0x8A15010B' = @('RequiresRestart', $false, 'initiated', 'The installer started a restart (INSTALL_REBOOT_INITIATED).', 'RebootRequired')
+    '0x00000BC2' = @('RequiresRestart', $false, 'later', 'Installed; a restart is required to finish (3010).', 'RebootRequired')
+    '0x00000669' = @('RequiresRestart', $false, 'initiated', 'The installer started a restart (1641).', 'RebootRequired')
+    '0x8A150014' = @('Unavailable', $false, 'none', 'No package with this identifier in the source (NO_APPLICATIONS_FOUND).', 'Unavailable')
+    '0x8A150113' = @('Unavailable', $false, 'none', 'The package does not support this system (INSTALL_SYSTEM_NOT_SUPPORTED).', 'Unavailable')
     '0x8A150016' = @('Failed', $false, 'none', 'More than one package matched (MULTIPLE_APPLICATIONS_FOUND).', 'Permanent')
     '0x8A15010C' = @('RequiresInteraction', $false, 'none', 'The installer was cancelled or needs a person (INSTALL_CANCELLED_BY_USER).', 'User')
-    '0x8A150011' = @('Failed', $false, 'none', 'Installer hash mismatch; not installed for safety (INSTALLER_HASH_MISMATCH).', 'Integrity')
-    '0x8A15003A' = @('Failed', $false, 'none', 'Blocked by policy (BLOCKED_BY_POLICY).', 'Policy')
-    '0x8A15010F' = @('Failed', $false, 'none', 'Blocked by policy (INSTALL_BLOCKED_BY_POLICY).', 'Policy')
-    '0x8A15001B' = @('Failed', $false, 'none', 'Microsoft Store blocked by policy (MSSTORE_BLOCKED_BY_POLICY).', 'Policy')
-    '0x8A15001C' = @('Failed', $false, 'none', 'App blocked by Store policy (MSSTORE_APP_BLOCKED_BY_POLICY).', 'Policy')
+    '0x8A150011' = @('Failed', $false, 'none', 'Installer hash mismatch; not installed for safety (INSTALLER_HASH_MISMATCH).', 'HashMismatch')
+    '0x8A15003A' = @('Failed', $false, 'none', 'Blocked by policy (BLOCKED_BY_POLICY).', 'Blocked')
+    '0x8A15010F' = @('Failed', $false, 'none', 'Blocked by policy (INSTALL_BLOCKED_BY_POLICY).', 'Blocked')
+    '0x8A15001B' = @('Failed', $false, 'none', 'Microsoft Store blocked by policy (MSSTORE_BLOCKED_BY_POLICY).', 'Blocked')
+    '0x8A15001C' = @('Failed', $false, 'none', 'App blocked by Store policy (MSSTORE_APP_BLOCKED_BY_POLICY).', 'Blocked')
     '0x8A150041' = @('Failed', $false, 'none', 'Package agreements not accepted (PACKAGE_AGREEMENTS_NOT_ACCEPTED).', 'Permanent')
     '0x8A150046' = @('Failed', $false, 'none', 'Source agreements not accepted (SOURCE_AGREEMENTS_NOT_ACCEPTED).', 'Permanent')
     '0x8A150105' = @('Failed', $false, 'none', 'Not enough disk space (INSTALL_DISK_FULL).', 'Resource')
     '0x8A150107' = @('Failed', $true, 'none', 'No network (INSTALL_NO_NETWORK).', 'Network')
-    '0x8A150008' = @('Failed', $true, 'none', 'Download failed (DOWNLOAD_FAILED).', 'Network')
-    '0x8A150045' = @('Failed', $true, 'none', 'The source could not be opened (SOURCE_OPEN_FAILED).', 'Network')
+    '0x8A150008' = @('Failed', $true, 'none', 'Download failed (DOWNLOAD_FAILED).', 'Download')
+    '0x8A150045' = @('Failed', $true, 'none', 'The source could not be opened (SOURCE_OPEN_FAILED).', 'Source')
     '0x8A150101' = @('Failed', $true, 'none', 'The application is in use (INSTALL_PACKAGE_IN_USE).', 'Transient')
     '0x8A150102' = @('Failed', $true, 'none', 'Another installation is in progress (INSTALL_INSTALL_IN_PROGRESS).', 'Transient')
     '0x8A150103' = @('Failed', $true, 'none', 'A file is in use (INSTALL_FILE_IN_USE).', 'Transient')
@@ -130,7 +168,7 @@ $script:ExitCodes = @{
     '0x8A150110' = @('Failed', $true, 'none', 'Dependencies could not be installed (INSTALL_DEPENDENCIES).', 'Transient')
     '0x8A150106' = @('Failed', $true, 'none', 'Not enough memory (INSTALL_INSUFFICIENT_MEMORY).', 'Resource')
     # The package's own installer exited with an error; its exit code is taken from WinGet's output.
-    '0x8A150006' = @('Failed', $true, 'none', 'The installer reported a failure (SHELLEXEC_INSTALL_FAILED).', 'Unknown')
+    '0x8A150006' = @('Failed', $true, 'none', 'The installer reported a failure (SHELLEXEC_INSTALL_FAILED).', 'Installer')
     # Engine 1.5.0: the package declares that its installer must not run elevated (for example
     # Spotify). It is run once more as the signed-in user without administrator rights.
     '0x8A150056' = @('Failed', $false, 'none', 'The installer refuses to run with administrator rights (INSTALLER_PROHIBITS_ELEVATION).', 'Elevation')
@@ -312,7 +350,9 @@ function Set-WdaStatus {
         $o.done = @($State.packages.Values | Where-Object { $_.status -in $script:Terminal }).Count
         $o.total = @($State.packages.Values).Count
         # Engine 1.4.0: counts and the last failure for the progress window and the LAN monitor.
-        $o.installed = @($State.packages.Values | Where-Object { $_.status -in 'Succeeded', 'AlreadyInstalled' }).Count
+        # Engine 1.6.0: installed = verified installations only.
+        $o.installed = @($State.packages.Values | Where-Object { $_.status -in 'Succeeded', 'AlreadyInstalled' -and (Get-WdaOutcome $_) -eq 'InstalledVerified' }).Count
+        $o.verificationPending = @($State.packages.Values | Where-Object { $_.status -in 'Succeeded', 'AlreadyInstalled' -and (Get-WdaOutcome $_) -in 'InstallerSucceededVerificationPending', 'RestartOrSignInRequired' }).Count
         $o.failed = @($State.packages.Values | Where-Object { $_.status -in 'Failed', 'Unavailable' }).Count
         $o.needsPerson = @($State.packages.Values | Where-Object { $_.status -eq 'RequiresInteraction' }).Count
         $o.selected = @($State.packages.Values | Where-Object { $_.status -ne 'SkippedByUser' }).Count
@@ -363,6 +403,8 @@ function New-WdaState {
         recoveredFrom    = ''
         originalStartUtc = $null
         halted           = ''
+        # Engine 1.6.0: re-verification after the stage finished (starts, since).
+        reverify         = $null
     }
 }
 
@@ -377,6 +419,20 @@ function Add-WdaEntryFields {
     foreach ($k in @($defaults.Keys)) { if (-not $Entry.ContainsKey($k)) { $Entry[$k] = $defaults[$k] } }
     if ($null -eq $Entry.history) { $Entry.history = @() }
     $Entry.history = @($Entry.history | Where-Object { $_ -is [hashtable] })
+    if ($Kind -eq 'settings') { return }
+    # Engine 1.6.0: verification. Entries written by earlier engines get it from their detection,
+    # so a resumed run neither forgets what winget list confirmed nor turns an unconfirmed success green.
+    if (-not $Entry.ContainsKey('verification') -or [string] $Entry['verification'] -notin $script:VerificationStates) {
+        $det = [string] $Entry['detection']
+        $Entry.verification = $(if ($Kind -eq 'app' -and [string] $Entry['status'] -in 'Succeeded', 'AlreadyInstalled') {
+            if ($det -eq 'Installed' -or ($det -eq '' -and $Entry['status'] -eq 'AlreadyInstalled')) { 'Verified' } elseif ($det -eq 'Unconfirmed') { 'Failed' } else { 'Pending' }
+        } elseif ($Kind -eq 'app' -and [string] $Entry['status'] -eq 'RequiresRestart' -and $det -eq 'InstalledRequiresRestart') { 'Pending' } else { 'NotApplicable' })
+        $Entry.verificationWait = $(if ($Entry.verification -eq 'Pending') { $(if ($det -eq 'InstalledRequiresRestart') { 'restart' } else { 'check' }) } else { '' })
+    }
+    foreach ($k in 'verificationNote', 'verificationWait', 'outcome', 'installedVersion') { if (-not $Entry.ContainsKey($k) -or $null -eq $Entry[$k]) { $Entry[$k] = '' } }
+    if (-not $Entry.ContainsKey('verificationEvidence') -or $null -eq $Entry['verificationEvidence']) { $Entry.verificationEvidence = @() }
+    $Entry.verificationEvidence = @($Entry.verificationEvidence | Where-Object { $_ -is [hashtable] })
+    if (-not $Entry.ContainsKey('verifiedUtc')) { $Entry.verifiedUtc = $null }
 }
 
 <#
@@ -443,7 +499,12 @@ function Read-WdaState {
     return $s
 }
 
-function Save-WdaState { param([hashtable] $State, [hashtable] $Paths) Write-WdaJson $Paths.State $State -Backup }
+function Save-WdaState {
+    param([hashtable] $State, [hashtable] $Paths)
+    # Engine 1.6.0: the outcome is derived from status and verification, so it can never disagree with them.
+    foreach ($e in @($State.packages.Values) + @($State.additional.Values)) { if ($e -is [hashtable] -and $e.ContainsKey('operationId')) { $e.outcome = Get-WdaOutcome $e } }
+    Write-WdaJson $Paths.State $State -Backup
+}
 
 # ------------------------------------------------------------------------------------------------
 # Package queue. The native WinGet package list is the package specification; applications-config
@@ -514,6 +575,8 @@ function Get-WdaQueue {
             # throws on a missing hashtable key, so test for it first).
             method = $(if ($p.ContainsKey('method') -and $p.method) { [string] $p.method } else { [string] $p.source })
             portable = $(if ($p.ContainsKey('portable') -and $p.portable -is [hashtable]) { @{ executable = [string] $p.portable['executable']; shortcut = [string] $p.portable['shortcut'] } } else { $null })
+            # Engine 1.6.0: installation evidence from the catalog (validated in Get-WdaVerifySpec).
+            verify = $(if ($p.ContainsKey('verify') -and $p.verify -is [hashtable]) { $p.verify } else { $null })
         }
     }
     # Packages only in the native list (for example a WinGet export placed there by hand).
@@ -522,7 +585,7 @@ function Get-WdaQueue {
         if ($seen.ContainsKey($k)) { continue }
         $seen[$k] = $true
         $queue += @{ key = $k; packageIdentifier = $n.packageIdentifier; source = $n.source; name = $n.packageIdentifier
-                     version = $n.version; scope = $n.scope; interaction = 'unknown'; after = @(); inNative = $true; method = $n.source; portable = $null }
+                     version = $n.version; scope = $n.scope; interaction = 'unknown'; after = @(); inNative = $true; method = $n.source; portable = $null; verify = $null }
     }
     return , $queue
 }
@@ -624,6 +687,60 @@ function Update-WdaSource {
     param([string] $Source, [string] $LogFile = '')
     if ($Source -cnotmatch $script:SafeToken) { return }
     try { [void] (Invoke-WdaWinGet @('source', 'update', '--name', $Source, '--disable-interactivity') 5 $LogFile) } catch { Write-WdaLog "WinGet source update failed: $($_.Exception.Message)" 'WARN' }
+}
+
+<# Engine 1.6.0: WinGet's download folder of the running account (%TEMP%\WinGet). #>
+function Get-WdaWinGetTempRoot { Join-Path ([IO.Path]::GetTempPath()) 'WinGet' }
+
+<#
+    Engine 1.6.0, after a hash mismatch: removes that package's stale download folder, and nothing
+    else. Only folders directly in %TEMP%\WinGet whose name is exactly the package identifier or
+    "<identifier>.<version>" (the version WinGet reported or the configuration pins) are touched; a
+    link, a folder outside the root or one with more than 200 entries is left alone. Returns the
+    removed paths. WinGet's settings are never changed.
+#>
+function Remove-WdaStaleDownload {
+    param([string] $PackageIdentifier, [string] $Version = '')
+    $removed = @()
+    if ($PackageIdentifier -cnotmatch $script:WingetId -and $PackageIdentifier -cnotmatch $script:StoreId) { return }
+    $root = Get-WdaWinGetTempRoot
+    if (-not $root -or -not (Test-Path -LiteralPath $root -PathType Container)) { return }
+    $base = [IO.Path]::GetFullPath($root).TrimEnd('\') + '\'
+    $names = @($PackageIdentifier)
+    if ($Version -and $Version -cmatch $script:VersionPattern) { $names += "$PackageIdentifier.$Version" }
+    foreach ($n in $names) {
+        $dir = Join-Path $root $n
+        if (-not (Test-Path -LiteralPath $dir -PathType Container)) { continue }
+        try {
+            $item = Get-Item -LiteralPath $dir -Force
+            if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
+            $full = [IO.Path]::GetFullPath($item.FullName).TrimEnd('\')
+            if (-not $full.StartsWith($base, [StringComparison]::OrdinalIgnoreCase)) { continue }
+            $leaf = $full.Substring($base.Length)
+            if ($leaf.Contains('\') -or -not $leaf.Equals($n, [StringComparison]::OrdinalIgnoreCase)) { continue }
+            $inside = @(Get-ChildItem -LiteralPath $full -Recurse -Force -ErrorAction SilentlyContinue)
+            if ($inside.Count -gt 200 -or @($inside | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }).Count) { continue }
+            Remove-Item -LiteralPath $full -Recurse -Force
+            $removed += $full
+        } catch { Write-WdaLog "Stale download folder $dir not removed: $($_.Exception.Message)" 'WARN' }
+    }
+    return $removed
+}
+
+<# The version WinGet reports for a package ("Found <name> [<id>] Version <v>"), or ''. #>
+function Get-WdaOutputVersion {
+    param([string] $Output, [string] $PackageIdentifier)
+    if ($Output -and $Output -match ('\[' + [regex]::Escape($PackageIdentifier) + '\]\s+Version\s+([A-Za-z0-9][A-Za-z0-9._+-]{0,63})')) { return $Matches[1] }
+    return ''
+}
+
+<# WinGet's own words about a hash mismatch (the lines that mention the hash), at most 500 characters. #>
+function Get-WdaHashMessage {
+    param([string] $Output)
+    $lines = @(([string] $Output) -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '(?i)hash|sha256' })
+    $t = ($lines -join ' ').Trim()
+    if ($t.Length -gt 500) { $t = $t.Substring(0, 500) }
+    return $t
 }
 
 <#
@@ -838,6 +955,533 @@ function Start-WdaInstaller {
 }
 
 # ------------------------------------------------------------------------------------------------
+# Engine 1.6.0: package-aware verification. Every probe is a small read-only function, so the tests
+# replace each one; none of them changes anything on the computer, and none looks anything up on
+# PATH (the PATH of a running process is stale right after an installation).
+# ------------------------------------------------------------------------------------------------
+
+<#
+    The account per-user packages are verified for: the engine's own account, or, when this runs as
+    SYSTEM (for example -Mode Verify from a SYSTEM task), the user signed in at the console. Its
+    profile folder comes from the ProfileList (never the SYSTEM profile); its AppData folders from
+    its own "User Shell Folders" when its hive is loaded. Returns Name, Sid, ProfilePath,
+    LocalAppData, AppData, HiveLoaded and IsEngineAccount.
+#>
+<#
+    Which account to verify per-user packages for: the account the installing run recorded
+    (state.json engineUser) when it differs from the current one (-Mode Verify run by another
+    administrator, or as SYSTEM), else the current account. Returns @{ Name; Sid; IsEngineAccount;
+    Console } (Console: no user account here; the signed-in console user is looked up).
+#>
+function Select-WdaVerifyAccount {
+    param([string] $CurrentName, [string] $CurrentSid, $Recorded)
+    $rs = $(if ($Recorded -is [System.Collections.IDictionary]) { [string] $Recorded['sid'] } else { '' })
+    if ($rs -match $script:UserSid -and $rs -ne $CurrentSid) { return @{ Name = [string] $Recorded['name']; Sid = $rs; IsEngineAccount = $false; Console = $false } }
+    if ($CurrentSid -match $script:UserSid) { return @{ Name = $CurrentName; Sid = $CurrentSid; IsEngineAccount = $true; Console = $false } }
+    return @{ Name = ''; Sid = ''; IsEngineAccount = $false; Console = $true }
+}
+
+function Get-WdaDeploymentUser {
+    param($Recorded = $null)
+    $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $a = Select-WdaVerifyAccount $id.Name $id.User.Value $Recorded
+    $u = @{ Name = $a.Name; Sid = $a.Sid; ProfilePath = ''; LocalAppData = ''; AppData = ''; HiveLoaded = $false; IsEngineAccount = $a.IsEngineAccount }
+    if ($a.Console) {
+        $u.Name = ''; $u.Sid = ''; $u.IsEngineAccount = $false
+        try { $u.Name = [string] (Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop).UserName } catch { }
+        if ($u.Name) { try { $u.Sid = (New-Object Security.Principal.NTAccount($u.Name)).Translate([Security.Principal.SecurityIdentifier]).Value } catch { $u.Sid = '' } }
+        if ($u.Sid -notmatch $script:UserSid) { $u.Sid = ''; return $u }
+    }
+    try {
+        $p = [string] (Get-ItemProperty -LiteralPath "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$($u.Sid)" -Name ProfileImagePath -ErrorAction Stop).ProfileImagePath
+        if ($p -and [IO.Path]::IsPathRooted($p) -and $p -notmatch '(?i)\\system32\\config\\systemprofile') { $u.ProfilePath = $p.TrimEnd('\') }
+    } catch { }
+    $u.HiveLoaded = Test-Path -LiteralPath "Registry::HKEY_USERS\$($u.Sid)\Software"
+    if ($u.ProfilePath) {
+        $u.LocalAppData = Join-Path $u.ProfilePath 'AppData\Local'
+        $u.AppData = Join-Path $u.ProfilePath 'AppData\Roaming'
+        if ($u.HiveLoaded) {
+            try {
+                $k = Get-Item -LiteralPath "Registry::HKEY_USERS\$($u.Sid)\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders" -ErrorAction Stop
+                foreach ($pair in @(@('Local AppData', 'LocalAppData'), @('AppData', 'AppData'))) {
+                    $raw = [string] $k.GetValue($pair[0], '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                    $v = $(if ($raw -match '(?i)^%USERPROFILE%') { $u.ProfilePath + $raw.Substring(13) } else { $raw })
+                    if ($v -and $v -notmatch '%' -and [IO.Path]::IsPathRooted($v)) { $u[$pair[1]] = $v.TrimEnd('\') }
+                }
+            } catch { }
+        }
+    }
+    return $u
+}
+
+<# Machine roots of the verify block: the 64-bit Program Files even from a 32-bit PowerShell. #>
+function Get-WdaMachineRoots {
+    @{ ProgramFiles = $(if ($env:ProgramW6432) { $env:ProgramW6432 } else { $env:ProgramFiles }); 'ProgramFiles(x86)' = ${env:ProgramFiles(x86)}; ProgramData = $env:ProgramData }
+}
+
+<#
+    Uninstall records ("Apps & features") of one hive: Machine64 (HKLM, 64-bit view), Machine32
+    (HKLM\SOFTWARE\WOW6432Node) or User (HKEY_USERS\<sid>, only when that hive is loaded). Returns
+    @{ DisplayName; DisplayVersion; Publisher; KeyName } entries, or $null when the hive cannot be read.
+#>
+function Get-WdaUninstallEntries {
+    param([ValidateSet('Machine64', 'Machine32', 'User')] [string] $Hive, [string] $Sid = '')
+    $out = @()
+    $path = 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall'
+    $base = $null
+    try {
+        if ($Hive -eq 'User') {
+            if ($Sid -notmatch $script:UserSid) { return $null }
+            $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::Users, [Microsoft.Win32.RegistryView]::Default)
+            $path = "$Sid\$path"
+        } else {
+            $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, $(if ($Hive -eq 'Machine64') { [Microsoft.Win32.RegistryView]::Registry64 } else { [Microsoft.Win32.RegistryView]::Registry32 }))
+        }
+        $k = $base.OpenSubKey($path)
+        if (-not $k) { return , $out }
+        try {
+            foreach ($n in $k.GetSubKeyNames()) {
+                $s = $null
+                try { $s = $k.OpenSubKey($n) } catch { }
+                if (-not $s) { continue }
+                try {
+                    $dn = [string] $s.GetValue('DisplayName', '')
+                    if ($dn) { $out += @{ DisplayName = $dn; DisplayVersion = [string] $s.GetValue('DisplayVersion', ''); Publisher = [string] $s.GetValue('Publisher', ''); KeyName = $n } }
+                } finally { $s.Close() }
+            }
+        } finally { $k.Close() }
+    } catch { return $null } finally { if ($base) { $base.Close() } }
+    return , $out
+}
+
+<# AppX packages with exactly this name registered for the user, or $null when they cannot be queried. #>
+function Get-WdaAppxRegistered {
+    param([string] $Name, [hashtable] $User)
+    if ($Name -cnotmatch $script:AppxName) { return , @() }
+    try {
+        if ($User['IsEngineAccount']) { $found = @(Get-AppxPackage -Name $Name -ErrorAction Stop) }
+        elseif ($User['Sid']) { $found = @(Get-AppxPackage -Name $Name -User $User['Sid'] -ErrorAction Stop) }
+        else { return $null }
+        return , @($found | Where-Object { $_ -and $_.Name -eq $Name } | ForEach-Object { @{ Name = [string] $_.Name; Version = [string] $_.Version } })
+    } catch { return $null }
+}
+
+<# Provisioned (all-users) AppX packages with exactly this name, or $null when they cannot be queried. #>
+function Get-WdaAppxProvisioned {
+    param([string] $Name)
+    if ($Name -cnotmatch $script:AppxName) { return , @() }
+    try { return , @(Get-AppxProvisionedPackage -Online -ErrorAction Stop | Where-Object { $_.DisplayName -eq $Name } | ForEach-Object { @{ Name = [string] $_.DisplayName; Version = [string] $_.Version } }) } catch { return $null }
+}
+
+<# One file: @{ Path; Version } (version from its FileVersionInfo), or $null. Links are not evidence. #>
+function Get-WdaFileEvidence {
+    param([string] $Path)
+    try { $i = Get-Item -LiteralPath $Path -Force -ErrorAction Stop } catch { return $null }
+    if ($i.PSIsContainer -or ($i.Attributes -band [IO.FileAttributes]::ReparsePoint)) { return $null }
+    $ver = ''
+    try {
+        $vi = [Diagnostics.FileVersionInfo]::GetVersionInfo($i.FullName)
+        if ($vi.FileMajorPart -or $vi.FileMinorPart -or $vi.FileBuildPart -or $vi.FilePrivatePart) { $ver = '{0}.{1}.{2}.{3}' -f $vi.FileMajorPart, $vi.FileMinorPart, $vi.FileBuildPart, $vi.FilePrivatePart }
+        elseif ($vi.ProductVersion) { $ver = ([string] $vi.ProductVersion).Trim() }
+    } catch { }
+    @{ Path = $i.FullName; Version = $ver }
+}
+
+<# One registry value under HKLM\SOFTWARE in the 64- or 32-bit view: @{ Found; Value }, or $null when it cannot be read. #>
+function Get-WdaRegistryValue {
+    param([string] $Key, [string] $Name, [string] $View = '64')
+    if ($Key -cnotmatch $script:VerifyRegistryKey -or $Name -cnotmatch $script:VerifyRegistryName) { return $null }
+    $base = $null
+    try {
+        $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, $(if ($View -eq '32') { [Microsoft.Win32.RegistryView]::Registry32 } else { [Microsoft.Win32.RegistryView]::Registry64 }))
+        $k = $base.OpenSubKey($Key.Substring(5))
+        if (-not $k) { return @{ Found = $false; Value = $null } }
+        try {
+            $v = $k.GetValue($Name, $null)
+            if ($null -eq $v) { return @{ Found = $false; Value = $null } }
+            return @{ Found = $true; Value = $v }
+        } finally { $k.Close() }
+    } catch { return $null } finally { if ($base) { $base.Close() } }
+}
+
+<# Who and where to verify for: the engine context, the deployment user, the machine roots, a pending restart. #>
+function New-WdaVerifyContext {
+    param([hashtable] $State = $null)
+    $engine = Get-WdaContext
+    $user = $null
+    $recorded = $(if ($State -and $State['engineUser'] -is [System.Collections.IDictionary]) { $State['engineUser'] } else { $null })
+    try { $user = Get-WdaDeploymentUser -Recorded $recorded } catch { }
+    if ($user -isnot [hashtable]) { $user = @{ Name = ''; Sid = ''; ProfilePath = ''; LocalAppData = ''; AppData = ''; HiveLoaded = $false; IsEngineAccount = $false } }
+    # The installing run records its account, so a later -Mode Verify by another administrator (or
+    # as SYSTEM) still checks per-user packages in the deployment user's profile.
+    if ($State -and -not $recorded -and $user['IsEngineAccount'] -and [string] $user['Sid'] -match $script:UserSid) { $State.engineUser = @{ name = [string] $user['Name']; sid = [string] $user['Sid'] } }
+    $pending = $false
+    try { $pending = [bool] (Test-WdaRebootPending) } catch { }
+    @{ Engine = $engine; User = $user; Roots = (Get-WdaMachineRoots); CanRunAsUser = ((-not $engine.IsSystem) -and [bool] $user['IsEngineAccount']); RebootPending = $pending }
+}
+
+<# The verify block of a package, validated again (anything that does not match is dropped). #>
+function Get-WdaVerifySpec {
+    param($Raw)
+    $s = @{ uninstall = @(); appx = @(); files = @(); registry = @(); perUser = $false; after = 'none' }
+    if ($Raw -isnot [hashtable]) { return $s }
+    $s.uninstall = @(@($Raw['uninstall']) | Where-Object { $_ -is [string] -and $_.Trim().Length -ge 3 -and $_.Length -le 100 } | ForEach-Object { $_.Trim() } | Select-Object -First 10)
+    $s.appx = @(@($Raw['appx']) | Where-Object { $_ -is [string] -and $_ -cmatch $script:AppxName } | Select-Object -First 5)
+    $s.files = @(@($Raw['files']) | Where-Object { $_ -is [string] -and $_ -cmatch $script:VerifyFile -and $_ -notmatch '\\\.+(\\|$)' } | Select-Object -First 5)
+    foreach ($r in @($Raw['registry'])) {
+        if ($r -isnot [hashtable] -or [string] $r['key'] -cnotmatch $script:VerifyRegistryKey -or [string] $r['name'] -cnotmatch $script:VerifyRegistryName) { continue }
+        $eq = $(if ($r.ContainsKey('equals') -and $null -ne $r['equals']) { [string] $r['equals'] } else { $null })
+        if ($null -ne $eq -and $eq.Length -gt 40) { continue }
+        if ($s.registry.Count -lt 3) { $s.registry += , @{ key = [string] $r['key']; name = [string] $r['name']; equals = $eq; view = $(if ([string] $r['view'] -eq '32') { '32' } else { '64' }) } }
+    }
+    if ($Raw['perUser'] -is [bool]) { $s.perUser = $Raw['perUser'] }
+    if ([string] $Raw['after'] -in 'signIn', 'restart') { $s.after = [string] $Raw['after'] }
+    return $s
+}
+
+<# A verify path with its root resolved: machine roots, or the deployment user's AppData (never SYSTEM's). #>
+function Resolve-WdaVerifyPath {
+    param([string] $Spec, [hashtable] $Context)
+    if ($Spec -cnotmatch $script:VerifyFile) { return @{ Path = $null; Where = ''; User = $false } }
+    $root = $Matches[1]
+    $rest = $Spec.Substring($root.Length + 2)
+    $user = $root -in 'LocalAppData', 'AppData'
+    $where = $(if ($user) { "user:$($Context.User['Name'])" } else { 'machine' })
+    if (@($rest.Split('\') | Where-Object { $_ -match '^\.+$' }).Count) { return @{ Path = $null; Where = $where; User = $user } }
+    $base = $(if ($user) { [string] $Context.User[$root] } else { [string] $Context.Roots[$root] })
+    if (-not $base -or -not [IO.Path]::IsPathRooted($base)) { return @{ Path = $null; Where = $where; User = $user } }
+    @{ Path = $base.TrimEnd('\') + $rest; Where = $where; User = $user }
+}
+
+<#
+    Package-aware verification. Evidence, in this order: WinGet's own record (winget list --id
+    --exact --source; for a per-user package only when this engine runs as that user), uninstall
+    records by display-name prefix (never a substring anywhere) in the 64-bit and 32-bit machine
+    hives and the deployment user's hive, AppX packages by exact name (registered for the user, or
+    provisioned), files under resolved roots (with their file version) and exact registry values in
+    the requested view. A package with registry checks is verified only when every one of them
+    matches (so a 32-bit runtime is never taken for the 64-bit one, or the other way round).
+    Returns @{ Result = Verified | NotFound | UserUnavailable | Unknown; Evidence; Note; Version; Spec }.
+#>
+function Test-WdaVerification {
+    param([hashtable] $P, [hashtable] $Context, [string] $LogFile = '')
+    $spec = Get-WdaVerifySpec $(if ($P.ContainsKey('verify')) { $P['verify'] } else { $null })
+    $u = $Context.User
+    $userWhere = "user:$($u['Name'])"
+    $userReady = [bool] ($u['Sid'] -and $u['HiveLoaded'] -and $u['ProfilePath'])
+    $ev = New-Object System.Collections.ArrayList
+    $notes = New-Object System.Collections.ArrayList
+    $userMissing = $false; $unknown = $false; $regUnknown = $false
+    $add = { param($Kind, $Detail, $Where, $Version) if ($ev.Count -lt 12) { [void] $ev.Add(@{ kind = [string] $Kind; detail = [string] $Detail; where = [string] $Where; version = [string] $Version }) } }
+
+    # 1. WinGet's own record.
+    if ($spec.perUser -and -not $Context.CanRunAsUser) {
+        [void] $notes.Add("winget list was not run: the engine runs as $($Context.Engine.User), not as $(if ($u['Name']) { $u['Name'] } else { 'the user' }) this package installs for.")
+    } else {
+        $w = $null
+        try { $w = Test-WdaInstalled $P $LogFile } catch { [void] $notes.Add("winget list failed: $($_.Exception.Message)") }
+        if ($w -eq $true) { & $add 'winget' "winget list --id $($P.packageIdentifier) --exact --source $($P.source)" $(if ($spec.perUser) { $userWhere } else { 'machine' }) '' }
+        elseif ($null -eq $w) { $unknown = $true; [void] $notes.Add('winget list could not tell whether it is installed.') }
+    }
+    if ($spec.perUser -and -not $userReady) { $userMissing = $true; [void] $notes.Add("The profile or registry hive of $(if ($u['Name']) { $u['Name'] } else { 'the deployment user' }) is not available; its per-user evidence is checked again later.") }
+
+    # 2. Uninstall records, by display-name prefix.
+    if ($spec.uninstall.Count) {
+        $hives = @(@{ Hive = 'Machine64'; Where = 'machine'; Label = '64-bit' }, @{ Hive = 'Machine32'; Where = 'machine'; Label = '32-bit' })
+        if ($u['Sid'] -and $u['HiveLoaded']) { $hives += @{ Hive = 'User'; Where = $userWhere; Label = 'per-user' } }
+        foreach ($h in $hives) {
+            $entries = Get-WdaUninstallEntries $h.Hive ([string] $u['Sid'])
+            if ($null -eq $entries) { [void] $notes.Add("The $($h.Label) uninstall records could not be read."); continue }
+            foreach ($x in @($entries)) {
+                if ($x -isnot [hashtable]) { continue }
+                $dn = ([string] $x['DisplayName']).Trim()
+                if (-not $dn) { continue }
+                foreach ($prefix in $spec.uninstall) {
+                    if ($dn.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
+                        & $add 'uninstall' ("$dn$(if ($x['DisplayVersion']) { " $($x['DisplayVersion'])" }) ($($h.Label) uninstall record)") $h.Where ([string] $x['DisplayVersion'])
+                        break
+                    }
+                }
+            }
+        }
+    }
+
+    # 3. AppX: registered for the user, or provisioned for every new user.
+    foreach ($name in $spec.appx) {
+        $reg = Get-WdaAppxRegistered $name $u
+        $hit = @(@($reg) | Where-Object { $_ -is [hashtable] -and [string] $_['Name'] -eq $name } | Select-Object -First 1)
+        if ($hit.Count) { & $add 'appx' "$name $($hit[0]['Version']) (registered)" $userWhere ([string] $hit[0]['Version']); continue }
+        if ($null -eq $reg) { [void] $notes.Add("The AppX packages of the user could not be queried ($name)."); if ($spec.perUser) { $userMissing = $true } }
+        $prov = Get-WdaAppxProvisioned $name
+        $ph = @(@($prov) | Where-Object { $_ -is [hashtable] -and [string] $_['Name'] -eq $name } | Select-Object -First 1)
+        if ($ph.Count) { & $add 'appx' "$name $($ph[0]['Version']) (provisioned)" 'provisioned' ([string] $ph[0]['Version']) }
+    }
+
+    # 4. Files under resolved roots (exact paths, never a search).
+    foreach ($f in $spec.files) {
+        $r = Resolve-WdaVerifyPath $f $Context
+        if (-not $r.Path) {
+            if ($r.User) { $userMissing = $true; [void] $notes.Add("$f cannot be checked: the deployment user's profile folder is not known.") }
+            else { [void] $notes.Add("$f cannot be checked: its root folder is not known.") }
+            continue
+        }
+        $fe = Get-WdaFileEvidence $r.Path
+        if ($fe) { & $add 'file' ([string] $fe['Path']) $r.Where ([string] $fe['Version']) }
+    }
+
+    # 5. Registry values (every one must match).
+    $regOk = $true
+    foreach ($rs in $spec.registry) {
+        $rv = Get-WdaRegistryValue $rs.key $rs.name $rs.view
+        if ($rv -is [hashtable] -and $rv['Found'] -and ($null -eq $rs.equals -or ([string] $rv['Value']) -eq $rs.equals)) {
+            & $add 'registry' "$($rs.key)\$($rs.name) = $($rv['Value']) ($($rs.view)-bit view)" 'machine' ''
+            continue
+        }
+        $regOk = $false
+        if ($rv -isnot [hashtable]) { $regUnknown = $true; [void] $notes.Add("$($rs.key)\$($rs.name) ($($rs.view)-bit view) could not be read.") }
+        elseif (-not $rv['Found']) { [void] $notes.Add("$($rs.key)\$($rs.name) ($($rs.view)-bit view) is not present.") }
+        else { [void] $notes.Add("$($rs.key)\$($rs.name) ($($rs.view)-bit view) is $($rv['Value']), expected $($rs.equals).") }
+    }
+
+    $result = $(if ($spec.registry.Count) { $(if ($regOk) { 'Verified' } elseif ($regUnknown) { 'Unknown' } else { 'NotFound' }) }
+                elseif ($ev.Count) { 'Verified' } elseif ($userMissing) { 'UserUnavailable' } elseif ($unknown) { 'Unknown' } else { 'NotFound' })
+    $version = ''
+    foreach ($kind in 'file', 'uninstall', 'appx') { if (-not $version) { $version = [string] (@($ev | Where-Object { $_['kind'] -eq $kind -and $_['version'] } | Select-Object -First 1 | ForEach-Object { $_['version'] }) -join '') } }
+    if ($result -ne 'Verified' -and -not $notes.Count) { [void] $notes.Add('No installation evidence was found.') }
+    @{ Result = $result; Evidence = @($ev); Note = (@($notes) -join ' '); Version = $version; Spec = $spec }
+}
+
+<#
+    Why a verification without evidence may still succeed later: the catalog says the evidence
+    appears after a sign-in or a restart, the user's profile is not available yet, Windows reports
+    a pending restart, or WinGet could not tell. '' = nothing explains it (verification failed).
+#>
+function Get-WdaVerificationWait {
+    param([hashtable] $Spec, [hashtable] $V, [hashtable] $Context)
+    if ($Spec.after -in 'signIn', 'restart') { return $Spec.after }
+    if ($V.Result -eq 'UserUnavailable') { return 'user' }
+    if ($Context.RebootPending) { return 'restart' }
+    if ($V.Result -eq 'Unknown') { return 'check' }
+    return ''
+}
+
+function Set-WdaVerification {
+    param([hashtable] $Entry, [string] $Verification, [object[]] $Evidence = @(), [string] $Note = '', [string] $Wait = '', [string] $Version = '')
+    $Entry.verification = $Verification
+    $Entry.verificationEvidence = @(@($Evidence) | Where-Object { $_ -is [System.Collections.IDictionary] } | Select-Object -First 12 | ForEach-Object {
+        $d = [string] $_['detail']; if ($d.Length -gt 500) { $d = $d.Substring(0, 500) }
+        $w = [string] $_['where']; if ($w.Length -gt 200) { $w = $w.Substring(0, 200) }
+        @{ kind = [string] $_['kind']; detail = $d; where = $w; version = [string] $_['version'] } })
+    $Entry.verificationNote = $Note
+    $Entry.verificationWait = $(if ($Verification -eq 'Pending') { $Wait } else { '' })
+    $Entry.verifiedUtc = (Get-WdaNow).ToString('o')
+    if ($Version) { $Entry.installedVersion = $Version }
+    # detection keeps its earlier meaning for readers written before engine 1.6.0.
+    switch ($Verification) {
+        'Verified' { $Entry.detection = 'Installed' }
+        'Failed' { $Entry.detection = 'Unconfirmed' }
+        'Pending' { $Entry.detection = $(if ($Wait -eq 'restart') { 'InstalledRequiresRestart' } else { 'Unknown' }) }
+    }
+}
+
+function Get-WdaEvidenceText {
+    param([object[]] $Evidence)
+    (@(@($Evidence) | Where-Object { $_ } | Select-Object -First 3 | ForEach-Object { if ($_['kind'] -eq 'winget') { 'winget list' } else { "$($_['kind']) $($_['detail'])" } }) -join '; ')
+}
+
+function Get-WdaWaitText {
+    param([string] $Wait)
+    switch ($Wait) { 'signIn' { 'the next sign-in of the user' } 'restart' { 'a restart' } 'user' { "the user's profile (sign-in)" } default { 'a later check' } }
+}
+
+<#
+    The outcome of an operation, derived from its status and verification (never stored on its own):
+    InstalledVerified, InstallerSucceededVerificationPending, InstallerSucceededVerificationFailed,
+    InstallationFailed, PackageUnavailable, UnattendedUnsupported, Skipped, RestartOrSignInRequired,
+    ManualSetupRequired. Only InstalledVerified is a success.
+#>
+function Get-WdaOutcome {
+    param([hashtable] $Entry)
+    $op = [string] $Entry['operationId']
+    if ($op -like 'settings:*') { return '' }
+    $status = [string] $Entry['status']
+    $v = [string] $Entry['verification']
+    $additional = $op -like 'additional:*'
+    switch ($status) {
+        'SkippedByUser' { return 'Skipped' }
+        'Skipped' { return 'Skipped' }
+        'Unavailable' { return 'PackageUnavailable' }
+        'RequiresInteraction' { if ($additional -or ([string] $Entry['key']) -like 'catalog:*') { return 'ManualSetupRequired' }; return 'UnattendedUnsupported' }
+        'RequiresRestart' { return 'RestartOrSignInRequired' }
+    }
+    if ($additional) {
+        # Additional Software has no verify block: a reviewed installer's success is checked by a person.
+        if ($status -eq 'Succeeded') { return 'InstallerSucceededVerificationPending' }
+        if ($status -eq 'Failed') { return 'InstallationFailed' }
+        return 'Skipped'
+    }
+    if ($status -in 'Succeeded', 'AlreadyInstalled') {
+        switch ($v) {
+            'Verified' { return 'InstalledVerified' }
+            'Pending' { if ([string] $Entry['verificationWait'] -in 'signIn', 'restart') { return 'RestartOrSignInRequired' }; return 'InstallerSucceededVerificationPending' }
+            'Failed' { return 'InstallerSucceededVerificationFailed' }
+        }
+        $det = [string] $Entry['detection']
+        if ($det -eq 'Installed') { return 'InstalledVerified' }
+        if ($det -eq 'Unconfirmed') { return 'InstallerSucceededVerificationFailed' }
+        return 'InstallerSucceededVerificationPending'
+    }
+    # Failed, Pending (not attempted) or Installing: evidence found later (-Mode Verify) still says so.
+    if ($v -eq 'Verified') { return 'InstalledVerified' }
+    if ($status -eq 'Failed') { return 'InstallationFailed' }
+    return 'Skipped'
+}
+
+<#
+    Read-only inventory of the Visual C++ runtimes on this computer, for reports (and the health
+    audit, which may dot-source this script): every "Microsoft Visual C++ <year> ... Redistributable"
+    uninstall record (64- and 32-bit hives) and the 2015+ runtime keys (VC\Runtimes\X64 in the
+    64-bit view, X86 in the 32-bit view, ARM64). Returns @( @{ family; architecture; version;
+    displayName; source = uninstall|runtimeKey } ), sorted. Changes nothing.
+#>
+function Get-WdaRuntimeInventory {
+    $out = @()
+    $seen = @{}
+    foreach ($h in 'Machine64', 'Machine32') {
+        $entries = Get-WdaUninstallEntries $h
+        foreach ($x in @($entries)) {
+            if ($x -isnot [hashtable]) { continue }
+            $dn = ([string] $x['DisplayName']).Trim()
+            if ($dn -notmatch '^Microsoft Visual C\+\+ (\d{4}(?:-\d{4})?)\s.*Redistributable') { continue }
+            $family = $Matches[1]
+            $arch = $(if ($dn -match '(?i)\b(x64|amd64)\b') { 'x64' } elseif ($dn -match '(?i)\barm64\b') { 'arm64' } elseif ($dn -match '(?i)\bx86\b') { 'x86' } elseif ($family -eq '2005') { 'x86' } else { 'unknown' })
+            $ver = [string] $x['DisplayVersion']
+            if (-not $ver -and $dn -match '\s-\s(\d+(?:\.\d+){1,3})\s*$') { $ver = $Matches[1] }
+            $id = "$family|$arch|$ver|$dn".ToLowerInvariant()
+            if ($seen.ContainsKey($id)) { continue }
+            $seen[$id] = $true
+            $out += , @{ family = $family; architecture = $arch; version = $ver; displayName = $dn; source = 'uninstall' }
+        }
+    }
+    foreach ($r in @(@('X64', '64', 'x64'), @('X86', '32', 'x86'), @('ARM64', '64', 'arm64'))) {
+        $key = "HKLM\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\$($r[0])"
+        $inst = Get-WdaRegistryValue $key 'Installed' $r[1]
+        if ($inst -isnot [hashtable] -or -not $inst['Found'] -or [string] $inst['Value'] -ne '1') { continue }
+        $v = Get-WdaRegistryValue $key 'Version' $r[1]
+        $ver = $(if ($v -is [hashtable] -and $v['Found']) { ([string] $v['Value']).TrimStart('v') } else { '' })
+        $out += , @{ family = '2015+'; architecture = $r[2]; version = $ver; displayName = "Visual C++ 2015+ runtime ($($r[2])), $key ($($r[1])-bit view)"; source = 'runtimeKey' }
+    }
+    return @($out | Sort-Object { $_.family }, { $_.architecture }, { $_.source }, { $_.version })
+}
+
+<#
+    After the installer reported success (or WinGet reported the package as already installed):
+    evidence -> Verified (the reported status stays); no evidence but a reason it may still appear
+    (after a sign-in or restart, the user's profile not available, a pending restart, WinGet could
+    not tell) -> Pending, re-checked later (a package whose evidence needs a restart becomes
+    RequiresRestart, so the restart policy applies); otherwise -> Failed (status Succeeded, failure
+    class Verification: a follow-up, never a success). Returns @{ Status; Message }.
+#>
+function Complete-WdaVerification {
+    param([hashtable] $P, [hashtable] $Entry, [hashtable] $Context, [string] $LogFile, [string] $Reported)
+    $v = Test-WdaVerification $P $Context $LogFile
+    if ($v.Result -eq 'Verified') {
+        Set-WdaVerification $Entry 'Verified' $v.Evidence $v.Note '' $v.Version
+        return @{ Status = $Reported; Message = '' }
+    }
+    $wait = Get-WdaVerificationWait $v.Spec $v $Context
+    if ($wait) {
+        Set-WdaVerification $Entry 'Pending' $v.Evidence $v.Note $wait
+        $msg = "The installer reported success; its installation evidence is expected after $(Get-WdaWaitText $wait) and is checked again then."
+        if ($wait -eq 'restart' -and $v.Spec.after -eq 'restart') {
+            $Entry.restart = 'verify'; $Entry.restartBoot = ''; $Entry.verifyAfterRestart = $true; $Entry.installBoot = Get-WdbBootTime
+            return @{ Status = 'RequiresRestart'; Message = $msg }
+        }
+        return @{ Status = 'Succeeded'; Message = $msg }
+    }
+    Set-WdaVerification $Entry 'Failed' $v.Evidence $v.Note
+    $msg = $(if ($Reported -eq 'AlreadyInstalled') { "WinGet reported it as already installed, but no installation evidence was found; verify it manually. $($v.Note)" }
+             else { "WinGet reported success, but winget list and the package's installation evidence do not show it; verify it manually. $($v.Note)" })
+    return @{ Status = 'Succeeded'; Message = $msg.Trim() }
+}
+
+<#
+    Re-checks verifications without installing anything: by default the pending ones (the engine's
+    next start after a sign-in or restart), with -All every package of the queue (-Mode Verify).
+    -UpdateStatus (engine runs only) lets a package that waited for a restart become Succeeded once
+    verified; -Mode Verify never changes a status, only the verification fields, outcome and
+    detection. Returns the number of packages checked.
+#>
+function Test-WdaRestartedSinceInstall {
+    param([hashtable] $Entry)
+    # installBoot: the boot the installer that asked for a restart ran in (engine 1.6.0). A state
+    # from an earlier engine has none: then only "Windows reports no pending restart" counts.
+    $ib = [string] $Entry['installBoot']
+    if ($ib -and $ib -ne 'unknown') { $now = Get-WdbBootTime; return ($now -ne 'unknown' -and $now -ne $ib) }
+    return -not (Test-WdaRebootPending)
+}
+
+function Invoke-WdaReverification {
+    param([hashtable] $Config, [hashtable] $Paths, [hashtable] $State, [object[]] $Queue, [switch] $All, [switch] $UpdateStatus)
+    $ctx = New-WdaVerifyContext $State
+    $checked = 0
+    foreach ($p in @($Queue)) {
+        $e = $State.packages[$p.key]
+        if (-not $e -or [string] $e.status -in 'SkippedByUser', 'Installing' -or $p.interaction -eq 'required' -or (Test-WdaPackageSpec $p)) { continue }
+        if (-not $All -and [string] $e['verification'] -ne 'Pending') { continue }
+        $log = Join-Path $Paths.PackageLogs (($p.key -replace '[^A-Za-z0-9._+-]', '_') + '.log')
+        $v = Test-WdaVerification $p $ctx $log
+        $checked++
+        $claimed = ([string] $e.status -in 'Succeeded', 'AlreadyInstalled') -or ([string] $e.status -eq 'RequiresRestart' -and [string] $e['verification'] -eq 'Pending')
+        if ($v.Result -eq 'Verified' -and [string] $e.status -eq 'RequiresRestart' -and -not ($UpdateStatus -and (Test-WdaRestartedSinceInstall $e))) {
+            # Many installers write their evidence before the restart they asked for: evidence alone
+            # never clears a restart. It stays RequiresRestart (and Pending) until the computer has
+            # restarted since the installation; -Mode Verify never clears it.
+            Set-WdaVerification $e 'Pending' $v.Evidence 'Installation evidence found; the restart the installer asked for is still outstanding.' 'restart' $v.Version
+        } elseif ($v.Result -eq 'Verified') {
+            Set-WdaVerification $e 'Verified' $v.Evidence $v.Note '' $v.Version
+            if ($UpdateStatus) {
+                if ($e.status -eq 'RequiresRestart') { $e.restart = ''; $e.verifyAfterRestart = $false; Set-WdaPackage $e 'Succeeded' "Installed (verified after the restart: $(Get-WdaEvidenceText $v.Evidence))." }
+                if ($e.failureClass -in 'Verification', 'RebootRequired') { $e.failureClass = '' }
+            }
+        } elseif ($claimed) {
+            $wait = Get-WdaVerificationWait $v.Spec $v $ctx
+            if ($wait) { Set-WdaVerification $e 'Pending' $v.Evidence $v.Note $wait }
+            else {
+                Set-WdaVerification $e 'Failed' $v.Evidence $v.Note
+                if ($UpdateStatus -and $e.status -in 'Succeeded', 'AlreadyInstalled') { $e.failureClass = 'Verification' }
+            }
+        } else {
+            Set-WdaVerification $e 'NotApplicable' @() $v.Note
+        }
+        Write-WdaLog ("  verify {0}: {1} -> {2}{3}" -f $p.name, $v.Result, $e.verification, $(if (@($v.Evidence).Count) { " ($(Get-WdaEvidenceText $v.Evidence))" } else { " ($($v.Note))" }))
+    }
+    return $checked
+}
+
+<# -Mode Verify exit code: 20 = a verification failed or a package is not installed, 10 = pending, 0 = verified or not applicable. #>
+function Get-WdaVerifyExitCode {
+    param([hashtable] $State)
+    $code = 0
+    foreach ($e in @($State.packages.Values)) {
+        $o = Get-WdaOutcome $e
+        if ($o -in 'InstallerSucceededVerificationFailed', 'InstallationFailed') { return 20 }
+        if (($o -in 'InstallerSucceededVerificationPending', 'RestartOrSignInRequired') -or (([string] $e.status -in 'Pending', 'Installing') -and $o -ne 'InstalledVerified')) { $code = 10 }
+    }
+    return $code
+}
+
+<# Resolves winget.exe read-only (Invoke-WgbBootstrap -CheckOnly), for verification outside a run. #>
+function Resolve-WdaWinGetReadOnly {
+    param([hashtable] $Config)
+    if ($script:WinGet -or -not (Get-Command Invoke-WgbBootstrap -ErrorAction SilentlyContinue)) { return }
+    try {
+        $b = Invoke-WgbBootstrap -CheckOnly -MinimumVersion ([string] $Config.minimumWinGetVersion)
+        if ($b.Status -eq 'Healthy') { $script:WinGet = $b.Path }
+    } catch { Write-WdaLog "WinGet check for verification failed: $($_.Exception.Message)" 'WARN' }
+}
+
+# ------------------------------------------------------------------------------------------------
 # Coordination with the Windows Update engine
 # ------------------------------------------------------------------------------------------------
 
@@ -1017,7 +1661,8 @@ function Set-WdaPackage {
 # ------------------------------------------------------------------------------------------------
 
 # Never retried automatically; a technician may retry them after fixing the cause (-IncludePermanent).
-$script:PermanentClasses = @('Permanent', 'Integrity', 'Policy', 'User', 'Manual', 'Elevation')
+# Integrity and Policy: the names engines before 1.6.0 used for HashMismatch and Blocked (resumed states).
+$script:PermanentClasses = @('Permanent', 'Integrity', 'Policy', 'User', 'Manual', 'Elevation', 'HashMismatch', 'Blocked', 'Unavailable')
 
 <#
     Retry settings from applications-config.json "retry" (engine 1.2.0). Configurations written for
@@ -1104,8 +1749,11 @@ function Initialize-WdaEntries {
     foreach ($u in @($Config.unresolved)) {
         $k = Get-WdaKey ([string] $u.source) ([string] $u.packageIdentifier)
         if ($State.packages.ContainsKey($k)) { continue }
+        # An app removed from the automated catalog (a saved profile still names it): never installed
+        # and reported, but not a failure of this deployment (the website warned when it was built).
+        $removed = ($u -is [hashtable] -and $u.ContainsKey('removed') -and $u['removed'] -eq $true)
         $State.packages[$k] = @{ key = $k; name = [string] $u.displayName; packageIdentifier = [string] $u.packageIdentifier; source = [string] $u.source
-                                status = 'Unavailable'; attempts = 0; exitCode = ''; message = "Unresolved: $($u.reason)"; updatedUtc = (Get-WdaNow).ToString('o')
+                                status = $(if ($removed) { 'Skipped' } else { 'Unavailable' }); attempts = 0; exitCode = ''; message = $(if ($removed) { "Not installed: $($u.reason)" } else { "Unresolved: $($u.reason)" }); updatedUtc = (Get-WdaNow).ToString('o')
                                 restart = ''; restartBoot = ''; interrupted = $false }
     }
     foreach ($m in @($Config.manual)) {
@@ -1204,9 +1852,18 @@ function Complete-WdaPortable {
 
 function Get-WdaCounts {
     param([hashtable] $State)
-    $c = [ordered]@{ total = 0; succeeded = 0; alreadyInstalled = 0; skipped = 0; skippedByUser = 0; requiresInteraction = 0; requiresRestart = 0; failed = 0; unavailable = 0; pending = 0 }
+    # Engine 1.6.0: succeeded and alreadyInstalled count verified installations only; a reported
+    # success without evidence is counted as verificationPending or verificationFailed instead.
+    $c = [ordered]@{ total = 0; succeeded = 0; alreadyInstalled = 0; skipped = 0; skippedByUser = 0; requiresInteraction = 0; requiresRestart = 0; failed = 0; unavailable = 0; pending = 0; verificationPending = 0; verificationFailed = 0 }
     foreach ($e in @($State.packages.Values) + @($State.additional.Values)) {
         $c.total++
+        # Additional Software (a reviewed, hash- and signature-checked installer with no verify block)
+        # counts as before 1.6.0: its success is the installer's; its outcome says nothing was verified.
+        if ($e.status -in 'Succeeded', 'AlreadyInstalled' -and ([string] $e['operationId']) -notlike 'additional:*') {
+            $out = Get-WdaOutcome $e
+            if ($out -eq 'InstallerSucceededVerificationFailed') { $c.verificationFailed++; continue }
+            if ($out -ne 'InstalledVerified') { $c.verificationPending++; continue }
+        }
         switch ($e.status) {
             'Succeeded' { $c.succeeded++ } 'AlreadyInstalled' { $c.alreadyInstalled++ } 'Skipped' { $c.skipped++ } 'SkippedByUser' { $c.skippedByUser++ }
             'RequiresInteraction' { $c.requiresInteraction++ } 'RequiresRestart' { $c.requiresRestart++ }
@@ -1220,9 +1877,21 @@ function Get-WdaCounts {
 # Outcomes
 # ------------------------------------------------------------------------------------------------
 
+<#
+    Writes result.json, follow-up.txt and the marker and marks the state final. Engine 1.6.0: -Quiet
+    (a re-verification) writes no event; -KeepTask (-Mode Verify) never touches the task; otherwise
+    the task is removed, unless pending verifications are still to be re-checked at a later start.
+#>
 function Complete-Wda {
-    param([hashtable] $Config, [hashtable] $Paths, [hashtable] $State, [string] $Status, [string] $Reason, [object[]] $Queue = @())
+    param([hashtable] $Config, [hashtable] $Paths, [hashtable] $State, [string] $Status, [string] $Reason, [object[]] $Queue = @(), [switch] $Quiet, [switch] $KeepTask)
     $now = (Get-WdaNow).ToString('o')
+    # Engine 1.6.0: per-operation verification fields (packages and Additional Software).
+    $verificationOf = {
+        param($E)
+        [ordered]@{ verification = $(if ([string] $E['verification'] -in $script:VerificationStates) { [string] $E['verification'] } else { 'NotApplicable' })
+                    verificationEvidence = @(@($E['verificationEvidence']) | Where-Object { $_ -is [System.Collections.IDictionary] } | ForEach-Object { [ordered]@{ kind = [string] $_['kind']; detail = [string] $_['detail']; where = [string] $_['where']; version = [string] $_['version'] } })
+                    verificationNote = [string] $E['verificationNote']; outcome = (Get-WdaOutcome $E) }
+    }
     $order = @{}
     $i = 0
     foreach ($q in $Queue) { $order[$q.key] = $i++ }
@@ -1240,11 +1909,22 @@ function Complete-Wda {
         if ($_.ContainsKey('installerExitCode') -and $_.installerExitCode) { $o.installerExitCode = [string] $_.installerExitCode }
         $x = & $resilience $_
         foreach ($k in $x.Keys) { $o[$k] = $x[$k] }
+        $x = & $verificationOf $_
+        foreach ($k in $x.Keys) { $o[$k] = $x[$k] }
+        if ($_['installedVersion']) { $o.installedVersion = [string] $_['installedVersion'] }
+        # Engine 1.6.0: what WinGet said about a hash mismatch, and what was done about it.
+        if ($_['hashMismatch'] -is [System.Collections.IDictionary]) {
+            $h = $_['hashMismatch']
+            $o.hashMismatch = [ordered]@{ packageIdentifier = [string] $h['packageIdentifier']; source = [string] $h['source']; version = [string] $h['version']; message = [string] $h['message']; occurrences = [int] $h['occurrences']
+                                          sourceUpdated = [bool] $h['sourceUpdated']; staleDownloadsRemoved = @(@($h['staleDownloadsRemoved']) | Where-Object { $_ } | ForEach-Object { [string] $_ }); retried = [bool] $h['retried'] }
+        }
         $o
     })
     $additional = @($State.additional.Values | Sort-Object name | ForEach-Object {
         $o = [ordered]@{ id = $_.id; name = $_.name; status = $_.status; attempts = [int] $_.attempts; exitCode = $_.exitCode; message = $_.message; timestampUtc = $_.updatedUtc }
         $x = & $resilience $_
+        foreach ($k in $x.Keys) { $o[$k] = $x[$k] }
+        $x = & $verificationOf $_
         foreach ($k in $x.Keys) { $o[$k] = $x[$k] }
         $o
     })
@@ -1266,6 +1946,7 @@ function Complete-Wda {
         if ($e.status -in 'RequiresInteraction', 'RequiresRestart', 'Failed', 'Unavailable', 'Pending', 'Skipped') { $followUp += ('{0} [{1}]: {2}' -f $e.name, $e.status, $e.message) }
         elseif ($e.Contains('key') -and $State.packages.ContainsKey($e.key) -and $State.packages[$e.key].ContainsKey('shortcutFailed') -and $State.packages[$e.key].shortcutFailed) { $followUp += ('{0} [shortcut]: {1}' -f $e.name, $e.message) }
         elseif ($e.status -eq 'Succeeded' -and $e.detection -eq 'Unconfirmed') { $followUp += ('{0} [unconfirmed]: {1}' -f $e.name, $e.message) }
+        elseif ($e.status -in 'Succeeded', 'AlreadyInstalled' -and $e.Contains('key') -and $e.Contains('outcome') -and $e.outcome -ne 'InstalledVerified') { $followUp += ('{0} [{1}]: {2} {3}' -f $e.name, $e.outcome, $e.message, $e.verificationNote).Trim() }
         # Outstanding work survives the end of the run: the recovery tool reads it from here.
         if ($e.lifecycle -notin 'Succeeded', 'AlreadySatisfied', 'SkippedByUser') {
             $outstanding += [ordered]@{ operationId = $e.operationId; name = $e.name; status = $e.status; lifecycle = $e.lifecycle; failureClass = $e.failureClass; retryable = $e.retryable; message = $e.message }
@@ -1295,6 +1976,9 @@ function Complete-Wda {
         recoveries         = @($State.recoveries)
         stateRecoveredFrom = [string] $State.recoveredFrom
     }
+    # Engine 1.6.0: re-verification after the stage finished, and the Visual C++ runtimes found (read-only).
+    if ($State['reverify'] -is [System.Collections.IDictionary]) { $result.reverification = [ordered]@{ starts = [int] $State.reverify['starts']; sinceUtc = [string] $State.reverify['sinceUtc']; lastUtc = [string] $State.reverify['lastUtc'] } }
+    try { $result.runtimes = @(Get-WdaRuntimeInventory | ForEach-Object { [ordered]@{ family = [string] $_['family']; architecture = [string] $_['architecture']; version = [string] $_['version']; displayName = [string] $_['displayName']; source = [string] $_['source'] } }) } catch { $result.runtimes = @() }
     # Phase 6: only when the deployment restores settings or migrates applications, so earlier results keep their shape.
     if (@(Get-WdaSettingsPlan $Config).Count) {
         $result.settings = $settings
@@ -1305,6 +1989,9 @@ function Complete-Wda {
         try { Write-WdaJson $Paths.Restoration (Get-WdaRestoration $Config $State $Status $packages $settings) } catch { Write-WdaLog "Could not write restoration.json: $($_.Exception.Message)" 'WARN' }
     }
     $State.final = $Status
+    # Engine 1.6.0: pending verifications keep the task (bounded) so the next sign-in or restart re-checks them.
+    $reverify = (-not $KeepTask) -and (Test-WdaReverifyWanted $State)
+    if ($reverify -and $State['reverify'] -isnot [System.Collections.IDictionary]) { $State.reverify = @{ starts = 0; sinceUtc = $now; lastUtc = '' } }
     Save-WdaState $State $Paths
     $text = @("Windows Deployment Builder - application setup: $Status", $Reason, '') + @($followUp | ForEach-Object { "- $_" })
     try { [System.IO.File]::WriteAllText($Paths.FollowUp, ($text -join "`r`n") + "`r`n", (New-Object System.Text.UTF8Encoding($false))) } catch { }
@@ -1318,9 +2005,11 @@ function Complete-Wda {
     foreach ($e in $packages) { if ($e.status -notin 'Succeeded', 'AlreadyInstalled') { Write-WdaLog ("  {0,-19} {1} ({2}:{3}) {4}" -f $e.status.ToUpperInvariant(), $e.name, $e.source, $e.packageIdentifier, $e.message) } }
     $eventId = switch ($Status) { 'Succeeded' { 2100 } 'CompletedWithFailures' { 2101 } 'Failed' { 2102 } 'Offline' { 2103 } default { 2104 } }
     $entryType = switch ($Status) { 'Succeeded' { 'Information' } { $_ -in 'CompletedWithFollowUp', 'CompletedWithFailures' } { 'Warning' } default { 'Error' } }
-    Write-WdaEvent $eventId "Application setup finished: $Status. $Reason See $($Paths.Result)." $entryType
+    if (-not $Quiet) { Write-WdaEvent $eventId "Application setup finished: $Status. $Reason See $($Paths.Result)." $entryType }
     Set-WdaStatus $Status $Reason $State
-    Unregister-WdaTask $Config
+    if ($KeepTask) { }
+    elseif ($reverify) { Write-WdaLog "Verification of $(@($State.packages.Values | Where-Object { $_['verification'] -eq 'Pending' }).Count) package(s) is pending; the task stays registered to check again at the next sign-in or start." }
+    else { Unregister-WdaTask $Config }
     return "Finished:$Status"
 }
 
@@ -1411,7 +2100,41 @@ function Get-WdaFinalStatus {
     $settings = @($State.settings.Values)
     if (@($settings | Where-Object { $_.status -eq 'Failed' }).Count) { return 'CompletedWithFailures' }
     if (@($settings | Where-Object { $_.status -notin 'Succeeded', 'AlreadyInstalled', 'SkippedByUser' -or $_['restoreOutcome'] -eq 'ConfigurationPartiallyRestored' }).Count) { return 'CompletedWithFollowUp' }
+    # Engine 1.6.0: only verified installations are a success (pending or failed verification is a follow-up).
+    if ($c.verificationPending -gt 0 -or $c.verificationFailed -gt 0) { return 'CompletedWithFollowUp' }
     return 'Succeeded'
+}
+
+<#
+    Engine 1.6.0: true while a package's verification is pending and the re-verification budget
+    ($script:ReverifyMaxStarts starts within $script:ReverifyMaxDays days of the first completion) lasts.
+#>
+function Test-WdaReverifyWanted {
+    param([hashtable] $State)
+    if (-not @($State.packages.Values | Where-Object { $_['verification'] -eq 'Pending' -and $_.status -ne 'SkippedByUser' }).Count) { return $false }
+    $r = $State['reverify']
+    if ($r -isnot [System.Collections.IDictionary]) { return $true }
+    if ([int] $r['starts'] -ge $script:ReverifyMaxStarts) { return $false }
+    if ($r['sinceUtc'] -and ((Get-WdaNow) - (ConvertTo-WdaDate $r['sinceUtc'])).TotalDays -ge $script:ReverifyMaxDays) { return $false }
+    return $true
+}
+
+<# The reason text of a final status (shared by the run and by re-verification). #>
+function Get-WdaFinalReason {
+    param([hashtable] $Config, [hashtable] $State, [string] $Final)
+    $reason = switch ($Final) {
+        'Succeeded' { 'Every selected application is installed.' }
+        'CompletedWithFollowUp' { 'Some applications need manual follow-up (interaction, a restart or a manual check).' }
+        default { 'Some applications could not be installed.' }
+    }
+    if (@($State.packages.Values | Where-Object { $_['failureClass'] -eq 'Budget' }).Count) { $reason += " The runtime limit ($($Config.maxRuntimeHours) h) was reached." }
+    if ($State.halted) { $reason += " Stopped after $($State.halted) failed (continue after a failure is off)." }
+    $pending = @($State.packages.Values | Where-Object { $_['verification'] -eq 'Pending' }).Count
+    $failedV = @($State.packages.Values | Where-Object { $_.status -in 'Succeeded', 'AlreadyInstalled' -and $_['verification'] -eq 'Failed' }).Count
+    if ($pending) { $reason += " The installation of $pending application(s) is verified again after the next sign-in or restart (or with -Mode Verify)." }
+    if ($failedV) { $reason += " $failedV application(s) reported success but no installation evidence was found." }
+    if ($Final -ne 'Succeeded') { $reason += ' Failed and unfinished applications can be retried with the deployment recovery tool.' }
+    return $reason
 }
 
 # ------------------------------------------------------------------------------------------------
@@ -1677,6 +2400,8 @@ function Invoke-WdaQueue {
     param([hashtable] $Config, [hashtable] $Paths, [hashtable] $State, [object[]] $Queue)
     $policy = Get-WdaRetryPolicy $Config
     $blockedSources = @{}
+    # Engine 1.6.0: who and where installations are verified for (once per queue run).
+    $vctx = New-WdaVerifyContext $State
     $guardMax = 2 * ([int] $policy.maxAttempts + [int] $policy.maxNetworkDeferrals + 2) * [Math]::Max(1, @($Queue).Count) + 10
     for ($guard = 0; $guard -lt $guardMax; $guard++) {
         $pending = @($Queue | Where-Object { $State.packages[$_.key].status -eq 'Pending' })
@@ -1735,17 +2460,30 @@ function Invoke-WdaQueue {
             $acted = $true
             try {
                 $log = Join-Path $Paths.PackageLogs (($p.key -replace '[^A-Za-z0-9._+-]', '_') + '.log')
-                # Idempotency: an application that is already there is never installed again.
-                $installed = Test-WdaInstalled $p $log
-                if ($installed -eq $true) {
-                    if ($e.interrupted -or $e.attempts -gt 0) { Set-WdaPackage $e 'Succeeded' 'Installed (confirmed by winget list).' }
-                    else { Set-WdaPackage $e 'AlreadyInstalled' 'Already installed before this run; left unchanged.' }
-                    $e.detection = 'Installed'; $e.waitingFor = ''; $e.nextAttemptUtc = $null; $e.failureClass = ''; $e.retryable = $false
+                # Idempotency: an application that is already there is never installed again. Engine
+                # 1.6.0: "there" means installation evidence (Test-WdaVerification), never a guess.
+                $pre = Test-WdaVerification $p $vctx $log
+                if ($pre.Result -eq 'Verified') {
+                    $how = Get-WdaEvidenceText $pre.Evidence
+                    if ($e.interrupted -or $e.attempts -gt 0) { Set-WdaPackage $e 'Succeeded' $(if ($how -eq 'winget list') { 'Installed (confirmed by winget list).' } else { "Installed (confirmed by $how)." }) }
+                    else { Set-WdaPackage $e 'AlreadyInstalled' $(if ($how -eq 'winget list') { 'Already installed before this run; left unchanged.' } else { "Already installed before this run ($how); left unchanged." }) }
+                    Set-WdaVerification $e 'Verified' $pre.Evidence $pre.Note '' $pre.Version
+                    $e.waitingFor = ''; $e.nextAttemptUtc = $null; $e.failureClass = ''; $e.retryable = $false; $e.verifyAfterRestart = $false
                     Complete-WdaPortable $p $e
-                    Write-WdaLog "  $($e.status.ToLowerInvariant()) $($p.name)"
+                    Write-WdaLog "  $($e.status.ToLowerInvariant()) $($p.name) (evidence: $how)"
                     Save-WdaState $State $Paths
                     continue
                 }
+                if ($e.ContainsKey('verifyAfterRestart') -and $e.verifyAfterRestart -and $e.interrupted) {
+                    # Installed before the restart its evidence needed; still no evidence: not installed again.
+                    $e.verifyAfterRestart = $false; $e.interrupted = $false; $e.failureClass = 'Verification'; $e.retryable = $false
+                    Set-WdaPackage $e 'Succeeded' 'The installer reported success, but no installation evidence was found, also after the restart; verify it manually.'
+                    Set-WdaVerification $e 'Failed' $pre.Evidence $pre.Note
+                    Write-WdaLog "  $($p.name): no installation evidence after the restart. $($pre.Note)" 'WARN'
+                    Save-WdaState $State $Paths
+                    continue
+                }
+                Set-WdaVerification $e 'NotApplicable' @() ''
                 if ([int] $e.attempts -ge [int] $policy.maxAttempts) {
                     $e.retryable = ([string] $e.failureClass) -notin $script:PermanentClasses
                     Set-WdaPackage $e 'Failed' "Gave up after $($e.attempts) attempt(s). Last: $($e.message)"
@@ -1761,7 +2499,18 @@ function Invoke-WdaQueue {
                 Set-WdaStatus 'Installing' $p.name $State
                 $started = Get-WdaNow
                 # Engine 1.5.0: the retry after a hash mismatch starts from a freshly updated source.
-                if ($e.ContainsKey('refreshSource') -and $e.refreshSource) { $e.refreshSource = $false; Update-WdaSource $p.source $log }
+                # Engine 1.6.0: and without that package's stale download (nothing else is removed).
+                if ($e.ContainsKey('refreshSource') -and $e.refreshSource) {
+                    $e.refreshSource = $false
+                    Update-WdaSource $p.source $log
+                    $hm = $(if ($e['hashMismatch'] -is [System.Collections.IDictionary]) { $e.hashMismatch } else { @{} })
+                    $hm.sourceUpdated = $true
+                    $ver = $(if ($hm['version']) { [string] $hm['version'] } else { [string] $p.version })
+                    $hm.staleDownloadsRemoved = @(@(@($hm['staleDownloadsRemoved']) + @(Remove-WdaStaleDownload $p.packageIdentifier $ver)) | Where-Object { $_ } | Select-Object -First 4)
+                    $hm.retried = $true
+                    $e.hashMismatch = $hm
+                    Write-WdaLog "  $($p.name): WinGet source $($p.source) refreshed$(if (@($hm.staleDownloadsRemoved).Count) { "; removed $(@($hm.staleDownloadsRemoved) -join ', ')" }); trying once more (the hash is still checked)."
+                }
                 Write-WdaLog ("  installing {0} ({1}:{2}) attempt {3}/{4}" -f $p.name, $p.source, $p.packageIdentifier, $e.attempts, $policy.maxAttempts)
                 $r = Install-WdaPackage $p ([int] $Config.packageTimeoutMinutes) $log
                 if ($r.TimedOut -and $p.interaction -eq 'mayPrompt') {
@@ -1794,7 +2543,7 @@ function Invoke-WdaQueue {
                 $status = $m.Status
                 $counts = $true
                 $next = ''
-                if ($status -eq 'Failed' -and $m.Class -eq 'Network') {
+                if ($status -eq 'Failed' -and $m.Class -in 'Network', 'Download', 'Source') {
                     $diag = Get-WdaNetworkDiagnosis $p.source
                     if ($diag.Level -ne 'Online') {
                         $e.networkDeferrals = [int] $e.networkDeferrals + 1
@@ -1820,6 +2569,21 @@ function Invoke-WdaQueue {
                 # Engine 1.5.0: an installer hash mismatch usually means the publisher replaced the installer
                 # before the WinGet manifest was updated. One retry later, from a refreshed source; the hash
                 # is still verified (WinGet's option to skip the hash check is never used). A second mismatch is final.
+                if ($m.Code -eq '0x8A150011') {
+                    # Engine 1.6.0: the evidence of a hash mismatch: package, source, version and WinGet's exact words.
+                    $hm = $(if ($e['hashMismatch'] -is [System.Collections.IDictionary]) { $e.hashMismatch } else { @{ occurrences = 0; sourceUpdated = $false; staleDownloadsRemoved = @(); retried = $false } })
+                    $out = $(if ($r.ContainsKey('Output')) { [string] $r.Output } else { '' })
+                    $hm.packageIdentifier = $p.packageIdentifier; $hm.source = $p.source
+                    $v = Get-WdaOutputVersion $out $p.packageIdentifier
+                    $hm.version = $(if ($v) { $v } elseif ($p.version) { [string] $p.version } else { [string] $hm['version'] })
+                    $said = Get-WdaHashMessage $out
+                    if ($said) { $hm.message = $said } elseif (-not $hm['message']) { $hm.message = '' }
+                    $hm.occurrences = [int] $hm['occurrences'] + 1
+                    $hm.atUtc = (Get-WdaNow).ToString('o')
+                    $e.hashMismatch = $hm
+                    if ($said) { $m.Message = "$($m.Message) WinGet: $said" }
+                    if ($hm.version) { $m.Message = "$($m.Message) (package $($p.packageIdentifier) $($hm.version) from $($p.source))" }
+                }
                 if ($status -eq 'Failed' -and $m.Code -eq '0x8A150011' -and [int] $Config.integrityRetryMinutes -gt 0 -and -not ($e.ContainsKey('integrityRetried') -and $e.integrityRetried) -and [int] $e.attempts -lt [int] $policy.maxAttempts) {
                     $e.integrityRetried = $true; $e.refreshSource = $true
                     $e.nextAttemptUtc = (Get-WdaNow).AddMinutes([int] $Config.integrityRetryMinutes).ToString('o')
@@ -1827,19 +2591,21 @@ function Invoke-WdaQueue {
                     $next = "retry in $($Config.integrityRetryMinutes) min after refreshing the WinGet source"
                     $m.Message = "$($m.Message) The published hash often lags behind a new installer release: the source is refreshed and it is tried once more in $($Config.integrityRetryMinutes) min. The hash check still applies."
                 }
-                if ($status -eq 'Succeeded') {
-                    # Do not rely on the exit code alone.
-                    $check = Test-WdaInstalled $p $log
-                    $e.detection = $(if ($check -eq $true) { 'Installed' } elseif ($check -eq $false) { 'Unconfirmed' } else { 'Unknown' })
-                    if ($check -eq $false) { $m.Message = 'WinGet reported success, but winget list does not show the package; verify it manually.' }
+                if ($status -in 'Succeeded', 'AlreadyInstalled') {
+                    # Do not rely on the exit code alone (engine 1.6.0: package-aware evidence).
+                    $vr = Complete-WdaVerification $p $e $vctx $log $status
+                    $status = $vr.Status
+                    if ($vr.Message) { $m.Message = $vr.Message }
                 }
-                if ($status -eq 'AlreadyInstalled') { $e.detection = 'Installed' }
-                if ($status -eq 'RequiresRestart') {
+                if ($status -eq 'RequiresRestart' -and $m.Status -eq 'RequiresRestart') {
                     $e.restart = $(if ($m.Restart -eq 'later') { 'verify' } else { 'retry' })
+                    $e.installBoot = Get-WdbBootTime
+                    if ($m.Restart -eq 'later') { Set-WdaVerification $e 'Pending' @() 'The installer needs a restart to finish; it is verified after the restart.' 'restart' }
+                    else { Set-WdaVerification $e 'NotApplicable' @() '' }
                     $e.detection = $(if ($m.Restart -eq 'later') { 'InstalledRequiresRestart' } else { 'NotInstalled' })
                     if ($m.Restart -in 'now', 'initiated') { $restartNow = $m.Restart }
                 }
-                $e.failureClass = $(if ($status -in 'Succeeded', 'AlreadyInstalled', 'RequiresRestart') { '' } else { [string] $m.Class })
+                $e.failureClass = $(if ($status -in 'Succeeded', 'AlreadyInstalled') { $(if ($e.verification -eq 'Failed') { 'Verification' } else { '' }) } elseif ($status -eq 'RequiresRestart') { 'RebootRequired' } else { [string] $m.Class })
                 $e.retryable = ($status -in 'Failed', 'Pending') -and ([string] $m.Class) -notin $script:PermanentClasses
                 Set-WdaPackage $e $status $m.Message $m.Code
                 if ($status -in 'Succeeded', 'AlreadyInstalled') { Complete-WdaPortable $p $e }
@@ -2082,6 +2848,8 @@ function Invoke-WdaRun {
     param([hashtable] $Config, [hashtable] $Paths)
     $State = Read-WdaState $Paths
     if ($State.final) {
+        # Engine 1.6.0: a finished stage with pending verifications re-checks them at this start.
+        if (Test-WdaReverifyWanted $State) { return Invoke-WdaAutoReverify $Config $Paths $State }
         Write-WdaLog "Already finished with status $($State.final); nothing to do."
         Unregister-WdaTask $Config
         return 'AlreadyFinished'
@@ -2179,6 +2947,12 @@ function Invoke-WdaRun {
         Write-WdaLog 'Windows still reports a pending restart; installing anyway (already restarted once, or restarts are not allowed).' 'WARN'
     }
 
+    # Engine 1.6.0: verifications still pending from an earlier start are checked again first.
+    if (@($State.packages.Values | Where-Object { $_['verification'] -eq 'Pending' -and $_.status -ne 'Pending' }).Count) {
+        Write-WdaLog 'Checking pending verifications again.'
+        [void] (Invoke-WdaReverification $Config $Paths $State $queue -UpdateStatus)
+        Save-WdaState $State $Paths
+    }
     Set-WdaStatus 'Installing' '' $State
     $out = Invoke-WdaQueue $Config $Paths $State $queue
     if ($out) { return $out }
@@ -2202,15 +2976,87 @@ function Invoke-WdaRun {
     Save-WdaState $State $Paths
 
     $final = Get-WdaFinalStatus $State
-    $reason = switch ($final) {
-        'Succeeded' { 'Every selected application is installed.' }
-        'CompletedWithFollowUp' { 'Some applications need manual follow-up (interaction, a restart or a manual check).' }
-        default { 'Some applications could not be installed.' }
+    return Complete-Wda $Config $Paths $State $final (Get-WdaFinalReason $Config $State $final) $queue
+}
+
+<#
+    Engine 1.6.0: a start after the stage finished while verifications are pending (the task stays
+    registered for this: at sign-in and hourly, at most $script:ReverifyMaxStarts starts within
+    $script:ReverifyMaxDays days). Installs nothing: the pending packages are verified again,
+    result.json, the marker and follow-up.txt are rewritten, and the task is removed once nothing is
+    pending. When the budget runs out, what is still pending becomes a failed verification.
+#>
+function Invoke-WdaAutoReverify {
+    param([hashtable] $Config, [hashtable] $Paths, [hashtable] $State)
+    $queue = Get-WdaQueue $Config
+    $now = (Get-WdaNow).ToString('o')
+    if ($State['reverify'] -isnot [System.Collections.IDictionary]) { $State.reverify = @{ starts = 0; sinceUtc = $now; lastUtc = '' } }
+    $State.reverify.starts = [int] $State.reverify['starts'] + 1
+    $State.reverify.lastUtc = $now
+    Write-WdaLog "==== Application engine $($script:EngineVersion): re-verification $($State.reverify.starts) (stage finished: $($State.final)) ===="
+    Resolve-WdaWinGetReadOnly $Config
+    [void] (Invoke-WdaReverification $Config $Paths $State $queue -UpdateStatus)
+    if (-not (Test-WdaReverifyWanted $State)) {
+        foreach ($e in @($State.packages.Values | Where-Object { $_['verification'] -eq 'Pending' })) {
+            Set-WdaVerification $e 'Failed' @($e['verificationEvidence']) ("$($e['verificationNote']) No installation evidence after $($State.reverify.starts) re-check(s).".Trim())
+            if ($e.status -in 'Succeeded', 'AlreadyInstalled') { $e.failureClass = 'Verification' }
+        }
     }
-    if (@($State.packages.Values | Where-Object { $_['failureClass'] -eq 'Budget' }).Count) { $reason += " The runtime limit ($($Config.maxRuntimeHours) h) was reached." }
-    if ($State.halted) { $reason += " Stopped after $($State.halted) failed (continue after a failure is off)." }
-    if ($final -ne 'Succeeded') { $reason += ' Failed and unfinished applications can be retried with the deployment recovery tool.' }
-    return Complete-Wda $Config $Paths $State $final $reason $queue
+    $final = Get-WdaFinalStatus $State
+    [void] (Complete-Wda $Config $Paths $State $final (Get-WdaFinalReason $Config $State $final) $queue -Quiet)
+    return "Reverified:$final"
+}
+
+<#
+    Engine 1.6.0, -Mode Verify: re-verifies every package of the queue from evidence. Installs
+    nothing, registers no task, writes no event and changes no package status: only verification,
+    verificationEvidence, verificationNote, outcome and detection change in state.json, and
+    result.json (with the marker and follow-up.txt) is rewritten when the stage has finished.
+    Without a state (the engine has not run here) it only reports. Returns @{ ExitCode; Outcome;
+    Message; Packages }: 0 = everything verified or not applicable, 10 = a verification is pending
+    (or a package is not done yet), 20 = a verification failed or a package is not installed,
+    1 = the engine is running.
+#>
+function Invoke-WdaVerify {
+    param([hashtable] $Config)
+    $paths = Get-WdaPaths $Config
+    $queue = Get-WdaQueue $Config
+    $hasState = (Test-Path -LiteralPath $paths.State) -or (Test-Path -LiteralPath "$($paths.State).bak")
+    $mutex = $null
+    if ($hasState) {
+        $mutex = Enter-WdaMutex $Config.mutexName
+        if (-not $mutex) { return @{ ExitCode = 1; Outcome = 'Busy'; Message = 'The application engine is running; verify again when it has stopped.'; Packages = @() } }
+        if (Test-Path -LiteralPath $paths.Logs) { $script:LogFile = $paths.Log }
+        $script:StatusFile = $paths.Status
+    }
+    try {
+        if ($hasState) { $State = Read-WdaState $paths }
+        else { $State = New-WdaState; Initialize-WdaEntries $Config $State $queue }
+        Write-WdaLog "==== Application engine $($script:EngineVersion): verification (-Mode Verify, read-only) ===="
+        Resolve-WdaWinGetReadOnly $Config
+        [void] (Invoke-WdaReverification $Config $paths $State $queue -All)
+        $code = Get-WdaVerifyExitCode $State
+        $wrote = 'nothing (the engine has not run on this computer)'
+        if ($hasState) {
+            Save-WdaState $State $paths
+            $wrote = 'state.json'
+            if ($State.final) {
+                $final = Get-WdaFinalStatus $State
+                [void] (Complete-Wda $Config $paths $State $final (Get-WdaFinalReason $Config $State $final) $queue -Quiet -KeepTask)
+                $wrote = 'state.json and result.json'
+            }
+        }
+        $rows = @(foreach ($p in $queue) {
+            $e = $State.packages[$p.key]
+            if (-not $e) { continue }
+            [ordered]@{ key = $p.key; name = $p.name; status = [string] $e.status; verification = [string] $e['verification']; outcome = (Get-WdaOutcome $e)
+                        evidence = (Get-WdaEvidenceText $e['verificationEvidence']); note = [string] $e['verificationNote'] }
+        })
+        $outcome = switch ($code) { 0 { 'Verified' } 10 { 'Pending' } default { 'Failed' } }
+        return @{ ExitCode = $code; Outcome = $outcome; Message = "Verified $(@($rows).Count) package(s); wrote $wrote. Nothing was installed."; Packages = $rows }
+    } finally {
+        Exit-WdaMutex $mutex
+    }
 }
 
 function Invoke-WdaMain {
@@ -2253,13 +3099,16 @@ function Invoke-WdaPlan {
     if ($b.Status -eq 'Healthy') { $script:WinGet = $b.Path }
     $rows = @()
     $n = 0
+    $vctx = $null
     foreach ($p in $queue) {
         $n++
         $bad = Test-WdaPackageSpec $p
         $installed = ''; $available = ''
         if (-not $bad -and $script:WinGet) {
-            $i = Test-WdaInstalled $p
-            $installed = $(if ($i -eq $true) { 'yes' } elseif ($i -eq $false) { 'no' } else { '?' })
+            # Engine 1.6.0: the same installation evidence the run uses.
+            if (-not $vctx) { $vctx = New-WdaVerifyContext }
+            $i = (Test-WdaVerification $p $vctx).Result
+            $installed = $(if ($i -eq 'Verified') { 'yes' } elseif ($i -eq 'NotFound') { 'no' } else { '?' })
             $available = Test-WdaAvailable $p
         }
         $action = if ($bad) { "Unavailable: $bad" } elseif ($p.interaction -eq 'required') { 'RequiresInteraction (not attempted)' } elseif ($installed -eq 'yes') { 'AlreadyInstalled (skip)' } elseif ($available -eq 'NotFound') { 'Unavailable' } elseif ($p.method -eq 'portable') { "Install (portable) + shortcut $($p.portable.shortcut)" } else { 'Install' }
@@ -2288,6 +3137,11 @@ if ($MyInvocation.InvocationName -ne '.') {
         if ($r.Outcome -eq 'Accepted') { exit 0 }
         exit 1
     }
+    if ($engineMode -eq 'Verify') {
+        $v = Invoke-WdaVerify $cfg
+        [pscustomobject]@{ exitCode = $v.ExitCode; outcome = $v.Outcome; message = $v.Message; packages = @($v.Packages | ForEach-Object { [pscustomobject] $_ }) } | ConvertTo-Json -Depth 5
+        exit ([int] $v.ExitCode)
+    }
     if ($engineMode -eq 'Plan') {
         $plan = Invoke-WdaPlan $cfg
         "WinGet: $($plan.WinGet.Status) $($plan.WinGet.Version) $($plan.WinGet.Message)"
@@ -2296,6 +3150,7 @@ if ($MyInvocation.InvocationName -ne '.') {
     }
     $outcome = Invoke-WdaMain $cfg
     Write-Output $outcome
+    # Reverified:<status> (engine 1.6.0) is a re-verification start after the stage finished.
     if ($outcome -eq 'Error' -or $outcome -eq 'Finished:Failed') { exit 1 }
     exit 0
 }

@@ -128,7 +128,8 @@ test('Journey A: ordinary home user, defaults throughout, exact ZIP', async ({ p
   expect(zip.xml).toContain('VK7JG-NPHTM-C97JM-9MPGT-3V66T'); // Windows 11 Pro generic key
   expect(zip.manifest.windows.architectures).toEqual(['amd64']);
   expect(zip.manifest.updatePolicy.values).toEqual({ NoAutoUpdate: 0, AUOptions: 3 });
-  expect(ids(zip.config.packages)).toEqual(expect.arrayContaining(['Google.Chrome', 'VideoLAN.VLC', '7zip.7zip', 'CodeSector.TeraCopy', 'Bitwarden.Bitwarden', 'Microsoft.VCRedist.2015+.x64', 'Microsoft.VCRedist.2015+.x86']));
+  // Core Essentials (2026-11-26): Chrome, 7-Zip, VLC, Notepad++, Bitwarden, SumatraPDF, ImageGlass and the runtimes.
+  expect(ids(zip.config.packages)).toEqual(['Google.Chrome', '7zip.7zip', 'VideoLAN.VLC', 'Notepad++.Notepad++', 'Bitwarden.Bitwarden', 'SumatraPDF.SumatraPDF', 'DuongDieuPhap.ImageGlass', 'Microsoft.VCRedist.2015+.x64', 'Microsoft.VCRedist.2015+.x86']);
   expect(zip.config.manual).toEqual([]);
   expect(zip.xml).not.toMatch(/<File path="[^"]*(Wifi\.xml|Add-WifiProfile\.ps1)"/);
   // The acknowledgement is remembered for this session.
@@ -137,7 +138,7 @@ test('Journey A: ordinary home user, defaults throughout, exact ZIP', async ({ p
   await expect(wiz(page).locator('[data-ack="autologon-admin"]')).toBeChecked();
 });
 
-test('Journey B: gaming customer; untick Epic, add Discord, survive a trip to Advanced', async ({ page }) => {
+test('Journey B: gaming customer; untick Epic, add Playnite, survive a trip to Advanced', async ({ page }) => {
   await wiz(page).getByTestId('wiz-username').fill('Sam');
   await next(page);
   await wiz(page).locator('[data-type="gaming"] input').check();
@@ -146,26 +147,27 @@ test('Journey B: gaming customer; untick Epic, add Discord, survive a trip to Ad
   await next(page);
   await expect(tile(page, 'steam')).toBeChecked();
   await expect(tile(page, 'epic')).toBeChecked();
+  await expect(tile(page, 'discord')).toBeChecked(); // a Gamer default since 2026-11-26
   await wiz(page).locator('[data-app="epic"]').click();
   await expect(tile(page, 'epic')).not.toBeChecked();
-  await wiz(page).getByTestId('app-search').fill('discord');
-  await wiz(page).locator('[data-app="discord"]').click();
-  await expect(tile(page, 'discord')).toBeChecked();
+  await wiz(page).getByTestId('app-search').fill('playnite');
+  await wiz(page).locator('[data-app="playnite"]').click();
+  await expect(tile(page, 'playnite')).toBeChecked();
   await page.locator('.mode-switch [data-mode="advanced"]').click();
   await adv(page, 'section-applications');
   await expect(page.locator('#section-applications [data-app="epic"] input')).not.toBeChecked();
-  await expect(page.locator('#section-applications [data-app="discord"] input')).toBeChecked();
+  await expect(page.locator('#section-applications [data-app="playnite"] input')).toBeChecked();
   await page.locator('.mode-switch [data-mode="quick"]').click();
   await expect(wiz(page)).toHaveAttribute('data-step', 'apps');
   await wiz(page).getByTestId('app-search').fill('');
   await expect(tile(page, 'steam')).toBeChecked();
   await expect(tile(page, 'epic')).not.toBeChecked();
-  await expect(tile(page, 'discord')).toBeChecked();
+  await expect(tile(page, 'playnite')).toBeChecked();
   await expect(wiz(page).locator('[data-app="epic"]')).toHaveAttribute('title', /Unticked by you/);
   await next(page);
   await ackAll(page);
   const zip = await readPackage(page);
-  expect(ids(zip.config.packages)).toEqual(expect.arrayContaining(['Valve.Steam', 'Discord.Discord']));
+  expect(ids(zip.config.packages)).toEqual(expect.arrayContaining(['Valve.Steam', 'Discord.Discord', 'Playnite.Playnite', 'Blizzard.BattleNet']));
   expect(ids(zip.config.packages)).not.toContain('EpicGames.EpicGamesLauncher');
   expect(ids(zip.config.deselected)).toEqual(['EpicGames.EpicGamesLauncher']);
 });
@@ -182,7 +184,7 @@ test('Journey C: technician workstation; logo grid, detailed list, search, overr
   await expect(tile(page, 'wireshark')).toHaveAttribute('aria-label', 'Wireshark');
   await wiz(page).locator('[data-view-mode="detailed"]').click();
   await wiz(page).getByTestId('app-search').fill('Wireshark');
-  await expect(wiz(page).locator('[data-app="wireshark"]')).toContainText('Selected by Network Engineer / Technician');
+  await expect(wiz(page).locator('[data-app="wireshark"]')).toContainText('Selected by IT Technician / Network Engineer');
   await tile(page, 'wireshark').uncheck();
   await wiz(page).getByTestId('app-search').fill('nmap');
   await tile(page, 'nmap').check();
@@ -335,7 +337,7 @@ test('catalog: logos load from bundled files and fall back to an initials tile; 
   await expect(tile(page, 'git')).toBeChecked();
   await expect(wiz(page).locator('[data-app="git"]')).toHaveClass(/\bon\b/);
   await expect(wiz(page).getByTestId('app-selected')).toContainText('selected');
-  await expect(wiz(page).getByTestId('app-catalog-size')).toContainText('190');
+  await expect(wiz(page).getByTestId('app-catalog-size')).toContainText('289');
   await expect(wiz(page).getByTestId('app-manual-count')).toContainText('0');
 });
 
@@ -410,9 +412,9 @@ test('catalog filters: profile defaults include unticked defaults; selections su
   await wiz(page).locator('[data-filter="defaults"]').click();
   await expect(wiz(page).locator('[data-app="steam"]')).toBeVisible();
   await expect(wiz(page).locator('[data-app="epic"]')).toHaveAttribute('data-state', 'deselected');
-  await expect(wiz(page).locator('[data-app="discord"]')).toHaveCount(0);
+  await expect(wiz(page).locator('[data-app="playnite"]')).toHaveCount(0);
   await wiz(page).locator('[data-filter="recommended"]').click();
-  await expect(wiz(page).locator('[data-app="discord"]')).toHaveAttribute('data-state', 'recommended');
+  await expect(wiz(page).locator('[data-app="playnite"]')).toHaveAttribute('data-state', 'recommended');
   await wiz(page).locator('[data-filter="all"]').click();
   await wiz(page).getByTestId('app-category').selectOption('gaming');
   await expect(tile(page, 'steam')).toBeChecked();

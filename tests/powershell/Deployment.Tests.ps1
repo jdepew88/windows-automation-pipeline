@@ -1085,7 +1085,7 @@ Test-Scenario 'Phase 5 package: recovery tool shipped, embedded, staged; manifes
     Assert-Equal "$($script:Manifest.recovery.stateSchemas.deploymentState) $($script:Manifest.recovery.stateSchemas.applicationState) $($script:Manifest.recovery.stateSchemas.applicationResult)" '2 2 2' 'state schema versions'
     Assert-Equal $script:Manifest.recovery.outcomeCodes.PausedAwaitingNetwork 30 'outcome codes'
     $cfg = Read-WddJson (Join-Path $pkgRoot 'scripts\applications\applications-config.json')
-    Assert-Equal "$($cfg.engineVersion) $($cfg.maxAttemptsPerPackage) $($cfg.retry.automatic) $($cfg.retry.baseDelaySeconds)" '1.5.0 3 True 60' 'retry configuration'
+    Assert-Equal "$($cfg.engineVersion) $($cfg.maxAttemptsPerPackage) $($cfg.retry.automatic) $($cfg.retry.baseDelaySeconds)" '1.6.0 3 True 60' 'retry configuration'
     Initialize-Embedded | Out-Null
     Assert-True (Test-Path -LiteralPath (Join-Path $script:Paths.Package 'scripts\recovery\DeploymentRecovery.ps1')) 'staged on the computer'
     Assert-True $script:Shortcuts.ContainsKey('Deployment recovery') 'recovery shortcut'
@@ -1328,6 +1328,76 @@ Test-Scenario 'Engine 2.0.0: the recovery tool runner survives stderr from the r
     Assert-True (@($r.Text) -contains 'mode Status') 'standard output kept'
     Assert-True (@($r.Text) -match 'a warning on stderr').Count 'stderr kept as text'
     Assert-Equal $ErrorActionPreference $eap 'error preference restored'
+}
+
+Test-Scenario 'Recovery: Reverify applications (menu V) runs ApplicationEngine.ps1 -Mode Verify of the staged package as a separate, read-only process; exit 0/10/20 explained; nothing reopened' {
+    Reset-AppSim @{}
+    Initialize-Embedded | Out-Null
+    $engine = Join-Path $script:Paths.Package 'scripts\applications\ApplicationEngine.ps1'
+    $config = Join-Path $script:Paths.Package 'scripts\applications\applications-config.json'
+    $before = Read-WddJson $script:Paths.State
+    $script:VerifyCalls = @()
+    $script:VerifyExit = 0
+    function Invoke-WdrAppVerifyTool { param([string] $Engine, [string] $Config) $script:VerifyCalls += , @($Engine, $Config); @{ Text = @("simulated verify ($script:VerifyExit)"); Exit = $script:VerifyExit } }
+    $r = Invoke-WdrAction $script:Manifest $script:Paths 'ReverifyApplications'
+    Assert-Equal "$($script:VerifyCalls[0][0]) $($script:VerifyCalls[0][1])" "$engine $config" 'the staged engine and its verified configuration'
+    Assert-True ($r.Exit -eq 0 -and $r.Text -match 'simulated verify' -and $r.Text -match 'Every selected application was verified') $r.Text
+    $script:VerifyExit = 10
+    $r = Invoke-WdrAction $script:Manifest $script:Paths 'ReverifyApplications'
+    Assert-True ($r.Exit -eq 10 -and $r.Text -match 'still pending' -and $r.Text -match 'Nothing was installed') $r.Text
+    $script:VerifyExit = 20
+    $r = Invoke-WdrAction $script:Manifest $script:Paths 'ReverifyApplications'
+    Assert-True ($r.Exit -eq 20 -and $r.Text -match 'failed verification') $r.Text
+    # An engine that predates Verify mode (PowerShell refuses the parameter value): said, never shown as success.
+    $script:VerifyExit = 1
+    $r = Invoke-WdrAction $script:Manifest $script:Paths 'ReverifyApplications'
+    Assert-True ($r.Exit -eq 1 -and $r.Text -match 'could not re-verify' -and $r.Text -match 'Health audit') $r.Text
+    $after = Read-WddJson $script:Paths.State
+    Assert-Equal "$($after.status) $(@($after.recoveries).Count)" "$($before.status) $(@($before.recoveries).Count)" 'the deployment state is untouched (no recovery recorded, nothing reopened)'
+    Assert-Equal @($script:AppSim.Calls.Keys).Count 0 'nothing installed'
+    Remove-Item -LiteralPath $engine -Force
+    $r = Invoke-WdrAction $script:Manifest $script:Paths 'ReverifyApplications'
+    Assert-True ($r.Exit -eq 1 -and $r.Text -match 'not part of this deployment package') 'a package without the application stage says so'
+    Assert-Equal $script:VerifyCalls.Count 4 'no process started without the engine'
+    Remove-Item Function:\Invoke-WdrAppVerifyTool -ErrorAction SilentlyContinue
+}
+
+Test-Scenario 'Recovery: the Reverify runner passes -Mode Verify and the configuration, survives stderr and returns the exit code (Windows PowerShell 5.1 under Stop)' {
+    $probe = Join-Path $script:Paths.Root 'verify-probe.ps1'
+    New-Item -ItemType Directory -Path $script:Paths.Root -Force | Out-Null
+    [IO.File]::WriteAllText($probe, "param([string] `$Mode, [string] `$ConfigPath) [Console]::Error.WriteLine('a warning on stderr'); `"mode `$Mode config `$ConfigPath`"; exit 10")
+    $eap = $ErrorActionPreference
+    $ErrorActionPreference = 'Stop'
+    try { $r = Invoke-WdrAppVerifyTool -Engine $probe -Config 'C:\cfg.json' }
+    finally { $ErrorActionPreference = $eap }
+    Assert-Equal $r.Exit 10 'exit code returned, not a terminating error'
+    Assert-True (@($r.Text) -contains 'mode Verify config C:\cfg.json') "arguments passed: $(@($r.Text) -join ' | ')"
+    Assert-True (@($r.Text) -match 'a warning on stderr').Count 'stderr kept as text'
+}
+
+Test-Scenario 'Recovery: Check for application updates (menu C) is the read-only health audit with a WinGet listing; as SYSTEM it says WinGet cannot list them; read-only and installing actions are listed apart' {
+    Reset-AppSim @{}
+    Initialize-Embedded | Out-Null
+    [void] (Invoke-AppRuns)
+    $row = '{0,-22}{1,-20}{2,-10}{3,-10}{4}'
+    $script:M.wingetUpgrade = @{ available = $true; exitCode = 0; text = (@(($row -f 'Name', 'Id', 'Version', 'Available', 'Source'), ('-' * 70), ($row -f 'Git', 'Git.Git', '2.50.0', '2.51.0', 'winget'), '1 upgrade available.') -join "`n") }
+    $r = Invoke-WdrAction $script:Manifest $script:Paths 'CheckAppUpdates'
+    Assert-True ($r.Exit -eq 0 -and $r.Text -match 'Git \(Git\.Git\): 2\.50\.0 -> 2\.51\.0' -and $r.Text -match 'nothing is installed') $r.Text
+    Assert-Equal @($script:AppSim.Calls.Keys | Where-Object { $script:AppSim.Calls[$_] -gt 1 }).Count 0 'nothing installed again'
+    $h = Read-WddJson (Join-Path $script:Paths.Root 'reports\health\deployment-health.json')
+    Assert-Equal "$($h.trigger) $($h.appUpdates.status)" 'Recovery ok' 'the audit report records the listing'
+    $script:SimIdentity = @{ Name = 'NT AUTHORITY\SYSTEM'; IsSystem = $true; IsAdmin = $true }
+    $calls = $script:M.WinGetCalls
+    $r = Invoke-WdrAction $script:Manifest $script:Paths 'CheckAppUpdates'
+    Assert-True ($r.Exit -eq 1 -and $r.Text -match 'notAsSystem' -and $script:M.WinGetCalls -eq $calls) $r.Text
+    # The menu: read-only actions first, installing ones under their own heading.
+    $menu = (Get-Command Show-WdrMenu).Definition
+    $ro = $menu.IndexOf('Read-only (installs and changes nothing)'); $inst = $menu.IndexOf('Installs or changes this computer')
+    Assert-True ($ro -ge 0 -and $inst -gt $ro) 'two headings, read-only first'
+    $block = $menu.Substring($ro, $inst - $ro)
+    Assert-True ($block -match '\bV\s+Reverify applications' -and $block -match '\bC\s+Check for application updates') 'V and C are read-only'
+    Assert-True ($block -notmatch 'Retry') 'no retry among the read-only actions'
+    Assert-True ($menu.Substring($inst) -match '2\s+Retry failed operations' -and $menu.Substring($inst) -match '4\s+Retry one application') 'the installing actions'
 }
 
 Test-Scenario 'Engine 2.0.0: the deployment report carries the engine version, readiness, passes, categories, engine exceptions, drivers and the final check' {

@@ -14,7 +14,8 @@
     3. Copies the engine, configuration and package list to <dataRoot>\Applications (plus any
        supplied "offline" and "installers" folders) and archives a previous run.
     4. Registers the task <taskPath><taskName> for the current user: runs only while that user is
-       signed in, with highest privileges, at sign-in and hourly. No password is stored.
+       signed in, with highest privileges, at sign-in and hourly. No password is stored. The engine
+       removes it when it has finished (engine 1.6.0: once no installation verification is pending).
     5. Starts it and waits for the engine to check in.
 
 .PARAMETER Uninstall
@@ -136,7 +137,7 @@ $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoi
     -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 5)
 Register-ScheduledTask -TaskName $taskName -TaskPath $taskPath -Action $action -Trigger @($atLogon, $hourly) `
     -Principal $taskPrincipal -Settings $settings -Force `
-    -Description 'Windows Deployment Builder: installs the selected WinGet applications after Windows Update, then removes itself.' | Out-Null
+    -Description 'Windows Deployment Builder: installs the selected WinGet applications after Windows Update and verifies them, then removes itself.' | Out-Null
 Write-Step "Registered scheduled task $taskPath$taskName for $user."
 
 if ($NoStart) { Write-Step 'Not started (-NoStart). It runs at the next sign-in.'; exit 0 }

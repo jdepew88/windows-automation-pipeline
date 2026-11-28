@@ -21,8 +21,8 @@ function asSchema9(optionalUpdates: 'install' | 'skip'): string {
 }
 
 describe('schema 10: Install preview updates', () => {
-  it('is schema 10; the owner default installs previews; the setting is an Advanced checkbox under Windows Update', () => {
-    expect(SCHEMA_VERSION).toBe(10);
+  it('previews arrived with schema 10; the owner default installs previews; the setting is an Advanced checkbox under Windows Update', () => {
+    expect(SCHEMA_VERSION).toBeGreaterThanOrEqual(10);
     expect(ownerDefaults().windowsUpdate.previewUpdates).toBe(true);
     const def = SETTINGS_BY_PATH.get('windowsUpdate.previewUpdates')!;
     expect(def).toMatchObject({ section: 'windowsUpdate', label: 'Install preview updates', control: 'checkbox', advanced: true });
@@ -65,6 +65,18 @@ describe('schema 10: Install preview updates', () => {
   it('a schema 9 profile that skipped optional updates is told that previews stay off', () => {
     const r = importProfile(asSchema9('skip'));
     expect(r.warnings.join(' ')).toMatch(/Preview updates .* stay off/);
+  });
+
+  it('a schema 10 profile (production 2.1.0) migrates to schema 11: its preview choice is kept and it gets profile revision 1', () => {
+    const j = JSON.parse(exportProfile(ownerDefaults())) as Record<string, unknown> & { windowsUpdate: Record<string, unknown>; applications: { selection: Record<string, unknown> } };
+    j.schemaVersion = 10;
+    j.windowsUpdate.previewUpdates = false;
+    delete j.applications.selection.profileRevision;
+    const r = importProfile(JSON.stringify(j));
+    expect(r.errors).toEqual([]);
+    expect(r.profile!.schemaVersion).toBe(SCHEMA_VERSION);
+    expect(r.profile!.windowsUpdate.previewUpdates).toBe(false);
+    expect(r.profile!.applications.selection.profileRevision).toBe(1);
   });
 
   it('export and import keep the choice', () => {

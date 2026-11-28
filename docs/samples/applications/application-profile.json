@@ -18,13 +18,6 @@
           "scope": ""
         },
         {
-          "packageIdentifier": "VideoLAN.VLC",
-          "source": "winget",
-          "displayName": "VLC media player",
-          "version": "",
-          "scope": ""
-        },
-        {
           "packageIdentifier": "7zip.7zip",
           "source": "winget",
           "displayName": "7-Zip",
@@ -32,9 +25,16 @@
           "scope": ""
         },
         {
-          "packageIdentifier": "CodeSector.TeraCopy",
+          "packageIdentifier": "VideoLAN.VLC",
           "source": "winget",
-          "displayName": "TeraCopy",
+          "displayName": "VLC media player",
+          "version": "",
+          "scope": ""
+        },
+        {
+          "packageIdentifier": "Notepad++.Notepad++",
+          "source": "winget",
+          "displayName": "Notepad++",
           "version": "",
           "scope": ""
         },
@@ -42,6 +42,20 @@
           "packageIdentifier": "Bitwarden.Bitwarden",
           "source": "winget",
           "displayName": "Bitwarden",
+          "version": "",
+          "scope": ""
+        },
+        {
+          "packageIdentifier": "SumatraPDF.SumatraPDF",
+          "source": "winget",
+          "displayName": "SumatraPDF",
+          "version": "",
+          "scope": ""
+        },
+        {
+          "packageIdentifier": "DuongDieuPhap.ImageGlass",
+          "source": "winget",
+          "displayName": "ImageGlass",
           "version": "",
           "scope": ""
         },
@@ -81,9 +95,9 @@
           "scope": ""
         },
         {
-          "packageIdentifier": "9MSPC6MP8FM4",
+          "packageIdentifier": "9NKSQGP7F2NH",
           "source": "msstore",
-          "displayName": "Microsoft Whiteboard",
+          "displayName": "WhatsApp",
           "version": "",
           "scope": ""
         }

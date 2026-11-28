@@ -36,7 +36,7 @@ const withApps = () =>
   profile((p) => {
     p.applications.selection.added.push(
       { packageIdentifier: 'Git.Git', source: 'winget', displayName: 'Git', version: '', scope: '' },
-      { packageIdentifier: '9MSPC6MP8FM4', source: 'msstore', displayName: 'Whiteboard', version: '', scope: '' },
+      { packageIdentifier: '9NKSQGP7F2NH', source: 'msstore', displayName: 'WhatsApp', version: '', scope: '' },
     );
   });
 
@@ -92,7 +92,7 @@ describe.skipIf(!onWindows)('PowerShell (Windows only)', () => {
       expect(out).toMatch(/\b\d+ passed, 0 failed/);
       const all = readdirSync(dir);
       const results = all.filter((f) => !f.startsWith('restoration-'));
-      expect(results.sort()).toEqual(['bootstrap-failed.json', 'failures.json', 'followup.json', 'offline.json', 'phase5-backup.json', 'phase5-example-after.json', 'phase5-example-before.json', 'phase5-exhausted.json', 'phase5-recovered.json', 'phase6-restored.json', 'succeeded.json']);
+      expect(results.sort()).toEqual(['bootstrap-failed.json', 'failures.json', 'followup.json', 'offline.json', 'phase5-backup.json', 'phase5-example-after.json', 'phase5-example-before.json', 'phase5-exhausted.json', 'phase5-recovered.json', 'phase6-restored.json', 'succeeded.json', 'verification.json']);
       // Phase 6: restoration.json written by the engine matches the published schema.
       expect(all.filter((f) => f.startsWith('restoration-'))).toEqual(['restoration-phase6.json']);
       const restoration = RestorationResultSchema.safeParse(JSON.parse(stripBom(readFileSync(join(dir, 'restoration-phase6.json'), 'utf8'))));
@@ -278,7 +278,7 @@ describe.skipIf(!onWindows)('PowerShell (Windows only)', () => {
     const cases = [
       { packageIdentifier: 'Git.Git', source: 'winget', version: '', scope: '' },
       { packageIdentifier: 'Notepad++.Notepad++', source: 'winget', version: '8.6.9', scope: 'machine' },
-      { packageIdentifier: '9MSPC6MP8FM4', source: 'msstore', version: '', scope: 'user' },
+      { packageIdentifier: '9NKSQGP7F2NH', source: 'msstore', version: '', scope: 'user' },
     ];
     const cmd = cases
       .flatMap((c) => ['install', 'list', 'show'].map((verb) => `(Get-WdaArguments '${verb}' @{ packageIdentifier = '${c.packageIdentifier}'; source = '${c.source}'; version = '${c.version}'; scope = '${c.scope}' }) -join ' '`))

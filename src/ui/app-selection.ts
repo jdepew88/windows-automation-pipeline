@@ -1,5 +1,5 @@
 import type { AppProfile, ApplicationsSelection, Devices, PackageRef } from '../engine/schema/applications';
-import { BUILTIN_PROFILES, UNIVERSAL_PROFILES, isSelectableProfile } from '../engine/applications/builtin';
+import { BUILTIN_PROFILES, UNIVERSAL_PROFILES, builtinProfiles, isSelectableProfile } from '../engine/applications/builtin';
 import {
   CATALOG,
   CATALOG_CATEGORIES,
@@ -16,9 +16,11 @@ import {
   type InstallMethod,
 } from '../engine/applications/catalog';
 import { MSSTORE_ID, VERSION, WINGET_ID, normalizeId, packageKey } from '../engine/applications/ids';
-import { ADDED, REQUIRED, allProfiles, effectiveDevices, installable, resolveSelection, type PlannedPackage, type SelectionResult } from '../engine/applications/selection';
+import { ADDED, REQUIRED, allProfiles, effectiveDevices, installable, resolveSelection, selectionRevision, type PlannedPackage, type SelectionResult } from '../engine/applications/selection';
 import {
   addPackage,
+  adoptCurrentProfiles,
+  adoptProfileDefaults,
   deleteProfile,
   describeProfile,
   duplicateProfile,
@@ -34,6 +36,8 @@ import {
   saveAsNewProfile,
   toggleProfile,
   updateProfileFromSelection,
+  profileUsesEarlierDefaults,
+  usesEarlierProfiles,
 } from '../engine/applications/profiles';
 import { exportWinGetJson } from '../engine/applications/winget-json';
 import { planPreview, wingetArguments } from '../engine/applications';
@@ -51,15 +55,23 @@ import { profileLibrary } from './library';
  * never edited.
  */
 
-type Filter = 'relevant' | 'selected' | 'defaults' | 'recommended' | 'deselected' | 'all' | 'manual' | 'excluded';
+type Filter = 'relevant' | 'all' | 'selected' | 'recommended' | 'available' | 'manual' | 'deselected' | 'defaults' | 'excluded';
+/**
+ * What the list shows. The two scopes come first and look like tabs: the apps of the ticked profiles
+ * (a short, useful default) and the whole shared catalog, one click away in every mode. The status
+ * filters narrow the whole catalog.
+ */
+const SCOPES: [Filter, string][] = [
+  ['relevant', 'Apps for the ticked profiles'],
+  ['all', 'All applications'],
+];
 const FILTERS: [Filter, string][] = [
-  ['relevant', 'Suggested'],
   ['selected', 'Selected'],
-  ['defaults', 'Profile defaults'],
   ['recommended', 'Recommended'],
+  ['available', 'Available'],
+  ['manual', 'Manual installation'],
   ['deselected', 'Unticked by you'],
-  ['all', 'All apps'],
-  ['manual', 'Manual follow-up'],
+  ['defaults', 'Profile defaults'],
   ['excluded', 'Not offered'],
 ];
 
@@ -139,7 +151,12 @@ export interface EditorOptions {
 
 export const applicationsEditor: CustomRenderer = (def, store) => createApplicationsEditor(def, store, {});
 
-export function createApplicationsEditor(def: Parameters<CustomRenderer>[0], store: Parameters<CustomRenderer>[1], opts: EditorOptions): ReturnType<CustomRenderer> {
+export interface ApplicationsEditor extends ReturnType<CustomRenderer> {
+  /** Shows the whole catalog (the "Browse all applications" shortcuts). */
+  showAll(): void;
+}
+
+export function createApplicationsEditor(def: Parameters<CustomRenderer>[0], store: Parameters<CustomRenderer>[1], opts: EditorOptions): ApplicationsEditor {
   const show = { profiles: opts.profiles ?? true, devices: opts.devices ?? true, plan: opts.plan ?? true, troubleshooting: opts.troubleshooting ?? true };
   // Local view state (never stored in the profile).
   let query = '';
@@ -159,6 +176,26 @@ export function createApplicationsEditor(def: Parameters<CustomRenderer>[0], sto
     );
   };
   if (profileLibrary.warnings.length) say('error', 'Saved profiles in this browser', profileLibrary.warnings);
+
+  // An older deployment keeps the earlier built-in defaults until the technician adopts the new ones.
+  const legacyBox = h('div', { class: 'callout legacy-profiles', 'data-testid': 'app-legacy-profiles', hidden: true });
+  function renderLegacy(sel: ApplicationsSelection): void {
+    const legacy = usesEarlierProfiles(sel);
+    legacyBox.hidden = !legacy;
+    if (!legacy) return clear(legacyBox);
+    patch(legacyBox, (into) =>
+      into.append(
+        icon('info'),
+        h(
+          'div',
+          { class: 'notice-body' },
+          h('strong', {}, 'This deployment uses the earlier profile defaults.'),
+          h('p', { class: 'desc' }, 'It was created before the application profiles were rebuilt, so its ticked profiles still select exactly the applications they did then. The new defaults (for example Gamer with every major launcher, Student / Office and Remote Support) apply only when you adopt them; your own ticks and unticks are kept.'),
+          h('button', { type: 'button', class: 'btn sm', 'data-action': 'adopt-profile-defaults', onclick: () => confirm('Use the new profile defaults for this deployment? The ticked profiles, devices and your individual changes stay; the profiles may select different applications.') && mutate(adoptCurrentProfiles) }, icon('reset'), 'Use the new profile defaults'),
+        ),
+      ),
+    );
+  }
 
   // Toolbar -------------------------------------------------------------------------------------
   const stats = h('div', { class: 'app-stats', 'data-testid': 'app-stats', 'aria-live': 'polite', 'aria-atomic': 'true' });
@@ -239,6 +276,7 @@ export function createApplicationsEditor(def: Parameters<CustomRenderer>[0], sto
     const defaults = p.packages.length;
     const optional = p.optional?.length ?? 0;
     const universal = UNIVERSAL_PROFILES.includes(p.id);
+    const earlier = profileUsesEarlierDefaults(p);
     const defaultKeys = new Set(p.packages.map(packageKey));
     const overridden = sel.removed.some((k) => defaultKeys.has(k)) || sel.added.some((a) => (p.optional ?? []).some((o) => packageKey(o) === packageKey(a)));
     const parents = p.inherits.map((i) => profileName(sel, i));
@@ -259,10 +297,17 @@ export function createApplicationsEditor(def: Parameters<CustomRenderer>[0], sto
         h('input', { type: 'checkbox', id, name: `applications.profile.${p.id}`, checked, onchange: (e: Event) => mutate((s) => toggleProfile(s, p.id, (e.target as HTMLInputElement).checked)) }),
       ),
       universal ? h('div', { class: 'badges' }, badge('Universal: every new deployment', 'ok')) : null,
+      earlier ? h('div', { class: 'badges' }, badge('Earlier profile defaults', 'warn', 'Saved before the built-in profiles were rebuilt: its parent profiles still select the applications they did then.')) : null,
       p.description ? h('p', { class: 'choice-desc profile-desc' }, p.description) : null,
       h(
         'div',
         { class: 'card-actions' },
+        earlier
+          ? link('Use the new defaults', 'app-adopt-profile', () => {
+              if (!confirm(`Use the new built-in defaults for the profiles "${p.name}" builds on? Its own apps and exclusions stay.`)) return;
+              mutate((s) => adoptProfileDefaults(s, p.id));
+            })
+          : null,
         p.builtin && overridden && checked ? link('Restore defaults', 'app-restore-profile', () => mutate((s) => restoreProfileDefaults(s, p.id)), { title: `Ticks ${p.name}'s defaults again and unticks its recommendations` }) : null,
         !p.builtin
           ? link('Update from selection', 'app-update-profile', () => {
@@ -353,7 +398,7 @@ export function createApplicationsEditor(def: Parameters<CustomRenderer>[0], sto
   const search = h('input', {
     type: 'search',
     id: searchId,
-    placeholder: 'Search by name, purpose or identifier',
+    placeholder: 'Search by name, publisher, category or purpose',
     'data-testid': 'app-search',
     autocomplete: 'off',
     oninput: () => {
@@ -376,7 +421,7 @@ export function createApplicationsEditor(def: Parameters<CustomRenderer>[0], sto
     h('option', { value: '' }, `All categories (${CATALOG.length})`),
     ...(Object.entries(CATALOG_CATEGORIES) as [CatalogCategory, string][]).map(([v, l]) => h('option', { value: v }, `${l} (${CATALOG.filter((e) => e.category === v).length})`)),
   );
-  const filterChips = h('div', { class: 'chips', role: 'group', 'aria-label': 'Show', 'data-testid': 'app-filter' });
+  const filterChips = h('div', { class: 'app-filters', 'data-testid': 'app-filter' });
   const viewBox = h('div', { class: 'view-box' });
   const renderViewSwitch = () => {
     patchChildren(viewBox, [
@@ -448,6 +493,7 @@ export function createApplicationsEditor(def: Parameters<CustomRenderer>[0], sto
     'div',
     { class: 'apps' },
     status,
+    legacyBox,
     toolbar,
     !show.profiles ? null : h(
       'div',
@@ -626,29 +672,65 @@ export function createApplicationsEditor(def: Parameters<CustomRenderer>[0], sto
     );
   }
 
+  /** Catalog keys in each list state, for the filters and their counts. */
+  function stateKeys(r: SelectionResult) {
+    return {
+      selected: new Set(r.packages.map((p) => p.key)),
+      removed: new Set(r.removed.map((p) => p.key)),
+      recommended: new Set(r.recommended.map((p) => p.key)),
+      // Defaults of the active profiles, whether still ticked or unticked by you.
+      defaults: new Set([...r.packages, ...r.removed].filter((p) => p.origins.some((o) => o !== ADDED && o !== REQUIRED)).map((p) => p.key)),
+    };
+  }
+
+  /** Whether a catalog entry belongs to a filter. "Available" = installable automatically and not selected. */
+  function inFilter(f: Filter, e: CatalogEntry, keys: ReturnType<typeof stateKeys>): boolean {
+    const k = entryKey(e);
+    switch (f) {
+      case 'relevant':
+        return keys.selected.has(k) || keys.removed.has(k) || keys.recommended.has(k);
+      case 'selected':
+        return keys.selected.has(k);
+      case 'defaults':
+        return keys.defaults.has(k);
+      case 'recommended':
+        return keys.recommended.has(k);
+      case 'available':
+        return !!k && !isManual(e) && !keys.selected.has(k) && !keys.removed.has(k);
+      case 'deselected':
+        return keys.removed.has(k);
+      case 'manual':
+        return isManual(e) || !k;
+      default:
+        return true;
+    }
+  }
+
   function renderList(): void {
     const sel = current!;
     const r = result!;
-    const chips: HTMLElement[] = [];
-    for (const [value, label] of FILTERS) {
-      chips.push(
-        h(
-          'button',
-          {
-            type: 'button',
-            class: 'chip',
-            'data-filter': value,
-            'aria-pressed': String(value === filter),
-            onclick: () => {
-              filter = value;
-              renderList();
-            },
+    const keys = stateKeys(r);
+    const count = (f: Filter) => (f === 'excluded' ? CATALOG_EXCLUDED.length : CATALOG.filter((e) => inFilter(f, e, keys)).length);
+    const button = (value: Filter, label: string, cls: string) =>
+      h(
+        'button',
+        {
+          type: 'button',
+          class: cls,
+          'data-filter': value,
+          'aria-pressed': String(value === filter),
+          onclick: () => {
+            filter = value;
+            renderList();
           },
-          label,
-        ),
+        },
+        label,
+        h('span', { class: 'chip-count', 'data-filter-count': value }, String(count(value))),
       );
-    }
-    patchChildren(filterChips, chips);
+    patchChildren(filterChips, [
+      h('div', { class: 'scope-tabs', role: 'group', 'aria-label': 'Applications to show', 'data-key': 'scopes' }, SCOPES.map(([v, l]) => button(v, l, 'scope-tab'))),
+      h('div', { class: 'chips', role: 'group', 'aria-label': 'Filter by status', 'data-key': 'status' }, FILTERS.map(([v, l]) => button(v, l, 'chip'))),
+    ]);
     list.dataset.view = view;
     // Built detached, then patched into the list: the tiles already shown are updated in place, never
     // re-created (re-creating them removed the browser's scroll anchor and made the page jump).
@@ -661,33 +743,8 @@ export function createApplicationsEditor(def: Parameters<CustomRenderer>[0], sto
       for (const x of CATALOG_EXCLUDED) list.append(h('div', { class: 'app-item excluded', 'data-excluded': x.name }, avatar(x.name), h('div', { class: 'app-main' }, h('div', { class: 'row-title' }, h('strong', {}, x.name), badge('not offered', 'muted')), h('span', { class: 'choice-desc' }, x.reason))));
       return;
     }
-    const keys = {
-      selected: new Set(r.packages.map((p) => p.key)),
-      removed: new Set(r.removed.map((p) => p.key)),
-      recommended: new Set(r.recommended.map((p) => p.key)),
-      // Defaults of the active profiles, whether still ticked or unticked by you.
-      defaults: new Set([...r.packages, ...r.removed].filter((p) => p.origins.some((o) => o !== ADDED && o !== REQUIRED)).map((p) => p.key)),
-    };
-    const show = (e: CatalogEntry) => {
-      const k = entryKey(e);
-      switch (filter) {
-        case 'relevant':
-          return keys.selected.has(k) || keys.removed.has(k) || keys.recommended.has(k);
-        case 'selected':
-          return keys.selected.has(k);
-        case 'defaults':
-          return keys.defaults.has(k);
-        case 'recommended':
-          return keys.recommended.has(k);
-        case 'deselected':
-          return keys.removed.has(k);
-        case 'manual':
-          return isManual(e) || !k;
-        default:
-          return true;
-      }
-    };
-    const entries = searchCatalog(query, category).filter(show);
+    const keys = stateKeys(r);
+    const entries = searchCatalog(query, category).filter((e) => inFilter(filter, e, keys));
     const groups = new Map<CatalogCategory, CatalogEntry[]>();
     for (const e of entries) groups.set(e.category, [...(groups.get(e.category) ?? []), e]);
     for (const [cat, items] of [...groups].sort((a, b) => Object.keys(CATALOG_CATEGORIES).indexOf(a[0]) - Object.keys(CATALOG_CATEGORIES).indexOf(b[0]))) {
@@ -695,12 +752,12 @@ export function createApplicationsEditor(def: Parameters<CustomRenderer>[0], sto
       list.append(h('h5', { class: 'app-group', 'data-key': `group-${cat}` }, CATALOG_CATEGORIES[cat], h('span', { class: 'chip-count' }, String(items.length))), h('div', { class: `app-items view-${view}`, 'data-key': `items-${cat}` }, drawn));
     }
     // Packages added by custom ID (not in the catalog).
-    if (!query && !category && filter !== 'recommended' && filter !== 'manual' && filter !== 'defaults') {
+    if (!query && !category && filter !== 'recommended' && filter !== 'manual' && filter !== 'defaults' && filter !== 'available') {
       const custom = [...(filter === 'deselected' ? [] : r.packages.filter((p) => !p.catalog)), ...(filter === 'selected' ? [] : r.removed.filter((p) => !p.catalog))];
       if (custom.length) list.append(h('h5', { class: 'app-group', 'data-key': 'group-custom' }, 'Added by ID', h('span', { class: 'chip-count' }, String(custom.length))), ...custom.map((x) => customRow(x, sel, r, !!x.removedBy)));
     }
     if (!list.childElementCount) {
-      list.append(h('div', { class: 'empty-state' }, icon('package'), h('p', { class: 'empty' }, filter === 'relevant' ? 'Nothing selected or recommended yet. Tick a profile, or choose "All apps".' : 'No application matches. Try "All apps", another category, or add a package by ID below.')));
+      list.append(h('div', { class: 'empty-state' }, icon('package'), h('p', { class: 'empty' }, filter === 'relevant' ? 'Nothing selected or recommended yet. Tick a profile, or choose "All applications".' : 'No application matches. Try "All applications", another category, or add a package by ID below.')));
     }
   }
 
@@ -784,7 +841,8 @@ export function createApplicationsEditor(def: Parameters<CustomRenderer>[0], sto
     renderViewSwitch();
     const r = result;
 
-    patchChildren(builtinGrid, BUILTIN_PROFILES.filter((x) => isSelectableProfile(x.id)).map((p) => profileCard(p, selection, r)));
+    renderLegacy(selection);
+    patchChildren(builtinGrid, builtinProfiles(selectionRevision(selection)).filter((x) => isSelectableProfile(x.id)).map((p) => profileCard(p, selection, r)));
     patchChildren(customGrid, selection.profiles.length ? selection.profiles.map((p) => profileCard(p, selection, r)) : [h('p', { class: 'empty' }, 'No saved profiles yet. Set up the selection, then "Save as new profile…".')]);
     storageNote.textContent = profileLibrary.available
       ? 'Saved profiles are kept in this browser only (local storage). That is not a backup: clearing site data removes them, and other browsers or computers do not see them. Use Export for a portable copy.'
@@ -805,5 +863,15 @@ export function createApplicationsEditor(def: Parameters<CustomRenderer>[0], sto
   }
 
   const el = customShell(def, body);
-  return { el, sync: (p) => render(p.applications.selection) };
+  return {
+    el,
+    sync: (p) => render(p.applications.selection),
+    showAll: () => {
+      filter = 'all';
+      query = search.value = '';
+      category = '';
+      catSelect.value = '';
+      if (current && result) renderList();
+    },
+  };
 }

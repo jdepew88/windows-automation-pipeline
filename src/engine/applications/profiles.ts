@@ -1,8 +1,8 @@
 import { z } from 'zod';
 import { APP_PROFILE_ID, AppProfileSchema, NO_DEVICES, type AppProfile, type ApplicationsSelection, type PackageRef } from '../schema/applications';
-import { BUILTIN_PROFILES, UNIVERSAL_PROFILES, isBuiltinProfile } from './builtin';
+import { BUILTIN_IDS, BUILTIN_PROFILES, CURRENT_PROFILE_REVISION, UNIVERSAL_PROFILES, builtinProfile, isBuiltinProfile } from './builtin';
 import { CATALOG_SOURCE, isKnownSource, packageKey, unresolvedReason } from './ids';
-import { ADDED, activeClosure, allProfiles, effectiveDevices, expandProfile, resolveSelection } from './selection';
+import { ADDED, activeClosure, allProfiles, effectiveDevices, expandProfile, resolveSelection, selectionRevision } from './selection';
 import { importWinGetDocument, looksLikeWinGetDocument, MAX_IMPORT_BYTES } from './winget-json';
 
 /**
@@ -126,7 +126,7 @@ function parseFile(text: string): { ok: true; profiles: AppProfile[] } | { ok: f
 export function importAppProfiles(text: string, existing: readonly AppProfile[], fileName = 'import'): ProfileImportResult {
   const fail = (errors: string[]): ProfileImportResult => ({ ok: false, errors, warnings: [], profiles: [] });
   const file = parseFile(text);
-  const takenIds = new Set([...BUILTIN_PROFILES.map((p) => p.id), ...existing.map((p) => p.id)]);
+  const takenIds = new Set([...BUILTIN_IDS, ...existing.map((p) => p.id)]);
   const takenNames = new Set([...BUILTIN_PROFILES, ...existing].map((p) => p.name.toLowerCase()));
 
   if (!file.ok && file.raw !== undefined) {
@@ -190,7 +190,7 @@ export function loadLibrary(text: string | null): LibraryLoad {
   const file = parseFile(text);
   if (!file.ok) return { profiles: [], warnings: [`Saved profiles in this browser could not be read and were ignored: ${(file.errors[0] ?? 'not an application profile file').slice(0, 200)}`] };
   const warnings: string[] = [];
-  const taken = new Set(BUILTIN_PROFILES.map((p) => p.id));
+  const taken = new Set(BUILTIN_IDS);
   const profiles = file.profiles.map((p) => {
     const id = taken.has(p.id) ? uniqueId(p.id, taken) : (taken.add(p.id), p.id);
     if (id !== p.id) warnings.push(`Saved profile id "${p.id}" was renamed to "${id}" because it was already used.`);
@@ -232,6 +232,8 @@ export function createProfile(sel: ApplicationsSelection, name: string, packages
     packages: structuredClone(packages),
     createdUtc: stamp(now),
     updatedUtc: stamp(now),
+    // Its parents (if any) are the built-in profiles of the selection's revision.
+    builtinRevision: selectionRevision(sel),
   };
   sel.profiles.push(profile);
   return profile;
@@ -292,9 +294,11 @@ export function updateProfileFromSelection(sel: ApplicationsSelection, id: strin
 
 /** Copies any profile (a built-in one becomes an editable custom profile). */
 export function duplicateProfile(sel: ApplicationsSelection, id: string, now = new Date()): AppProfile | undefined {
-  const src = allProfiles(sel).find((p) => p.id === id);
+  // A saved profile is copied as stored (with its own revision), a built-in one as shown.
+  const src = sel.profiles.find((p) => p.id === id && !isBuiltinProfile(p.id)) ?? allProfiles(sel).find((p) => p.id === id);
   if (!src) return undefined;
   const copy = createProfile(sel, `${src.name} copy`, src.packages, now);
+  if (!src.builtin) copy.builtinRevision = src.builtinRevision ?? 1;
   copy.description = src.description;
   copy.inherits = [...src.inherits];
   if (src.optional) copy.optional = structuredClone(src.optional);
@@ -421,9 +425,43 @@ export function resetOverrides(sel: ApplicationsSelection): void {
 
 /** Back to the owner defaults for applications: Core Essentials only, no devices, no changes. Custom profiles are kept. */
 export function resetSelection(sel: ApplicationsSelection): void {
+  sel.profileRevision = CURRENT_PROFILE_REVISION;
   sel.selectedProfiles = [...UNIVERSAL_PROFILES];
   sel.devices = { ...NO_DEVICES };
   resetOverrides(sel);
 }
 
 export const isValidProfileId = (id: string) => APP_PROFILE_ID.test(id);
+
+// Profile revisions -------------------------------------------------------------------------------
+// New built-in defaults never change an existing deployment or saved profile by themselves: these
+// explicit actions adopt them (the "Use the new profile defaults" buttons).
+
+/** True when the deployment still uses an older revision of the built-in profiles. */
+export const usesEarlierProfiles = (sel: ApplicationsSelection): boolean => selectionRevision(sel) !== CURRENT_PROFILE_REVISION;
+
+/** True for a saved profile whose parents are built-in profiles of an older revision. */
+export const profileUsesEarlierDefaults = (p: AppProfile): boolean => !p.builtin && (p.builtinRevision ?? 1) !== CURRENT_PROFILE_REVISION && p.inherits.some(isBuiltinProfile);
+
+/**
+ * Switches the deployment to the current built-in profiles: the same ticked profiles (every older
+ * built-in id still exists), devices, individual additions and removals; only the profiles' own
+ * defaults and recommendations change. Saved custom profiles keep their revision until adopted too.
+ */
+export function adoptCurrentProfiles(sel: ApplicationsSelection): void {
+  sel.profileRevision = CURRENT_PROFILE_REVISION;
+  sel.selectedProfiles = sel.selectedProfiles.filter((id) => !isBuiltinProfile(id) || !!builtinProfile(id) || sel.profiles.some((p) => p.id === id));
+  pruneDetached(sel);
+}
+
+/** A saved profile adopts the current built-in defaults for its parents. */
+export function adoptProfileDefaults(sel: ApplicationsSelection, id: string, now = new Date()): boolean {
+  const p = sel.profiles.find((x) => x.id === id && !x.builtin);
+  if (!p || isBuiltinProfile(id)) return false;
+  p.builtinRevision = CURRENT_PROFILE_REVISION;
+  p.inherits = p.inherits.filter((i) => !isBuiltinProfile(i) || !!builtinProfile(i));
+  p.updatedUtc = stamp(now);
+  pruneDetached(sel);
+  return true;
+}
+

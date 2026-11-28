@@ -10,9 +10,15 @@ import { profile } from './helpers';
 
 const keys = (xs: { key: string }[]) => xs.map((x) => x.key).sort();
 
+/** Revision 1 of the built-in profiles (inheritance: Network Engineer includes General Developer). */
+const v1 = (fn?: Parameters<typeof profile>[0]) => profile((q) => {
+  q.applications.selection.profileRevision = 1;
+  fn?.(q);
+});
+
 describe('effective application summary', () => {
   it('lists exactly the packages and manual follow-ups of applications-config.json, each once', () => {
-    const p = profile((q) => {
+    const p = v1((q) => {
       toggleProfile(q.applications.selection, 'gaming', true);
       toggleProfile(q.applications.selection, 'network-engineer', true);
       toggleProfile(q.applications.selection, 'developer', true);
@@ -33,7 +39,7 @@ describe('effective application summary', () => {
   });
 
   it('separates manual follow-up (RustDesk) from automatic installs and lists nothing when provisioning is off', () => {
-    const p = profile((q) => q.applications.selection.added.push(catalogRef(catalogEntryById('rustdesk')!)!));
+    const p = v1((q) => q.applications.selection.added.push(catalogRef(catalogEntryById('rustdesk')!)!));
     const apps = effectiveApps(p.applications.selection, true);
     expect(apps.manual.map((x) => x.displayName)).toContain('RustDesk');
     expect(apps.automatic.some((x) => x.displayName === 'RustDesk')).toBe(false);
@@ -43,14 +49,14 @@ describe('effective application summary', () => {
   });
 
   it('is empty for an empty selection', () => {
-    const p = profile((q) => toggleProfile(q.applications.selection, 'core', false));
+    const p = v1((q) => toggleProfile(q.applications.selection, 'core', false));
     expect(effectiveApps(p.applications.selection).total).toBe(0);
   });
 });
 
 describe('profile previews', () => {
   it('previews an unselected profile without selecting it', () => {
-    const p = profile();
+    const p = v1();
     const before = JSON.stringify(p.applications.selection);
     const pv = profilePreview(p.applications.selection, 'gaming')!;
     expect(JSON.stringify(p.applications.selection)).toBe(before);
@@ -62,7 +68,7 @@ describe('profile previews', () => {
   });
 
   it('marks inherited apps and dependencies and counts each app once', () => {
-    const p = profile();
+    const p = v1();
     const pv = profilePreview(p.applications.selection, 'network-engineer')!;
     expect(new Set(pv.items.map((x) => x.key)).size).toBe(pv.items.length);
     expect(pv.items.find((x) => x.displayName === 'Git')).toMatchObject({ via: 'inherited', viaText: 'From General Developer' });
@@ -71,7 +77,7 @@ describe('profile previews', () => {
   });
 
   it('never shows an app the deployment excludes as included, even when another profile shares it', () => {
-    const p = profile((q) => {
+    const p = v1((q) => {
       toggleProfile(q.applications.selection, 'gaming', true);
       removePackage(q.applications.selection, 'winget:valve.steam');
     });
@@ -85,7 +91,7 @@ describe('profile previews', () => {
   });
 
   it('shows Core Essentials apps shared with another active profile as already included', () => {
-    const p = profile((q) => {
+    const p = v1((q) => {
       q.applications.selection.added.push({ packageIdentifier: 'Valve.Steam', source: 'winget', displayName: 'Steam', version: '', scope: '' });
     });
     const pv = profilePreview(p.applications.selection, 'gaming')!;
@@ -97,7 +103,7 @@ describe('profile previews', () => {
   });
 
   it('previews a saved profile with its exclusions and device answers', () => {
-    const p = profile((q) => {
+    const p = v1((q) => {
       const sel = q.applications.selection;
       toggleProfile(sel, 'gaming', true);
       removePackage(sel, 'winget:epicgames.epicgameslauncher');
@@ -122,6 +128,6 @@ describe('profile previews', () => {
   });
 
   it('returns nothing for an unknown profile', () => {
-    expect(profilePreview(profile().applications.selection, 'nope')).toBeUndefined();
+    expect(profilePreview(v1().applications.selection, 'nope')).toBeUndefined();
   });
 });

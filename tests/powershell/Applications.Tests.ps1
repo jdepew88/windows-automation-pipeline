@@ -51,6 +51,11 @@ function Reset-Sim {
         Diagnoses = @(); SourceDown = @(); Random = 0.5; Waits = @(); OnlineAt = $null
         # Engine 1.5.0: source refreshes, installations without elevation and their result
         SourceUpdates = New-Object System.Collections.Generic.List[string]; UserInstalls = New-Object System.Collections.Generic.List[string]; UserInstallResult = $null
+        # Engine 1.6.0: the deployment user, uninstall records, AppX, files, registry values and WinGet's download folder
+        User = @{ Name = 'TEST\Alex'; Sid = 'S-1-5-21-1000-2000-3000-1001'; ProfilePath = 'C:\Users\Alex'; HiveLoaded = $true; IsEngineAccount = $true }
+        Uninstall = @{ Machine64 = @(); Machine32 = @(); User = @() }; UnreadableHives = @(); AppxRegistered = @(); AppxProvisioned = @(); Files = @{}; Registry = @{}
+        Probes = New-Object System.Collections.Generic.List[string]
+        WinGetTemp = (Join-Path ([IO.Path]::GetTempPath()) ("wda-test-wingettemp-" + [Guid]::NewGuid().ToString('N')))
     }
 }
 
@@ -126,12 +131,14 @@ function Install-WdaPackage {
     $s.AllArgs += , @($s.Args)
     $code = 0
     switch ($s.Behavior) {
-        'ok'            { $s.Installed = $true; if ($s.Method -eq 'portable') { New-SimPortableFiles $s } }
+        'ok'            { $s.Installed = $true; Add-SimEvidence $s; if ($s.Method -eq 'portable') { New-SimPortableFiles $s } }
+        # Engine 1.6.0: installed with evidence, but WinGet's own record does not show it (winget list: no).
+        'ok-unlisted'   { Add-SimEvidence $s }
         'fail'          { $code = 0x8A150008 }
         'fail-once'     { if ($s.InstallCalls -ge 2) { $s.Installed = $true } else { $code = 0x8A150008 } }
-        'hash'          { $code = 0x8A150011 }
+        'hash'          { return @{ ExitCode = [int] 0x8A150011; TimedOut = $false; Output = (Get-SimHashOutput $s) } }
         # Engine 1.5.0: the manifest catches up with the publisher's installer once the source is refreshed.
-        'hash-once'     { if ($script:Sim.SourceUpdates.Count -ge 1) { $s.Installed = $true } else { $code = 0x8A150011 } }
+        'hash-once'     { if ($script:Sim.SourceUpdates.Count -ge 1) { $s.Installed = $true } else { return @{ ExitCode = [int] 0x8A150011; TimedOut = $false; Output = (Get-SimHashOutput $s) } } }
         # The package's manifest forbids an elevated installation (INSTALLER_PROHIBITS_ELEVATION).
         'no-elevation'  { $code = 0x8A150056 }
         'cancel'        { $code = 0x8A15010C }
@@ -148,6 +155,9 @@ function Install-WdaPackage {
         'unknown-once'  { if ($s.InstallCalls -ge 2) { $s.Installed = $true } else { $code = 0x80070005 } }
         'fail-but-installed' { $s.Installed = $true; $code = 0x8A150008 }
         'false-success' { $code = 0 }
+        # Engine 1.6.0: a given WinGet result code; evidence that appears only after the next restart.
+        'code'          { $code = [int] $s.Code }
+        'ok-after-boot' { $s.EvidenceAfterBoot = $script:Sim.Boots + 1 }
         'locked-once'   { if ($s.InstallCalls -ge 2) { $s.Installed = $true } else { $code = 0x8A150102 } }
         # Engine 1.4.0: the package's own installer fails (WinGet: SHELLEXEC_INSTALL_FAILED, with the installer's code in its output).
         'installer-fail' { return @{ ExitCode = [int] 0x8A150006; TimedOut = $false; Output = "Starting package install...`r`nInstaller failed with exit code: 1603`r`n" } }
@@ -155,7 +165,47 @@ function Install-WdaPackage {
     @{ ExitCode = [int] $code; TimedOut = $false; Output = '' }
 }
 
+function Get-SimHashOutput { param([hashtable] $S) "Found App $($S.Id) [$($S.Id)] Version 1.2.3`r`nThis application is licensed to you by its owner.`r`nDownloading https://example.invalid/setup.exe`r`nInstaller hash does not match; this cannot be overridden when running as admin`r`n" }
 function Update-WdaSource { param([string] $Source, [string] $LogFile = '') $script:Sim.SourceUpdates.Add($Source) }
+
+# Engine 1.6.0: every verification probe is simulated (no registry, AppX, file or profile access).
+function Get-WdaDeploymentUser {
+    $u = $script:Sim.User
+    @{ Name = $u.Name; Sid = $u.Sid; ProfilePath = $u.ProfilePath; LocalAppData = $(if ($u.ProfilePath) { "$($u.ProfilePath)\AppData\Local" } else { '' }); AppData = $(if ($u.ProfilePath) { "$($u.ProfilePath)\AppData\Roaming" } else { '' })
+       HiveLoaded = [bool] $u.HiveLoaded; IsEngineAccount = [bool] $u.IsEngineAccount }
+}
+function Get-WdaMachineRoots { @{ ProgramFiles = 'C:\Program Files'; 'ProgramFiles(x86)' = 'C:\Program Files (x86)'; ProgramData = 'C:\ProgramData' } }
+function Get-WdaUninstallEntries {
+    param([string] $Hive, [string] $Sid = '')
+    $script:Sim.Probes.Add("uninstall:$Hive")
+    if ($script:Sim.UnreadableHives -contains $Hive) { return $null }
+    if ($Hive -eq 'User' -and (-not $script:Sim.User.HiveLoaded -or $Sid -ne $script:Sim.User.Sid)) { return $null }
+    , @($script:Sim.Uninstall[$Hive] | Where-Object { $_ })
+}
+function Get-WdaAppxRegistered { param([string] $Name, [hashtable] $User) $script:Sim.Probes.Add("appx:$Name"); if (-not $User.Sid) { return $null }; , @($script:Sim.AppxRegistered | Where-Object { $_.Name -eq $Name }) }
+function Get-WdaAppxProvisioned { param([string] $Name) $script:Sim.Probes.Add("provisioned:$Name"); , @($script:Sim.AppxProvisioned | Where-Object { $_.Name -eq $Name }) }
+function Get-WdaFileEvidence { param([string] $Path) $script:Sim.Probes.Add("file:$Path"); if ($script:Sim.Files.ContainsKey($Path)) { @{ Path = $Path; Version = $script:Sim.Files[$Path] } } else { $null } }
+function Get-WdaRegistryValue {
+    param([string] $Key, [string] $Name, [string] $View = '64')
+    $script:Sim.Probes.Add("registry:$View`:$Key\$Name")
+    $k = "$View|$Key|$Name"
+    if ($script:Sim.Registry.ContainsKey($k)) { return @{ Found = $true; Value = $script:Sim.Registry[$k] } }
+    @{ Found = $false; Value = $null }
+}
+function Get-WdaWinGetTempRoot { $script:Sim.WinGetTemp }
+<# What a successful installation leaves behind (evidence), per simulated package. #>
+function Add-SimEvidence {
+    param([hashtable] $S)
+    if (-not $S.ContainsKey('Leaves')) { return }
+    foreach ($x in @($S.Leaves)) {
+        switch ($x.Kind) {
+            'uninstall' { $script:Sim.Uninstall[$x.Hive] = @(@($script:Sim.Uninstall[$x.Hive]) + @(@{ DisplayName = $x.Name; DisplayVersion = $x.Version }) | Where-Object { $_ }) }
+            'file' { $script:Sim.Files[$x.Path] = $x.Version }
+            'registry' { $script:Sim.Registry["$($x.View)|$($x.Key)|$($x.Name)"] = $x.Value }
+            'appx' { $script:Sim.AppxRegistered = @(@($script:Sim.AppxRegistered) + @(@{ Name = $x.Name; Version = $x.Version }) | Where-Object { $_ }) }
+        }
+    }
+}
 function Install-WdaPackageAsUser {
     param([hashtable] $P, [int] $TimeoutMinutes, [string] $LogFile = '')
     $s = Get-SimPackage $P
@@ -204,6 +254,8 @@ function New-AppTestConfig {
             if ($_.Method) { $e.method = $_.Method }
             if ($_.Method -eq 'portable') { $e.scope = 'machine' }
             if ($_.Portable) { $e.portable = $_.Portable }
+            # Engine 1.6.0: the catalog's verify block, when a scenario sets one.
+            if ($_.ContainsKey('Verify') -and $_.Verify) { $e.verify = $_.Verify }
             $e
         })
         unresolved = @($Unresolved); additionalSoftware = @($Additional)
@@ -231,6 +283,7 @@ function Invoke-Logons {
             $script:Sim.Boots++
             $script:Sim.RebootPending = $false
             foreach ($p in $script:Sim.Packages) { if ($p.ContainsKey('InstalledAfterBoot') -and $script:Sim.Boots -ge $p.InstalledAfterBoot) { $p.Installed = $true } }
+            foreach ($p in $script:Sim.Packages) { if ($p.ContainsKey('EvidenceAfterBoot') -and $script:Sim.Boots -ge $p.EvidenceAfterBoot) { $p.Remove('EvidenceAfterBoot'); Add-SimEvidence $p } }
             $script:Sim.Now = $script:Sim.Now.AddMinutes(5)
             continue
         }
@@ -342,7 +395,7 @@ $tests['engine 1.5.0: hash mismatch: one retry 30 min later from a refreshed sou
     [void] (Invoke-Logons $c)
     $r = Get-Result $c
     $p = Get-Pkg $r 'Google.Chrome'
-    Assert-Equal "$($p.status) $($p.lifecycle) $($p.failureClass) $($p.exitCode)" 'Failed FailedPermanent Integrity 0x8A150011' 'second mismatch is final and permanent'
+    Assert-Equal "$($p.status) $($p.lifecycle) $($p.failureClass) $($p.exitCode)" 'Failed FailedPermanent HashMismatch 0x8A150011' 'second mismatch is final and permanent (engine 1.6.0: class HashMismatch)'
     Assert-Equal $script:Sim.Packages[0].InstallCalls 2 'exactly one retry'
     Assert-Equal (($script:Sim.SourceUpdates) -join ',') 'winget' 'the source was refreshed once, before the retry'
     Assert-True (($script:Sim.Now - $start).TotalMinutes -ge 30) 'the retry waited the configured delay'
@@ -692,6 +745,19 @@ $tests['unresolved and invalid entries are Unavailable and never reach WinGet'] 
     Assert-Equal $evil.ShowCalls 0 'never queried'
 }
 
+$tests['an app removed from the automated catalog (still named by a saved profile): Skipped with its reason, never installed, not a failure'] = {
+    Reset-Sim @((New-SimPackage 'Git.Git'))
+    $c = New-AppTestConfig $script:Sim.Packages -Unresolved @(@{ key = 'msstore:9mspc6mp8fm4'; packageIdentifier = '9MSPC6MP8FM4'; source = 'msstore'; displayName = 'Microsoft Whiteboard'; reason = 'Microsoft Whiteboard was removed from the automated catalog on 2026-11-27.'; removed = $true })
+    $o = Invoke-Logons $c
+    Assert-Equal $o[-1] 'Finished:Succeeded' 'not a failure'
+    $r = Get-Result $c
+    $w = Get-Pkg $r '9MSPC6MP8FM4'
+    Assert-Equal "$($w.status) $($w.outcome)" 'Skipped Skipped' 'reported as skipped'
+    Assert-True ($w.message -match 'removed from the automated catalog') 'with its reason'
+    Assert-True (@($r.followUp) -match 'Microsoft Whiteboard') 'listed for the technician'
+    Assert-Equal (Get-Pkg $r 'Git.Git').status 'Succeeded' 'the others install'
+}
+
 
 # ------------------------------------------------------------------------------------------------
 # Phase 4.2 (engine 1.1.0): portable, Store, manual, deselected, dependencies
@@ -915,6 +981,23 @@ $tests['Additional Software: manual entries become follow-up; automatic needs ha
     Assert-Equal $o[-1] 'Finished:CompletedWithFailures' 'outcome'
 }
 
+$tests['Additional Software: a successful reviewed installer alone still finishes Succeeded (as before 1.6.0); its outcome says it was not verified'] = {
+    Reset-Sim @((New-SimPackage 'Git.Git'))
+    $good = @{ id = 'a2'; name = 'Reviewed B'; execution = 'automatic'; fileName = 'b.msi'; sha256 = ('B' * 64); silentArgs = @('/qn'); installerType = 'msi' }
+    $c = New-AppTestConfig $script:Sim.Packages -Additional @($good)
+    $inst = Join-Path $c.dataRoot 'Applications\installers'
+    New-Item -ItemType Directory -Path $inst -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $inst 'b.msi') -Value 'x'
+    $script:Sim.Hashes = @{ 'b.msi' = ('B' * 64) }
+    $o = Invoke-Logons $c
+    Assert-Equal $o[-1] 'Finished:Succeeded' 'every application and the reviewed installer succeeded'
+    $r = Get-Result $c
+    $a = @($r.additionalSoftware | Where-Object { $_.id -eq 'a2' })[0]
+    Assert-Equal "$($a.status) $($a.outcome)" 'Succeeded InstallerSucceededVerificationPending' 'its own outcome stays honest'
+    Assert-Equal "$($r.counts.succeeded) $($r.counts.verificationPending)" '2 0' 'counted as a success'
+    Assert-True (-not (@($r.followUp) -match 'Reviewed B')) 'no follow-up line for it'
+}
+
 $tests['finished run does nothing on later starts'] = {
     Reset-Sim @((New-SimPackage 'Git.Git'))
     $c = New-AppTestConfig $script:Sim.Packages
@@ -1003,7 +1086,7 @@ $tests['transient failures: waits 60 s then 120 s (backoff) and succeeds on the 
     Assert-Equal "$($p.status) $($p.attempts) $($p.lifecycle) $($p.detection)" 'Succeeded 3 Succeeded Installed' 'result'
     Assert-Equal @($p.history).Count 3 'every attempt in the history'
     $a = Get-Attempts $c
-    Assert-Equal (($a | ForEach-Object { "$($_.attempt):$($_.result):$($_.class)" }) -join ' ') '1:Failed:Network 2:Failed:Network 3:Succeeded:Success' 'attempts.jsonl'
+    Assert-Equal (($a | ForEach-Object { "$($_.attempt):$($_.result):$($_.class)" }) -join ' ') '1:Failed:Download 2:Failed:Download 3:Succeeded:Success' 'attempts.jsonl (engine 1.6.0: DOWNLOAD_FAILED is class Download)'
     Assert-Equal $a[0].nextAction 'retry after 60 s' 'next scheduled action recorded'
     Assert-Equal $a[0].operationId 'app:winget:vendor.flaky' 'stable operation id'
 }
@@ -1015,7 +1098,7 @@ $tests['exhausted retry budget: FailedRetryable, outstanding, exactly maxAttempt
     Assert-Equal $o[-1] 'Finished:CompletedWithFailures' 'outcome'
     $r = Get-Result $c
     $p = Get-Pkg $r 'Vendor.Down'
-    Assert-Equal "$($p.status) $($p.lifecycle) $($p.failureClass) $($p.retryable) $($p.attempts)" 'Failed FailedRetryable Network True 3' 'classification'
+    Assert-Equal "$($p.status) $($p.lifecycle) $($p.failureClass) $($p.retryable) $($p.attempts)" 'Failed FailedRetryable Download True 3' 'classification (engine 1.6.0: Download)'
     Assert-Equal $script:Sim.Packages[0].InstallCalls 3 'no more than the budget'
     Assert-Equal ((@($r.outstanding) | ForEach-Object { $_.operationId }) -join ',') 'app:winget:vendor.down' 'outstanding work recorded'
     Assert-Equal $r.schemaVersion 2 'result schema 2'
@@ -1028,7 +1111,7 @@ $tests['permanent failures are never retried automatically (integrity, policy, c
     $c = New-AppTestConfig $script:Sim.Packages -Overrides @{ maxAttemptsPerPackage = 3; integrityRetryMinutes = 0 }
     [void] (Invoke-Logons $c)
     $r = Get-Result $c
-    Assert-Equal "$((Get-Pkg $r 'Vendor.Hash').lifecycle) $((Get-Pkg $r 'Vendor.Hash').failureClass)" 'FailedPermanent Integrity' 'hash mismatch'
+    Assert-Equal "$((Get-Pkg $r 'Vendor.Hash').lifecycle) $((Get-Pkg $r 'Vendor.Hash').failureClass)" 'FailedPermanent HashMismatch' 'hash mismatch'
     Assert-Equal $script:Sim.Packages[0].InstallCalls 1 'hash mismatch: one attempt only'
     Assert-Equal "$((Get-Pkg $r 'Vendor.Cancel').lifecycle) $((Get-Pkg $r 'Vendor.Cancel').failureClass)" 'ManualActionRequired User' 'user cancellation'
     Assert-Equal $script:Sim.Packages[1].InstallCalls 1 'cancellation: one attempt only'
@@ -1100,7 +1183,7 @@ $tests['source never returns: deferrals are bounded, then Failed (retryable), no
     Assert-Equal $o[-1] 'Finished:CompletedWithFailures' 'ends'
     Assert-True ($o.Count -le 6) "bounded number of runs ($($o.Count))"
     $p = Get-Pkg (Get-Result $c) '9NBLGGH4NNS1'
-    Assert-Equal "$($p.status) $($p.lifecycle) $($p.failureClass)" 'Failed FailedRetryable Network' 'retryable by a technician'
+    Assert-Equal "$($p.status) $($p.lifecycle) $($p.failureClass)" 'Failed FailedRetryable Source' 'retryable by a technician (engine 1.6.0: SOURCE_OPEN_FAILED is class Source)'
 }
 
 $tests['interrupted installer that finished anyway: confirmed, not reinstalled'] = {
@@ -1631,6 +1714,404 @@ $tests['Phase 6: a configuration without a restore plan behaves exactly as befor
     $r = Get-Result $c
     Assert-True (-not ($r.PSObject.Properties.Name -contains 'settings')) 'no settings in the result'
     Assert-True (-not (Test-Path (Join-Path $c.dataRoot 'Applications\restoration.json'))) 'no restoration file'
+}
+
+# ------------------------------------------------------------------------------------------------
+# Engine 1.6.0: package-aware verification, outcomes, re-verification, hash mismatch, VC++ runtimes
+# ------------------------------------------------------------------------------------------------
+
+<# A simulated package with a catalog verify block and the evidence its installation leaves. #>
+function New-VPkg {
+    param([string] $Id, [string] $Behavior = 'ok-unlisted', [hashtable] $Verify = @{}, [object[]] $Leaves = @(), [string] $Source = 'winget')
+    $s = New-SimPackage $Id $Behavior -Source $Source
+    $s.Verify = $Verify
+    $s.Leaves = @($Leaves)
+    $s
+}
+function Get-Evidence { param($Pkg, [string] $Kind) @($Pkg.verificationEvidence | Where-Object { $_.kind -eq $Kind }) }
+
+$tests['engine 1.6.0: exact selection: explicit id, --exact and --source for WinGet and the Store; verification never uses PATH'] = {
+    Reset-Sim @((New-VPkg 'Git.Git' 'ok' @{ uninstall = @('Git') } @(@{ Kind = 'uninstall'; Hive = 'Machine64'; Name = 'Git'; Version = '2.51.0' })),
+                (New-VPkg '9PLM9XGG6VKS' 'ok-unlisted' @{ appx = @('OpenAI.ChatGPT-Desktop') } @(@{ Kind = 'appx'; Name = 'OpenAI.ChatGPT-Desktop'; Version = '1.2025.1.0' }) -Source msstore))
+    $c = New-AppTestConfig $script:Sim.Packages
+    $o = Invoke-Logons $c
+    Assert-Equal $o[-1] 'Finished:Succeeded' 'outcome'
+    Assert-Equal ($script:Sim.Packages[0].Args -join ' ') 'install --id Git.Git --exact --source winget --silent --no-upgrade --accept-package-agreements --accept-source-agreements --disable-interactivity' 'winget command'
+    Assert-Equal ($script:Sim.Packages[1].Args -join ' ') 'install --id 9PLM9XGG6VKS --exact --source msstore --silent --no-upgrade --accept-package-agreements --accept-source-agreements --disable-interactivity' 'store command'
+    Assert-True (-not (@($script:Sim.Probes) -match '(?i)path|where\.exe|node -v')) 'no PATH lookups'
+    Assert-True (-not (@($script:Sim.Packages | ForEach-Object { @($_.Args) }) -match 'ignore-security-hash')) 'the hash check is never skipped'
+}
+
+$tests['engine 1.6.0: hash mismatch: source refreshed, only that package''s stale download removed, one retry, installed and verified'] = {
+    Reset-Sim @((New-VPkg 'Google.Chrome' 'hash-once' @{ uninstall = @('Google Chrome') } @()), (New-SimPackage 'Git.Git'))
+    $script:Sim.Packages[0].Leaves = @()
+    $tmp = $script:Sim.WinGetTemp
+    foreach ($d in 'Google.Chrome.1.2.3', 'Google.Chrome', 'Google.Chrome.Beta.1.2.3', 'Google.ChromeX', 'Other.App.1.2.3') { New-Item -ItemType Directory -Path (Join-Path $tmp $d) -Force | Out-Null; [IO.File]::WriteAllText((Join-Path (Join-Path $tmp $d) 'setup.exe'), 'MZ') }
+    $c = New-AppTestConfig $script:Sim.Packages
+    $o = Invoke-Logons $c
+    Assert-Equal $o[-1] 'Finished:Succeeded' 'installed after the refresh'
+    $p = Get-Pkg (Get-Result $c) 'Google.Chrome'
+    Assert-Equal "$($p.status) $($p.outcome) $($p.verification)" 'Succeeded InstalledVerified Verified' 'verified by winget list after the retry'
+    Assert-Equal $script:Sim.Packages[0].InstallCalls 2 'exactly one retry'
+    Assert-Equal ($script:Sim.SourceUpdates -join ',') 'winget' 'source update for that source, once'
+    Assert-Equal "$($p.hashMismatch.packageIdentifier) $($p.hashMismatch.source) $($p.hashMismatch.version) $($p.hashMismatch.occurrences)" 'Google.Chrome winget 1.2.3 1' 'hash mismatch evidence'
+    Assert-True ($p.hashMismatch.message -match 'Installer hash does not match') "WinGet's exact message kept ($($p.hashMismatch.message))"
+    Assert-True ($p.hashMismatch.sourceUpdated -and $p.hashMismatch.retried) 'refreshed and retried'
+    Assert-Equal (@($p.hashMismatch.staleDownloadsRemoved | ForEach-Object { Split-Path -Leaf $_ }) -join ',') 'Google.Chrome,Google.Chrome.1.2.3' 'exactly the package folders'
+    foreach ($kept in 'Google.Chrome.Beta.1.2.3', 'Google.ChromeX', 'Other.App.1.2.3') { Assert-True (Test-Path -LiteralPath (Join-Path $tmp $kept)) "$kept is left alone" }
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $tmp 'Google.Chrome.1.2.3'))) 'stale download removed'
+    Remove-Item -LiteralPath $tmp -Recurse -Force
+}
+
+$tests['engine 1.6.0: persistent hash mismatch: HashMismatch with evidence, never skipped, the other applications continue'] = {
+    Reset-Sim @((New-SimPackage 'Google.Chrome' 'hash'), (New-VPkg 'Git.Git' 'ok-unlisted' @{ uninstall = @('Git') } @(@{ Kind = 'uninstall'; Hive = 'Machine64'; Name = 'Git'; Version = '2.51.0' })))
+    $c = New-AppTestConfig $script:Sim.Packages -Overrides @{ maxAttemptsPerPackage = 3 }
+    $o = Invoke-Logons $c
+    Assert-Equal $o[-1] 'Finished:CompletedWithFailures' 'outcome'
+    $r = Get-Result $c
+    $p = Get-Pkg $r 'Google.Chrome'
+    Assert-Equal "$($p.status) $($p.failureClass) $($p.outcome) $($p.verification) $($p.retryable)" 'Failed HashMismatch InstallationFailed NotApplicable False' 'recorded as HashMismatch'
+    Assert-Equal "$($p.hashMismatch.occurrences) $($p.hashMismatch.version) $($p.hashMismatch.retried)" '2 1.2.3 True' 'two mismatches, one retry'
+    Assert-True ($p.message -match 'WinGet: Installer hash does not match') 'the message carries WinGet''s words'
+    Assert-Equal $script:Sim.Packages[0].InstallCalls 2 'never more than one retry'
+    foreach ($a in @($script:Sim.Packages[0].AllArgs)) { Assert-True (-not (@($a) -match 'ignore-security-hash|override')) 'the hash check is never weakened' }
+    $g = Get-Pkg $r 'Git.Git'
+    Assert-Equal "$($g.status) $($g.outcome)" 'Succeeded InstalledVerified' 'Git continues and is verified'
+    Assert-Equal (@(Get-Evidence $g 'uninstall')[0].where) 'machine' 'uninstall evidence on the machine'
+}
+
+$tests['engine 1.6.0: installer error classes are distinguished (Network, Download, Source, Installer, Blocked, Unavailable) and the queue continues'] = {
+    $codes = [ordered]@{ 'Vendor.Net' = 0x8A150107; 'Vendor.Dl' = 0x8A150008; 'Vendor.Src' = 0x8A150045; 'Vendor.Inst' = 0x8A150006; 'Vendor.Policy' = 0x8A15003A; 'Vendor.Arch' = 0x8A150113 }
+    $pk = @(foreach ($k in $codes.Keys) { $s = New-SimPackage $k 'code'; $s.Code = $codes[$k]; $s }) + @(New-SimPackage 'Git.Git')
+    Reset-Sim $pk
+    $c = New-AppTestConfig $script:Sim.Packages -Overrides @{ maxAttemptsPerPackage = 1 }
+    $o = Invoke-Logons $c
+    Assert-Equal $o[-1] 'Finished:CompletedWithFailures' 'outcome'
+    $r = Get-Result $c
+    $got = (@($codes.Keys) | ForEach-Object { $x = Get-Pkg $r $_; "$($x.failureClass)/$($x.outcome)" }) -join ' '
+    Assert-Equal $got 'Network/InstallationFailed Download/InstallationFailed Source/InstallationFailed Installer/InstallationFailed Blocked/InstallationFailed Unavailable/PackageUnavailable' 'classes and outcomes'
+    Assert-Equal (Get-Pkg $r 'Vendor.Policy').lifecycle 'FailedPermanent' 'blocked by policy is permanent'
+    Assert-Equal (Get-Pkg $r 'Git.Git').outcome 'InstalledVerified' 'an isolated failure does not stop the others'
+    Assert-Equal $r.counts.succeeded 1 'one verified success'
+}
+
+$tests['engine 1.6.0: evidence only after a restart (after: restart): restart, verify, never reinstalled'] = {
+    Reset-Sim @((New-VPkg 'Vendor.Driverish' 'ok-after-boot' @{ uninstall = @('Vendorish Tool'); after = 'restart' } @(@{ Kind = 'uninstall'; Hive = 'Machine64'; Name = 'Vendorish Tool'; Version = '5.0' })))
+    $c = New-AppTestConfig $script:Sim.Packages
+    $o = Invoke-Logons $c
+    Assert-True ('Rebooting' -in $o) 'restarted for its evidence'
+    Assert-Equal $o[-1] 'Finished:Succeeded' 'verified after the restart'
+    $p = Get-Pkg (Get-Result $c) 'Vendor.Driverish'
+    Assert-Equal "$($p.status) $($p.outcome) $($p.verification)" 'Succeeded InstalledVerified Verified' 'verified'
+    Assert-Equal $script:Sim.Packages[0].InstallCalls 1 'installed once'
+}
+
+$tests['engine 1.6.0: restart required while restarts are not allowed: RestartOrSignInRequired, re-verified at the next start after the restart'] = {
+    Reset-Sim @((New-SimPackage 'Vendor.Reboot' 'reboot-finish'), (New-SimPackage 'Git.Git'))
+    $c = New-AppTestConfig $script:Sim.Packages -Overrides @{ restartPolicy = 'never' }
+    $o = Invoke-Logons $c
+    Assert-Equal $o[-1] 'Finished:CompletedWithFollowUp' 'follow-up'
+    $r = Get-Result $c
+    $p = Get-Pkg $r 'Vendor.Reboot'
+    Assert-Equal "$($p.status) $($p.outcome) $($p.verification) $($p.failureClass)" 'RequiresRestart RestartOrSignInRequired Pending RebootRequired' 'waits for a restart'
+    Assert-True (-not $script:Sim.TaskRemoved) 'the task stays for the re-verification'
+    Assert-True (Test-Marker $c) 'marker written (the stage is final)'
+    # The person restarts the computer; the engine starts at sign-in.
+    $script:Sim.Boots++; $script:Sim.Packages[0].Installed = $true; $script:Sim.Now = $script:Sim.Now.AddHours(2)
+    Assert-Equal (Invoke-WdaMain $c) 'Reverified:Succeeded' 're-verification start'
+    $p = Get-Pkg (Get-Result $c) 'Vendor.Reboot'
+    Assert-Equal "$($p.status) $($p.outcome)" 'Succeeded InstalledVerified' 'verified after the restart'
+    Assert-Equal $script:Sim.Packages[0].InstallCalls 1 'nothing installed again'
+    Assert-True $script:Sim.TaskRemoved 'task removed once nothing is pending'
+    Assert-Equal (Invoke-WdaMain $c) 'AlreadyFinished' 'later starts do nothing'
+}
+
+$tests['engine 1.6.0: evidence written before the restart never clears it: same boot and -Mode Verify keep RequiresRestart; only a real restart does'] = {
+    Reset-Sim @((New-SimPackage 'Vendor.Reboot' 'reboot-finish'), (New-SimPackage 'Git.Git'))
+    $c = New-AppTestConfig $script:Sim.Packages -Overrides @{ restartPolicy = 'never' }
+    $o = Invoke-Logons $c
+    Assert-Equal $o[-1] 'Finished:CompletedWithFollowUp' 'follow-up'
+    # The installer already wrote its uninstall entry, but the computer has not restarted (same boot).
+    $script:Sim.Packages[0].Installed = $true; $script:Sim.Now = $script:Sim.Now.AddHours(1)
+    Assert-Equal (Invoke-WdaMain $c) 'Reverified:CompletedWithFollowUp' 'hourly start in the same boot'
+    $p = Get-Pkg (Get-Result $c) 'Vendor.Reboot'
+    Assert-Equal "$($p.status) $($p.outcome) $($p.verification)" 'RequiresRestart RestartOrSignInRequired Pending' 'evidence alone does not clear the restart'
+    $v = Invoke-WdaVerify $c
+    Assert-Equal $v.ExitCode 10 '-Mode Verify: still pending'
+    $p = Get-Pkg (Get-Result $c) 'Vendor.Reboot'
+    Assert-Equal "$($p.status) $($p.verification)" 'RequiresRestart Pending' '-Mode Verify never clears a restart'
+    Assert-True (-not $script:Sim.TaskRemoved) 'the task stays for the re-verification after the restart'
+    # The person restarts the computer.
+    $script:Sim.Boots++; $script:Sim.Now = $script:Sim.Now.AddHours(1)
+    Assert-Equal (Invoke-WdaMain $c) 'Reverified:Succeeded' 'after the restart'
+    Assert-Equal (Get-Pkg (Get-Result $c) 'Vendor.Reboot').status 'Succeeded' 'verified after the real restart'
+    Assert-Equal $script:Sim.Packages[0].InstallCalls 1 'nothing installed again'
+}
+
+$tests['engine 1.6.0: per-user evidence is checked for the account that installed, even when another administrator (or SYSTEM) runs -Mode Verify'] = {
+    $alex = 'S-1-5-21-1111111111-2222222222-3333333333-1001'
+    $admin = 'S-1-5-21-1111111111-2222222222-3333333333-1002'
+    $a = Select-WdaVerifyAccount 'PC\Alex' $alex $null
+    Assert-Equal "$($a.Name) $($a.IsEngineAccount) $($a.Console)" 'PC\Alex True False' 'no record: the current account'
+    $a = Select-WdaVerifyAccount 'PC\Admin' $admin @{ name = 'PC\Alex'; sid = $alex }
+    Assert-Equal "$($a.Name) $($a.Sid) $($a.IsEngineAccount)" "PC\Alex $alex False" 'another administrator: the recorded deployment user'
+    $a = Select-WdaVerifyAccount 'NT AUTHORITY\SYSTEM' 'S-1-5-18' @{ name = 'PC\Alex'; sid = $alex }
+    Assert-Equal "$($a.Name) $($a.Console)" 'PC\Alex False' 'SYSTEM: the recorded deployment user, not the console user'
+    Assert-True (Select-WdaVerifyAccount 'NT AUTHORITY\SYSTEM' 'S-1-5-18' $null).Console 'SYSTEM without a record: the console user'
+    Assert-Equal (Select-WdaVerifyAccount 'PC\Admin' $admin @{ name = 'x'; sid = 'S-1-5-18' }).Name 'PC\Admin' 'a recorded value that is not a user account is ignored'
+    # The installing run records its own account in state.json.
+    Reset-Sim @((New-SimPackage 'Git.Git'))
+    $c = New-AppTestConfig $script:Sim.Packages
+    [void] (Invoke-Logons $c)
+    $st = Get-Content -Raw (Get-StateFile $c) | ConvertFrom-Json
+    Assert-Equal "$($st.engineUser.name) $($st.engineUser.sid)" "$($script:Sim.User.Name) $($script:Sim.User.Sid)" 'recorded by the installing run'
+}
+
+$tests['engine 1.6.0: uninstall evidence in the 64-bit, WOW6432Node and per-user hives, by display-name prefix only'] = {
+    Reset-Sim @((New-VPkg 'Vendor.SixtyFour' -Verify @{ uninstall = @('Sixty Four App') } -Leaves @(@{ Kind = 'uninstall'; Hive = 'Machine64'; Name = 'Sixty Four App 3.1'; Version = '3.1' })),
+                (New-VPkg 'Vendor.ThirtyTwo' -Verify @{ uninstall = @('Thirty Two App') } -Leaves @(@{ Kind = 'uninstall'; Hive = 'Machine32'; Name = 'Thirty Two App'; Version = '7.0' })),
+                (New-VPkg 'Vendor.PerUser' -Verify @{ uninstall = @('Per User App') } -Leaves @(@{ Kind = 'uninstall'; Hive = 'User'; Name = 'Per User App'; Version = '1.0' })),
+                (New-VPkg 'Vendor.Substring' -Verify @{ uninstall = @('Hidden App') } -Leaves @(@{ Kind = 'uninstall'; Hive = 'Machine64'; Name = 'Helper for Hidden App'; Version = '1.0' })))
+    $c = New-AppTestConfig $script:Sim.Packages
+    $o = Invoke-Logons $c
+    Assert-Equal $o[-1] 'Finished:CompletedWithFollowUp' 'the substring-only package is a follow-up'
+    $r = Get-Result $c
+    $w = @{}
+    foreach ($id in 'Vendor.SixtyFour', 'Vendor.ThirtyTwo', 'Vendor.PerUser') { $x = Get-Pkg $r $id; Assert-Equal $x.outcome 'InstalledVerified' "$id verified"; $w[$id] = (@(Get-Evidence $x 'uninstall')[0]) }
+    Assert-True ($w['Vendor.SixtyFour'].detail -match '64-bit' -and $w['Vendor.SixtyFour'].where -eq 'machine') '64-bit record'
+    Assert-True ($w['Vendor.ThirtyTwo'].detail -match '32-bit' -and $w['Vendor.ThirtyTwo'].where -eq 'machine') 'WOW6432Node record'
+    Assert-Equal $w['Vendor.PerUser'].where 'user:TEST\Alex' 'per-user hive of the deployment user'
+    Assert-Equal (Get-Pkg $r 'Vendor.ThirtyTwo').installedVersion '7.0' 'version from the record'
+    $s = Get-Pkg $r 'Vendor.Substring'
+    Assert-Equal "$($s.status) $($s.outcome) $($s.verification) $($s.failureClass) $($s.detection)" 'Succeeded InstallerSucceededVerificationFailed Failed Verification Unconfirmed' 'a substring elsewhere in the name is not evidence'
+}
+
+$tests['engine 1.6.0: AppX evidence: registered for the user (ChatGPT from the Store) or provisioned (skipped, not installed)'] = {
+    Reset-Sim @((New-VPkg '9PLM9XGG6VKS' 'ok-unlisted' @{ appx = @('OpenAI.ChatGPT-Desktop'); perUser = $true } @(@{ Kind = 'appx'; Name = 'OpenAI.ChatGPT-Desktop'; Version = '1.2025.1.0' }) -Source msstore),
+                (New-VPkg '9WZDNCRFJ3PV' 'ok' @{ appx = @('Microsoft.WindowsCalculatorPro') } @() -Source msstore))
+    $script:Sim.AppxProvisioned = @(@{ Name = 'Microsoft.WindowsCalculatorPro'; Version = '11.2.0.0' })
+    $c = New-AppTestConfig $script:Sim.Packages
+    $o = Invoke-Logons $c
+    Assert-Equal $o[-1] 'Finished:Succeeded' 'outcome'
+    $r = Get-Result $c
+    $g = Get-Pkg $r '9PLM9XGG6VKS'
+    $ev = @(Get-Evidence $g 'appx')[0]
+    Assert-Equal "$($g.outcome) $($ev.where) $($g.installedVersion)" 'InstalledVerified user:TEST\Alex 1.2025.1.0' 'registered for the user'
+    $p = Get-Pkg $r '9WZDNCRFJ3PV'
+    Assert-Equal "$($p.status) $($p.outcome) $(@(Get-Evidence $p 'appx')[0].where)" 'AlreadyInstalled InstalledVerified provisioned' 'provisioned package counts'
+    Assert-Equal $script:Sim.Packages[1].InstallCalls 0 'not installed again'
+}
+
+$tests['engine 1.6.0: Node.js is verified from its file and uninstall record, never from the stale PATH of the running process'] = {
+    $savedPath = $env:PATH
+    try {
+        $env:PATH = 'C:\Windows\System32'
+        Reset-Sim @((New-VPkg 'OpenJS.NodeJS.LTS' 'ok-unlisted' @{ uninstall = @('Node.js'); files = @('%ProgramFiles%\nodejs\node.exe') } @(
+            @{ Kind = 'file'; Path = 'C:\Program Files\nodejs\node.exe'; Version = '22.11.0.0' }, @{ Kind = 'uninstall'; Hive = 'Machine64'; Name = 'Node.js'; Version = '22.11.0' })))
+        $c = New-AppTestConfig $script:Sim.Packages
+        $o = Invoke-Logons $c
+        Assert-Equal $o[-1] 'Finished:Succeeded' 'outcome'
+        $p = Get-Pkg (Get-Result $c) 'OpenJS.NodeJS.LTS'
+        Assert-Equal "$($p.outcome) $($p.installedVersion)" 'InstalledVerified 22.11.0.0' 'verified, with the file version'
+        $f = @(Get-Evidence $p 'file')[0]
+        Assert-Equal "$($f.detail)|$($f.where)" 'C:\Program Files\nodejs\node.exe|machine' 'file evidence under the resolved root'
+        Assert-True (@($p.verificationEvidence | Where-Object { $_.kind -eq 'winget' }).Count -eq 0) 'winget list did not show it, the evidence did'
+        Assert-True (-not (@($script:Sim.Probes) -match '(?i)\bpath\b|node -v')) 'no PATH lookup'
+    } finally { $env:PATH = $savedPath }
+}
+
+$tests['engine 1.6.0: Visual C++ 2015+ x86 is detected independently of x64 (WOW6432Node); installed runtimes are skipped; inventory lists every runtime'] = {
+    $k64 = 'HKLM\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\X64'
+    $k86 = 'HKLM\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\X86'
+    $x64 = New-VPkg 'Microsoft.VCRedist.2015+.x64' 'ok' @{ registry = @(@{ key = $k64; name = 'Installed'; equals = '1'; view = '64' }) } @()
+    $x86 = New-VPkg 'Microsoft.VCRedist.2015+.x86' 'ok' @{ registry = @(@{ key = $k86; name = 'Installed'; equals = '1'; view = '32' }) } @(@{ Kind = 'registry'; View = '32'; Key = $k86; Name = 'Installed'; Value = 1 })
+    $x86.Installed = $true   # WinGet's own record claims it; only the 32-bit runtime key decides.
+    Reset-Sim @($x64, $x86)
+    $script:Sim.Registry["64|$k64|Installed"] = 1
+    $script:Sim.Registry["64|$k64|Version"] = 'v14.40.33810.00'
+    $script:Sim.Registry["32|$k86|Installed"] = 0
+    $script:Sim.Uninstall.Machine32 = @(@{ DisplayName = 'Microsoft Visual C++ 2015-2022 Redistributable (x64) - 14.40.33810'; DisplayVersion = '14.40.33810.0' },
+                                        @{ DisplayName = 'Microsoft Visual C++ 2013 Redistributable (x86) - 12.0.40664'; DisplayVersion = '12.0.40664.0' },
+                                        @{ DisplayName = 'Microsoft Visual C++ 2005 Redistributable'; DisplayVersion = '8.0.61001' })
+    $script:Sim.Uninstall.Machine64 = @(@{ DisplayName = 'Microsoft Visual C++ 2010  x64 Redistributable - 10.0.40219'; DisplayVersion = '10.0.40219' },
+                                        @{ DisplayName = 'Microsoft Visual C++ 2022 X64 Minimum Runtime - 14.40.33810'; DisplayVersion = '14.40.33810' })
+    $c = New-AppTestConfig $script:Sim.Packages
+    $o = Invoke-Logons $c
+    Assert-Equal $o[-1] 'Finished:Succeeded' 'outcome'
+    $r = Get-Result $c
+    $a = Get-Pkg $r 'Microsoft.VCRedist.2015+.x64'
+    Assert-Equal "$($a.status) $($a.outcome) $($script:Sim.Packages[0].InstallCalls)" 'AlreadyInstalled InstalledVerified 0' 'x64 runtime present: skipped, not reinstalled'
+    $b = Get-Pkg $r 'Microsoft.VCRedist.2015+.x86'
+    Assert-Equal "$($b.status) $($b.outcome) $($script:Sim.Packages[1].InstallCalls)" 'Succeeded InstalledVerified 1' 'x86 is not satisfied by x64 (nor by WinGet''s record): installed'
+    Assert-True ((@(Get-Evidence $b 'registry')[0].detail) -match 'Runtimes\\X86\\Installed = 1 \(32-bit view\)') 'x86 evidence from the 32-bit view'
+    Assert-True (@($script:Sim.Probes) -contains "registry:32:$k86\Installed") 'x86 checked in the WOW6432Node view'
+    $inv = @(Get-WdaRuntimeInventory)
+    [string[]] $names = @($inv | ForEach-Object { "$($_.family)/$($_.architecture)/$($_.source)" })
+    [Array]::Sort($names, [StringComparer]::Ordinal)
+    $got = $names -join ' '
+    Assert-Equal $got '2005/x86/uninstall 2010/x64/uninstall 2013/x86/uninstall 2015+/x64/runtimeKey 2015+/x86/runtimeKey 2015-2022/x64/uninstall' 'inventory (Minimum Runtime components are not listed)'
+    Assert-Equal (@($inv | Where-Object { $_.family -eq '2015+' -and $_.architecture -eq 'x64' })[0].version) '14.40.33810.00' 'runtime key version'
+    Assert-Equal @($r.runtimes).Count 6 'result.json carries the inventory'
+}
+
+$tests['engine 1.6.0: Claude Desktop per user: evidence only in the user''s hive and LocalAppData verifies it'] = {
+    Reset-Sim @((New-VPkg 'Anthropic.Claude' 'ok-unlisted' @{ uninstall = @('Claude'); files = @('%LocalAppData%\AnthropicClaude\claude.exe'); perUser = $true } @(
+        @{ Kind = 'uninstall'; Hive = 'User'; Name = 'Claude'; Version = '0.9.3' }, @{ Kind = 'file'; Path = 'C:\Users\Alex\AppData\Local\AnthropicClaude\claude.exe'; Version = '0.9.3.0' })))
+    $c = New-AppTestConfig $script:Sim.Packages
+    $o = Invoke-Logons $c
+    Assert-Equal $o[-1] 'Finished:Succeeded' 'outcome'
+    $p = Get-Pkg (Get-Result $c) 'Anthropic.Claude'
+    Assert-Equal "$($p.outcome) $($p.installedVersion)" 'InstalledVerified 0.9.3.0' 'verified'
+    Assert-Equal ((@($p.verificationEvidence) | ForEach-Object { "$($_.kind)@$($_.where)" }) -join ' ') 'uninstall@user:TEST\Alex file@user:TEST\Alex' 'evidence in the user''s hive and profile'
+    Assert-True (-not (@($script:Sim.Probes) -match '(?i)systemprofile|config\\systemprofile')) 'the SYSTEM profile is never used'
+}
+
+$tests['engine 1.6.0: Claude Desktop per user, user hive not loaded: Pending (not a success), re-verified at the next sign-in'] = {
+    $leaves = @(@{ Kind = 'uninstall'; Hive = 'User'; Name = 'Claude'; Version = '0.9.3' }, @{ Kind = 'file'; Path = 'C:\Users\Alex\AppData\Local\AnthropicClaude\claude.exe'; Version = '0.9.3.0' })
+    Reset-Sim @((New-VPkg 'Anthropic.Claude' 'ok' @{ uninstall = @('Claude'); files = @('%LocalAppData%\AnthropicClaude\claude.exe'); perUser = $true } @()), (New-SimPackage 'Git.Git'))
+    $script:Sim.User = @{ Name = 'TEST\Alex'; Sid = 'S-1-5-21-1000-2000-3000-1001'; ProfilePath = ''; HiveLoaded = $false; IsEngineAccount = $false }
+    $c = New-AppTestConfig $script:Sim.Packages
+    $o = Invoke-Logons $c
+    Assert-Equal $o[-1] 'Finished:CompletedWithFollowUp' 'never green while unverified'
+    $r = Get-Result $c
+    $p = Get-Pkg $r 'Anthropic.Claude'
+    Assert-Equal "$($p.status) $($p.verification) $($p.outcome)" 'Succeeded Pending InstallerSucceededVerificationPending' 'pending'
+    Assert-True ($p.verificationNote -match 'winget list was not run') 'WinGet''s record is not read from another account'
+    Assert-Equal "$($r.counts.succeeded) $($r.counts.verificationPending)" '1 1' 'not counted as a success'
+    Assert-True (-not $script:Sim.TaskRemoved) 'task kept for the re-verification'
+    Assert-True (@($r.followUp) -match 'InstallerSucceededVerificationPending') 'follow-up lists it'
+    # The user signs in: the hive and profile are there, and so is the evidence.
+    $script:Sim.User = @{ Name = 'TEST\Alex'; Sid = 'S-1-5-21-1000-2000-3000-1001'; ProfilePath = 'C:\Users\Alex'; HiveLoaded = $true; IsEngineAccount = $false }
+    $script:Sim.Packages[0].Leaves = $leaves; Add-SimEvidence $script:Sim.Packages[0]
+    $script:Sim.Now = $script:Sim.Now.AddHours(20)
+    Assert-Equal (Invoke-WdaMain $c) 'Reverified:Succeeded' 're-verified at the sign-in'
+    $r = Get-Result $c
+    $p = Get-Pkg $r 'Anthropic.Claude'
+    Assert-Equal "$($p.status) $($p.verification) $($p.outcome)" 'Succeeded Verified InstalledVerified' 'verified'
+    Assert-Equal "$($r.status) $($r.counts.succeeded) $($r.reverification.starts)" 'Succeeded 2 1' 'result rewritten'
+    Assert-Equal $script:Sim.Packages[0].InstallCalls 1 'not installed again'
+    Assert-True $script:Sim.TaskRemoved 'task removed'
+    Assert-True ((Get-Content -LiteralPath (Join-Path $c.dataRoot 'state\applications.done') -Raw) -match 'Succeeded') 'marker updated'
+}
+
+$tests['engine 1.6.0: a pending verification that never resolves becomes Failed when the re-verification budget ends (bounded)'] = {
+    Reset-Sim @((New-VPkg 'Vendor.SignIn' 'ok-unlisted' @{ uninstall = @('Sign In App'); after = 'signIn' } @()))
+    $c = New-AppTestConfig $script:Sim.Packages
+    [void] (Invoke-Logons $c)
+    $p = Get-Pkg (Get-Result $c) 'Vendor.SignIn'
+    Assert-Equal "$($p.verification) $($p.outcome)" 'Pending RestartOrSignInRequired' 'waits for a sign-in'
+    $outs = @()
+    for ($i = 0; $i -lt 60; $i++) { $script:Sim.Now = $script:Sim.Now.AddHours(1); $o = Invoke-WdaMain $c; $outs += $o; if ($o -eq 'AlreadyFinished') { break } }
+    Assert-True ($outs.Count -le $script:ReverifyMaxStarts + 1) "bounded ($($outs.Count) starts)"
+    $p = Get-Pkg (Get-Result $c) 'Vendor.SignIn'
+    Assert-Equal "$($p.verification) $($p.outcome) $($p.failureClass)" 'Failed InstallerSucceededVerificationFailed Verification' 'no evidence in the end: failed verification'
+    Assert-True $script:Sim.TaskRemoved 'task removed at the end of the budget'
+}
+
+$tests['engine 1.6.0: Adobe Reader: an "Apps & features" display-name prefix is evidence; already installed means skipped, no install call'] = {
+    Reset-Sim @((New-VPkg 'Adobe.Acrobat.Reader.64-bit' 'ok' @{ uninstall = @('Adobe Acrobat (64-bit)') } @()))
+    $script:Sim.Uninstall.Machine64 = @(@{ DisplayName = 'Adobe Acrobat (64-bit)'; DisplayVersion = '25.001.20474' })
+    $c = New-AppTestConfig $script:Sim.Packages
+    $o = Invoke-Logons $c
+    Assert-Equal $o[-1] 'Finished:Succeeded' 'outcome'
+    $p = Get-Pkg (Get-Result $c) 'Adobe.Acrobat.Reader.64-bit'
+    Assert-Equal "$($p.status) $($p.outcome) $($p.installedVersion)" 'AlreadyInstalled InstalledVerified 25.001.20474' 'already installed, with evidence'
+    Assert-Equal $script:Sim.Packages[0].InstallCalls 0 'no install call'
+    Assert-True ($p.message -match 'Adobe Acrobat \(64-bit\)') 'the message names the evidence'
+}
+
+$tests['engine 1.6.0: installer success without any evidence: InstallerSucceededVerificationFailed, a follow-up, never counted as success'] = {
+    Reset-Sim @((New-VPkg 'Vendor.Ghost' 'false-success' @{ uninstall = @('Ghost App'); files = @('%ProgramFiles%\Ghost\ghost.exe') } @()), (New-SimPackage 'Git.Git'))
+    $c = New-AppTestConfig $script:Sim.Packages
+    $o = Invoke-Logons $c
+    Assert-Equal $o[-1] 'Finished:CompletedWithFollowUp' 'never green'
+    $r = Get-Result $c
+    $p = Get-Pkg $r 'Vendor.Ghost'
+    Assert-Equal "$($p.status) $($p.verification) $($p.outcome) $($p.failureClass) $($p.detection)" 'Succeeded Failed InstallerSucceededVerificationFailed Verification Unconfirmed' 'verification failed'
+    Assert-Equal "$($r.counts.succeeded) $($r.counts.verificationFailed)" '1 1' 'counted as a failed verification, not a success'
+    Assert-True (@($r.followUp) -match 'Ghost') 'follow-up'
+    Assert-True $script:Sim.TaskRemoved 'nothing pending: task removed'
+    Save-Result $c 'verification'
+}
+
+$tests['engine 1.6.0: outcomes of packages that are not installed: manual, interaction required, unavailable, deselected, dependency'] = {
+    Reset-Sim @((New-SimPackage 'Vendor.Interactive' -Interaction required), (New-SimPackage 'Gone.Package' 'notfound'), (New-SimPackage 'Vendor.Base' 'code'), (New-SimPackage 'Vendor.Child' -After @('winget:vendor.base')))
+    $script:Sim.Packages[2].Code = 0x8A15003A
+    $c = New-AppTestConfig $script:Sim.Packages -Overrides @{ maxAttemptsPerPackage = 1; manual = @(@{ key = 'catalog:filezilla'; displayName = 'FileZilla'; instructions = 'Download it.'; url = '' }); deselected = @(@{ key = 'winget:valve.steam'; packageIdentifier = 'Valve.Steam'; source = 'winget'; displayName = 'Steam' }) }
+    [void] (Invoke-Logons $c)
+    $r = Get-Result $c
+    $by = @{}; foreach ($x in $r.packages) { $by[$x.key] = "$($x.outcome)/$($x.verification)" }
+    Assert-Equal $by['winget:vendor.interactive'] 'UnattendedUnsupported/NotApplicable' 'interaction required: never attempted'
+    Assert-Equal $script:Sim.Packages[0].InstallCalls 0 'not attempted'
+    Assert-Equal $by['winget:gone.package'] 'PackageUnavailable/NotApplicable' 'unavailable'
+    Assert-Equal $by['winget:vendor.base'] 'InstallationFailed/NotApplicable' 'failed'
+    Assert-Equal $by['winget:vendor.child'] 'Skipped/NotApplicable' 'blocked by its dependency'
+    Assert-Equal $by['catalog:filezilla'] 'ManualSetupRequired/NotApplicable' 'manual'
+    Assert-Equal $by['winget:valve.steam'] 'Skipped/NotApplicable' 'deselected'
+}
+
+$tests['engine 1.6.0: -Mode Verify re-checks every package, installs nothing, changes no status, rewrites result.json; exit 0/10/20'] = {
+    Reset-Sim @((New-VPkg 'Vendor.Ghost' 'false-success' @{ uninstall = @('Ghost App') } @()), (New-SimPackage 'Git.Git'))
+    $c = New-AppTestConfig $script:Sim.Packages
+    [void] (Invoke-Logons $c)
+    $calls = @($script:Sim.Packages | ForEach-Object { $_.InstallCalls }) -join ','
+    $events = @($script:Sim.Events).Count
+    $script:Sim.TaskRemoved = $false
+    $v = Invoke-WdaVerify $c
+    Assert-Equal "$($v.ExitCode) $($v.Outcome)" '20 Failed' 'a failed verification: exit 20'
+    # Installed by hand afterwards: evidence appears.
+    $script:Sim.Uninstall.Machine64 = @(@{ DisplayName = 'Ghost App'; DisplayVersion = '1.0' })
+    $v = Invoke-WdaVerify $c
+    Assert-Equal "$($v.ExitCode) $($v.Outcome)" '0 Verified' 'everything verified: exit 0'
+    $r = Get-Result $c
+    $p = Get-Pkg $r 'Vendor.Ghost'
+    Assert-Equal "$($p.status) $($p.verification) $($p.outcome) $($p.detection)" 'Succeeded Verified InstalledVerified Installed' 'only the verification changed'
+    Assert-Equal $r.status 'Succeeded' 'result.json rewritten with the new final status'
+    Assert-Equal (@($script:Sim.Packages | ForEach-Object { $_.InstallCalls }) -join ',') $calls 'nothing installed'
+    Assert-True (-not $script:Sim.TaskRemoved) 'the task is not touched'
+    Assert-Equal @($script:Sim.Events).Count $events 'no event written'
+    Assert-Equal (@($v.Packages | ForEach-Object { $_.outcome }) -join ',') 'InstalledVerified,InstalledVerified' 'report'
+    # A pending verification: exit 10.
+    Reset-Sim @((New-VPkg 'Anthropic.Claude' 'ok' @{ uninstall = @('Claude'); perUser = $true } @()))
+    $script:Sim.User = @{ Name = 'TEST\Alex'; Sid = 'S-1-5-21-1000-2000-3000-1001'; ProfilePath = ''; HiveLoaded = $false; IsEngineAccount = $false }
+    $c2 = New-AppTestConfig $script:Sim.Packages
+    [void] (Invoke-Logons $c2)
+    Assert-Equal (Invoke-WdaVerify $c2).ExitCode 10 'pending: exit 10'
+    Assert-Equal $script:Sim.Packages[0].InstallCalls 1 'still installed only once'
+}
+
+$tests['engine 1.6.0: -Mode Verify before the engine ran: reports from evidence and writes nothing'] = {
+    Reset-Sim @((New-VPkg 'Adobe.Acrobat.Reader.64-bit' 'ok' @{ uninstall = @('Adobe Acrobat (64-bit)') } @()), (New-VPkg 'Vendor.Missing' 'ok' @{ uninstall = @('Missing App') } @()))
+    $script:Sim.Uninstall.Machine64 = @(@{ DisplayName = 'Adobe Acrobat (64-bit)'; DisplayVersion = '25.1' })
+    $c = New-AppTestConfig $script:Sim.Packages
+    $v = Invoke-WdaVerify $c
+    Assert-Equal $v.ExitCode 10 'a package that is not there yet is not done (exit 10)'
+    Assert-Equal (@($v.Packages | ForEach-Object { "$($_.status)/$($_.outcome)" }) -join ',') 'Pending/InstalledVerified,Pending/Skipped' 'report'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $c.dataRoot 'Applications\state.json'))) 'no state written'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $c.dataRoot 'Applications\result.json'))) 'no result written'
+    Assert-Equal (@($script:Sim.Packages | ForEach-Object { $_.InstallCalls }) -join ',') '0,0' 'nothing installed'
+}
+
+$tests['engine 1.6.0: a state written by engine 1.5.0 resumes with verification derived from its detection'] = {
+    $e1 = @{ key = 'winget:git.git'; status = 'Succeeded'; detection = 'Installed'; attempts = 1 }
+    $e2 = @{ key = 'winget:vendor.ghost'; status = 'Succeeded'; detection = 'Unconfirmed'; attempts = 1 }
+    $e3 = @{ key = 'winget:vendor.down'; status = 'Failed'; detection = ''; attempts = 2; failureClass = 'Integrity' }
+    foreach ($e in $e1, $e2, $e3) { Add-WdaEntryFields $e 'app' }
+    Assert-Equal "$($e1.verification) $(Get-WdaOutcome $e1)" 'Verified InstalledVerified' 'confirmed by winget list'
+    Assert-Equal "$($e2.verification) $(Get-WdaOutcome $e2)" 'Failed InstallerSucceededVerificationFailed' 'unconfirmed stays a follow-up'
+    Assert-Equal "$($e3.verification) $(Get-WdaOutcome $e3) $(Get-WdaLifecycle $e3)" 'NotApplicable InstallationFailed FailedPermanent' 'the old Integrity class stays permanent'
+}
+
+$tests['engine 1.6.0: stale download removal touches exact folder names only and never follows links'] = {
+    Reset-Sim @()
+    $tmp = $script:Sim.WinGetTemp
+    foreach ($d in 'Vendor.App', 'Vendor.App.2.0', 'Vendor.App.20', 'Vendor.AppX', 'Vendor.App.2.0.extra') { New-Item -ItemType Directory -Path (Join-Path $tmp $d) -Force | Out-Null }
+    $removed = @(Remove-WdaStaleDownload 'Vendor.App' '2.0')
+    Assert-Equal (@($removed | ForEach-Object { Split-Path -Leaf $_ }) -join ',') 'Vendor.App,Vendor.App.2.0' 'exact names'
+    foreach ($d in 'Vendor.App.20', 'Vendor.AppX', 'Vendor.App.2.0.extra') { Assert-True (Test-Path -LiteralPath (Join-Path $tmp $d)) "$d kept" }
+    Assert-Equal @(Remove-WdaStaleDownload '..\Windows' '').Count 0 'invalid identifiers are refused'
+    Assert-Equal @(Remove-WdaStaleDownload 'Vendor.App' '..\..').Count 0 'an invalid version adds no other name'
+    Remove-Item -LiteralPath $tmp -Recurse -Force
 }
 
 foreach ($name in $tests.Keys) {

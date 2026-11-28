@@ -14,8 +14,9 @@ import {
   entryKey,
   methodOf,
 } from '../../src/engine/applications/catalog';
-import { BUILTIN_PROFILES, BUILTIN_REFERENCED, UNIVERSAL_PROFILES, builtinProfile, deviceProfiles, isSelectableProfile } from '../../src/engine/applications/builtin';
-import { MSSTORE_ID, WINGET_ID, packageKey } from '../../src/engine/applications/ids';
+import { BUILTIN_REFERENCED, UNIVERSAL_PROFILES, builtinProfile as currentBuiltin, builtinProfiles, deviceProfiles, isSelectableProfile } from '../../src/engine/applications/builtin';
+import { packageKey } from '../../src/engine/applications/ids';
+import { removalForCatalogId } from '../../src/engine/applications/catalog';
 import { installable, resolveSelection } from '../../src/engine/applications/selection';
 import {
   addPackage,
@@ -44,13 +45,21 @@ const fixture = (name: string) => readFileSync(new URL(`./fixtures/${name}`, imp
 const M1_XML = fixture('m1-owner-default-alex.xml');
 const id = (catalogId: string) => entryKey(catalogEntryById(catalogId)!);
 const ref = (catalogId: string) => catalogRef(catalogEntryById(catalogId)!)!;
-const fresh = (): ApplicationsSelection => structuredClone(ownerDefaults().applications.selection);
+/**
+ * These tests pin revision 1 of the built-in profiles (frozen in profiles-v1.json): the definitions
+ * every deployment and saved profile created before the 2026-11-26 rebuild keeps. Revision 2 is
+ * covered by unified-catalog.test.ts.
+ */
+const BUILTIN_PROFILES = builtinProfiles(1);
+const builtinProfile = (id: string) => currentBuiltin(id, 1);
+const fresh = (): ApplicationsSelection => ({ ...structuredClone(ownerDefaults().applications.selection), profileRevision: 1 });
 const selected = (s: ApplicationsSelection) => resolveSelection(s).packages.map((p) => p.catalog?.id ?? p.key);
 const devices = (d: Partial<Devices>): Devices => ({ phone: 'none', ipad: false, extraIphone: false, androidTablet: false, ...d });
 // Phase 10 (owner's instruction): RustDesk is no longer a Core Essentials default; it is optional there.
 const CORE = ['chrome', 'vlc', '7zip', 'teracopy', 'bitwarden', 'vcredist-x64', 'vcredist-x86'];
 const verification = JSON.parse(fixture('../../../docs/phase-4-2-application-profiles/verification-2026-10-21.json')) as { id: string; source: string; ok: boolean; publisher: string }[];
 const repository = JSON.parse(fixture('../../../docs/phase-10-application-manager/winget-verification-2026-10-25.json')) as { results: { id: string; found: boolean }[] };
+const expansion = JSON.parse(fixture('../../../docs/unified-app-catalog/winget-verification-2026-11-26.json')) as { results: { id: string; canonicalId?: string; found: boolean; allHashed?: boolean }[] };
 
 describe('catalog (Phase 4.2)', () => {
   it('has unique ids and package keys, valid categories, and only https links', () => {
@@ -63,26 +72,32 @@ describe('catalog (Phase 4.2)', () => {
     }
   });
 
-  it('counts: the 115 Phase 4.2 entries (94 WinGet, 11 Store, 4 portable, 6 manual) plus 74 Phase 10 WinGet entries and VMware (manual)', () => {
-    const by = (list: typeof CATALOG, m: string) => list.filter((e) => methodOf(e) === m).length;
-    const p42 = CATALOG.filter((e) => e.validation.checkedAt === '2026-10-21');
-    expect([p42.length, by(p42, 'winget'), by(p42, 'msstore'), by(p42, 'portable'), by(p42, 'manual'), by(p42, 'vendor')]).toEqual([115, 94, 11, 4, 6, 0]);
-    const p10 = CATALOG.filter((e) => e.validation.checkedAt === '2026-10-25');
-    expect([p10.length, by(p10, 'winget'), by(p10, 'manual')]).toEqual([75, 74, 1]);
-    expect(CATALOG.length).toBe(190);
+  it('counts after the catalog audit of 2026-11-27: 287 entries (263 WinGet, 12 Store, 4 portable, 8 manual), every automated entry rechecked that day', () => {
+    const by = (m: string) => CATALOG.filter((e) => methodOf(e) === m).length;
+    expect([CATALOG.length, by('winget'), by('msstore'), by('portable'), by('manual'), by('vendor')]).toEqual([287, 263, 12, 4, 8, 0]);
+    expect(CATALOG.filter((e) => methodOf(e) === 'manual').map((e) => e.id).sort()).toEqual(['battlenet', 'dotnet-framework-35', 'filezilla', 'freefilesync', 'launchbox', 'rustdesk', 'spybot', 'vmware-workstation']);
+    expect(CATALOG.filter((e) => methodOf(e) !== 'manual' && e.validation.checkedAt !== '2026-11-27').map((e) => e.id)).toEqual([]);
   });
 
   it('every WinGet and Store identifier is one that a recorded verification found (never invented)', () => {
+    // Earlier read-only checks (2026-10-21 winget show, 2026-10-25 repository, 2026-11-26 expansion) and the
+    // 2026-11-27 audit: a WinGet id needs its manifest at the exact path; a Store id a lookup that resolved.
     const found = new Set(verification.filter((v) => v.ok).map((v) => `${v.source}:${v.id}`.toLowerCase()));
     const repo = new Set(repository.results.filter((r) => r.found).map((r) => `winget:${r.id}`.toLowerCase()));
+    const exp = new Set(expansion.results.filter((r) => r.found && r.allHashed).map((r) => `winget:${r.canonicalId}`.toLowerCase()));
+    const audit = JSON.parse(readFileSync(new URL('../../docs/unified-app-catalog/catalog-audit.json', import.meta.url), 'utf8')) as {
+      entries: { id: string; status: string; source: string; packageIdentifier: string | null; manifest?: { path: string }; store?: { id: string; resolves: boolean } }[];
+    };
+    const rec = new Map(audit.entries.map((r) => [r.id, r]));
     for (const e of CATALOG.filter((x) => x.packageIdentifier)) {
       const key = `${e.source}:${e.packageIdentifier}`.toLowerCase();
-      // Phase 4.2 entries: winget show (2026-10-21). Phase 10 entries: the WinGet repository (2026-10-25).
-      expect(e.validation.checkedAt === '2026-10-21' ? found.has(key) : repo.has(key), `${e.id} ${e.packageIdentifier}`).toBe(true);
-      // Every WinGet identifier, old or new, is also in the 2026-10-25 repository check.
-      if (e.source === 'winget') expect(repo.has(key), `${e.id} in the 2026-10-25 check`).toBe(true);
-      expect(e.validation.status, e.id).toBe('verified');
-      expect((e.source === 'winget' ? WINGET_ID : MSSTORE_ID).test(e.packageIdentifier!), e.id).toBe(true);
+      const r = rec.get(e.id);
+      expect(r?.status, `${e.id}: audited`).toBe('verified');
+      const byAudit =
+        e.source === 'winget'
+          ? !!r?.manifest && r.packageIdentifier === e.packageIdentifier && r.manifest.path.toLowerCase().startsWith(`manifests/${e.packageIdentifier![0]!.toLowerCase()}/${e.packageIdentifier!.toLowerCase().split('.').join('/')}/`)
+          : !!r?.store && r.store.resolves && r.store.id === e.packageIdentifier;
+      expect(byAudit || found.has(key) || repo.has(key) || exp.has(key), `${e.id} ${e.packageIdentifier}`).toBe(true);
     }
   });
 
@@ -106,7 +121,8 @@ describe('catalog (Phase 4.2)', () => {
 
   it('manual entries carry a reason, instructions and an official https download, and are never WinGet packages', () => {
     const manual = CATALOG.filter((e) => methodOf(e) === 'manual');
-    expect(manual.map((e) => e.id).sort()).toEqual(['dotnet-framework-35', 'filezilla', 'freefilesync', 'launchbox', 'rustdesk', 'spybot', 'vmware-workstation']);
+    // Battle.net became manual in the 2026-11-27 audit (its setup has no silent mode).
+    expect(manual.map((e) => e.id).sort()).toEqual(['battlenet', 'dotnet-framework-35', 'filezilla', 'freefilesync', 'launchbox', 'rustdesk', 'spybot', 'vmware-workstation']);
     for (const e of manual) {
       expect(e).toMatchObject({ packageIdentifier: null, source: 'none', interaction: 'required', validation: { status: 'manual' } });
       expect(e.manual!.url, e.id).toMatch(/^https:\/\//);
@@ -134,14 +150,20 @@ describe('catalog (Phase 4.2)', () => {
 
   it('owner exclusions are recorded and none of them is a catalog entry', () => {
     const names = CATALOG_EXCLUDED.map((x) => x.name);
-    for (const n of ['Brave', 'Vivaldi', 'Pidgin', 'Dropbox', 'SugarSync', 'Foxit Reader', 'PDF24 Creator', 'CutePDF', 'Ghostscript', 'SumatraPDF', 'Paint.NET', 'Krita', 'IrfanView', 'Greenshot', 'ShareX', 'WinDirStat', 'Apple TV']) {
+    for (const n of ['Brave', 'Vivaldi', 'Pidgin', 'Dropbox', 'SugarSync', 'Foxit Reader', 'PDF24 Creator', 'CutePDF', 'Ghostscript', 'IrfanView', 'WinDirStat', 'Apple TV']) {
       expect(names, n).toContain(n);
       expect(CATALOG.some((e) => e.displayName.toLowerCase().includes(n.toLowerCase())), n).toBe(false);
+    }
+    // 2026-11-26 (owner decision): these five exclusions were lifted and are verified catalog entries now.
+    for (const [n, cid] of [['SumatraPDF', 'sumatrapdf'], ['Paint.NET', 'paint-net'], ['Krita', 'krita'], ['Greenshot', 'greenshot'], ['ShareX', 'sharex']] as const) {
+      expect(names, n).not.toContain(n);
+      // Added 2026-11-26, rechecked by the 2026-11-27 audit.
+      expect(catalogEntryById(cid), n).toMatchObject({ displayName: n, source: 'winget', validation: { status: 'verified', checkedAt: '2026-11-27' } });
     }
     // Phase 10: the owner's inventory (2026-10-25) lists Opera and LibreOffice, superseding the earlier exclusions.
     for (const n of ['Opera', 'LibreOffice']) {
       expect(names, n).not.toContain(n);
-      expect(CATALOG.some((e) => e.displayName === n && e.validation.checkedAt === '2026-10-25'), n).toBe(true);
+      expect(CATALOG.some((e) => e.displayName === n && e.validation.status === 'verified' && e.validation.checkedAt === '2026-11-27'), n).toBe(true);
     }
     expect(catalogJson.catalogVersion).toBe(2);
   });
@@ -152,11 +174,16 @@ describe('catalog (Phase 4.2)', () => {
   });
 });
 
-describe('built-in profiles', () => {
+describe('built-in profiles, revision 1 (frozen for older deployments)', () => {
   it('are templates: validated, read-only, and only reference packages that exist', () => {
     expect(BUILTIN_PROFILES.map((p) => p.id)).toEqual(['core', 'everyday', 'gaming', 'developer', 'network-engineer', 'music', 'creator', 'workstation', 'apple-devices', 'android-devices', 'laptop', 'touch']);
     expect(BUILTIN_PROFILES.every((p) => p.builtin)).toBe(true);
-    for (const cid of BUILTIN_REFERENCED) expect(entryKey(catalogEntryById(cid)!), cid).toBeTruthy();
+    // Revision 1 is frozen: an app removed from the catalog since stays named, with its removal record.
+    for (const cid of BUILTIN_REFERENCED) {
+      const e = catalogEntryById(cid);
+      if (e) expect(entryKey(e), cid).toBeTruthy();
+      else expect(removalForCatalogId(cid)?.removed?.formerId, cid).toBe(cid);
+    }
     expect(UNIVERSAL_PROFILES).toEqual(['core']);
     expect(isSelectableProfile('apple-devices')).toBe(false);
     expect(isSelectableProfile('gaming')).toBe(true);
@@ -496,7 +523,7 @@ describe('antivirus and security selections', () => {
     const cfg = applicationsConfig(p);
     // Only identity, order and metadata reach the engine: no credentials, keys, servers, ports or arguments.
     const keys = new Set(cfg.packages.flatMap(Object.keys));
-    expect([...keys].sort()).toEqual(['after', 'displayName', 'interaction', 'key', 'method', 'packageIdentifier', 'portable', 'scope', 'source', 'version']);
+    expect([...keys].sort()).toEqual(['after', 'displayName', 'interaction', 'key', 'method', 'packageIdentifier', 'portable', 'scope', 'source', 'verify', 'version']);
     expect(JSON.stringify(cfg.packages)).not.toMatch(/authkey|--unattended|--password|netsh|firewall|\.conf"|https?:/i);
     expect(catalogEntryById('rustdesk')!.manual!.instructions).toMatch(/Leave unattended access off/);
     expect(catalogEntryById('tailscale')!.description).toMatch(/does not sign in, join a tailnet or connect/);
@@ -565,7 +592,7 @@ describe('engine plan and USB package', () => {
     expect(c.packages.map((x) => x.key)).toEqual(installable(r).map((x) => x.key));
     expect(c.packages.find((x) => x.packageIdentifier === 'Rufus.Rufus')).toMatchObject({ method: 'portable', scope: 'machine', portable: { executable: 'rufus*.exe', shortcut: 'Rufus' } });
     expect(c.packages.find((x) => x.packageIdentifier === '9NP83LWLPZ9K')).toMatchObject({ method: 'msstore', source: 'msstore' });
-    expect(c.manual.map((x) => x.key)).toEqual(['catalog:rustdesk']);
+    expect(c.manual.map((x) => x.key)).toEqual(['catalog:battlenet', 'catalog:rustdesk']);
     expect(c.deselected.map((x) => x.key)).toEqual([id('epic')]);
   });
 

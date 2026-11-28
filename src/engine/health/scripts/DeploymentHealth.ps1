@@ -26,6 +26,16 @@
     (Click-to-Run registry, activation as the activation stage recorded it) and optional
     manufacturer utilities (recommendations only; nothing is ever installed by this check).
 
+    Health engine 1.2.0 verifies applications with the same evidence as the application engine
+    (1.6.0; the catalog's "verify" block in health-config.json): uninstall records by display-name
+    prefix (machine-wide 64- and 32-bit, and the deployment user's own when that user's registry is
+    loaded; hives are never loaded), Store packages (registered for the user, or provisioned), files
+    (also below the deployment user's profile, never SYSTEM's) and registry values. The engine's
+    outcome is shown as history beside the evidence found now. Nothing is "installed" without
+    evidence, and nothing is "missing" only because a machine-wide uninstall record is absent: per-
+    user evidence that cannot be read yet is reported as pending. Visual C++ runtimes are listed by
+    family and architecture (x86 and x64 separately).
+
     It can run at any time later, without replaying the deployment:
         powershell.exe -ExecutionPolicy Bypass -File C:\ProgramData\WindowsDeploymentBuilder\Package\scripts\health\DeploymentHealth.ps1 -Mode Verify
         ... -Mode Dashboard   (verifies, then opens the technician report)
@@ -36,6 +46,8 @@
                               remove it (only when no restoration is outstanding; never the USB copy)
       -Mode ExportDiagnostics a sanitized ZIP (no backups, no answer files, no passwords)
       -ScanUpdates            also ask Windows Update which updates are still available (read-only)
+      -CheckAppUpdates        also list WinGet updates of the selected applications (read-only
+                              "winget upgrade"; WinGet lists per user, so not possible as SYSTEM)
 
     Exit codes (Verify): 0 Ready, 10 ReadyWithWarnings, 20 NeedsAttention, 30 Incomplete,
     50 Unverifiable, 60 Failed. Other modes: 0 done, 1 refused or nothing to do, 4 needs elevation.
@@ -50,6 +62,7 @@ param(
     [ValidateSet('Technician', 'DeploymentComplete', 'Startup', 'Recovery', 'Test')]
     [string] $Trigger = 'Technician',
     [switch] $ScanUpdates,
+    [switch] $CheckAppUpdates,
     [switch] $Json,
     [string] $ConfirmCleanup = '',
     [string] $OutputPath = '',
@@ -58,11 +71,11 @@ param(
 
 $script:WdhMain = $MyInvocation.InvocationName -ne '.' -and $Mode -ne 'Library'
 # Captured first: the shared functions dot-sourced below bind their own parameters in this scope.
-$script:WdhArgs = @{ Mode = $Mode; Trigger = $Trigger; ScanUpdates = [bool] $ScanUpdates; Json = [bool] $Json; ConfirmCleanup = $ConfirmCleanup; OutputPath = $OutputPath; Elevate = [bool] $Elevate }
+$script:WdhArgs = @{ Mode = $Mode; Trigger = $Trigger; ScanUpdates = [bool] $ScanUpdates; CheckAppUpdates = [bool] $CheckAppUpdates; Json =[bool] $Json; ConfirmCleanup = $ConfirmCleanup; OutputPath = $OutputPath; Elevate = [bool] $Elevate }
 if (-not (Get-Command Read-WddManifest -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot '..\common\DeploymentCommon.ps1') }
 Set-StrictMode -Version 2.0
 
-$script:WdhVersion = '1.1.0'
+$script:WdhVersion = '1.2.0'
 $script:WdhScriptRoot = $PSScriptRoot
 $script:WdhStates = @('Ready', 'ReadyWithWarnings', 'NeedsAttention', 'Incomplete', 'Unverifiable', 'Failed')
 $script:WdhExitCodes = @{ Ready = 0; ReadyWithWarnings = 10; NeedsAttention = 20; Incomplete = 30; Unverifiable = 50; Failed = 60 }
@@ -359,8 +372,8 @@ function Get-WdhUninstallEntries {
     param([string] $Sid = '')
     $out = @()
     $sub = 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall'
-    $specs = @(@('LocalMachine', 'Registry64', 'machine', $sub), @('LocalMachine', 'Registry32', 'machine', $sub))
-    if ($Sid) { $specs += , @('Users', 'Registry64', 'user', "$Sid\$sub") }
+    $specs = @(@('LocalMachine', 'Registry64', 'machine', $sub, '64'), @('LocalMachine', 'Registry32', 'machine', $sub, '32'))
+    if ($Sid) { $specs += , @('Users', 'Registry64', 'user', "$Sid\$sub", 'user') }
     foreach ($spec in $specs) {
         $base = $null
         try {
@@ -371,7 +384,7 @@ function Get-WdhUninstallEntries {
                 $k = $root.OpenSubKey($name)
                 if (-not $k) { continue }
                 $dn = [string] $k.GetValue('DisplayName', '')
-                $out += , @{ scope = $spec[2]; keyName = $name; displayName = $dn; displayVersion = [string] $k.GetValue('DisplayVersion', ''); publisher = [string] $k.GetValue('Publisher', '') }
+                $out += , @{ scope = $spec[2]; view = $spec[4]; keyName = $name; displayName = $dn; displayVersion = [string] $k.GetValue('DisplayVersion', ''); publisher = [string] $k.GetValue('Publisher', '') }
                 $k.Close()
             }
             $root.Close()
@@ -385,6 +398,74 @@ function Get-WdhAppxPackages {
     param([string] $Sid = '')
     $list = $(if ($Sid) { Get-AppxPackage -User $Sid -ErrorAction Stop } else { Get-AppxPackage -AllUsers -ErrorAction Stop })
     @(@($list) | ForEach-Object { @{ name = [string] $_.Name; family = [string] $_.PackageFamilyName; version = [string] $_.Version } })
+}
+
+<# Health engine 1.2.0: Store packages provisioned for every user (staged; each user registers them at sign-in). #>
+function Get-WdhProvisionedAppx {
+    @(@(Get-AppxProvisionedPackage -Online -ErrorAction Stop) | ForEach-Object { @{ name = [string] $_.DisplayName; version = [string] $_.Version; packageName = [string] $_.PackageName } })
+}
+
+<# The deployment user's profile folder (ProfileList), or '' when that user has no profile yet. Never SYSTEM's profile. #>
+function Get-WdhUserProfilePath {
+    param([string] $Sid)
+    if (-not $Sid) { return '' }
+    $p = Get-WdhRegValue 'HKLM' "SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$Sid" 'ProfileImagePath'
+    if (-not $p) { return '' }
+    $p = [Environment]::ExpandEnvironmentVariables([string] $p)
+    if (Test-Path -LiteralPath $p -PathType Container) { return $p }
+    return ''
+}
+
+<# The machine-wide roots a verify path may name (the 64-bit Program Files, also from a 32-bit process). #>
+function Get-WdhMachineFolders {
+    $pf = $(if ($env:ProgramW6432) { $env:ProgramW6432 } else { $env:ProgramFiles })
+    @{ ProgramFiles = [string] $pf; ProgramFilesX86 = [string] ${env:ProgramFiles(x86)}; ProgramData = [string] $env:ProgramData }
+}
+
+<# One file named by a verify block: whether it exists, and its version. Read-only. #>
+function Get-WdhFileEvidence {
+    param([string] $Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return @{ exists = $false; version = '' } }
+    $v = ''
+    try { $i = [Diagnostics.FileVersionInfo]::GetVersionInfo($Path); $v = $(if ($i.ProductVersion) { [string] $i.ProductVersion } else { [string] $i.FileVersion }) } catch { }
+    @{ exists = $true; version = ([string] $v).Trim() }
+}
+
+<# One registry value below HKLM in the 64- or 32-bit view; $null when absent. #>
+function Get-WdhRegValueView {
+    param([string] $SubKey, [string] $Name, [ValidateSet('64', '32')] [string] $View = '64')
+    $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, $(if ($View -eq '32') { [Microsoft.Win32.RegistryView]::Registry32 } else { [Microsoft.Win32.RegistryView]::Registry64 }))
+    try {
+        $k = $base.OpenSubKey($SubKey)
+        if (-not $k) { return $null }
+        try { return $k.GetValue($Name, $null) } finally { $k.Close() }
+    } finally { $base.Close() }
+}
+
+<#
+    -CheckAppUpdates: WinGet's list of available upgrades for the account running this check
+    ("winget upgrade" without a package only lists; it installs nothing). No agreement is accepted
+    and nothing is interactive. Returns @{ available; exitCode; text }.
+#>
+function Get-WdhWinGetUpgrades {
+    $wg = ''
+    $cmd = Get-Command 'winget.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($cmd) { $wg = [string] $cmd.Source }
+    elseif ($env:LOCALAPPDATA -and (Test-Path -LiteralPath (Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\winget.exe'))) { $wg = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\winget.exe' }
+    if (-not $wg) { return @{ available = $false; exitCode = $null; text = '' } }
+    # Windows PowerShell 5.1 turns a native stderr line into a terminating error under 'Stop'.
+    $eap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $enc = $null
+    try { $enc = [Console]::OutputEncoding; [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
+    try {
+        $text = (@(& $wg 'upgrade' '--source' 'winget' '--disable-interactivity' 2>&1 | ForEach-Object { [string] $_ }) -join "`n")
+        $code = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $eap
+        if ($enc) { try { [Console]::OutputEncoding = $enc } catch { } }
+    }
+    @{ available = $true; exitCode = $code; text = $text }
 }
 
 <# Shortcuts the application engine creates for portable tools (Start menu > Windows Deployment Tools). #>
@@ -533,6 +614,15 @@ function Get-WdhNorm {
     $n = $n -replace '\b(x64|x86|arm64|64-bit|32-bit)\b', ' '
     $n = $n -replace '\s+v?\d+(\.\d+){1,3}([.-][0-9a-z]+)?\s*$', ' '
     ($n -replace '[^a-z0-9+#]+', ' ').Trim()
+}
+
+<# The architecture a display name states (x64, x86, arm64), or '' when it names none. #>
+function Get-WdhArch {
+    param([string] $Name)
+    if ($Name -match '(?i)\barm64\b') { return 'arm64' }
+    if ($Name -match '(?i)\b(x64|amd64)\b|\b64-bit\b') { return 'x64' }
+    if ($Name -match '(?i)\bx86\b|\b32-bit\b') { return 'x86' }
+    return ''
 }
 
 function ConvertTo-WdhList { param($Value) if ($null -eq $Value) { return @() } return @($Value | Where-Object { $null -ne $_ }) }
@@ -1067,11 +1157,15 @@ function Find-WdhInstalled {
         # WinGet registers portable packages (and some others) under "<PackageIdentifier>_<source>".
         if ($pkgId -and ($key -eq $pkgId -or $key.StartsWith("$($pkgId)_"))) { return @{ found = $true; scope = $e.scope; version = $e.displayVersion; how = 'WinGet uninstall record' } }
     }
+    # The name match drops architecture words, so an item that names one (the Visual C++ runtimes:
+    # x86 and x64 are independent installations) only matches a record of the same architecture.
+    $wantArch = @(@(ConvertTo-WdhList $Item['names']) | ForEach-Object { Get-WdhArch ([string] $_) } | Where-Object { $_ } | Select-Object -Unique)
     foreach ($e in $Entries) {
         if (-not $e.displayName) { continue }
+        if ($wantArch.Count) { $has = Get-WdhArch ([string] $e.displayName); if ($has -and $has -notin $wantArch) { continue } }
         $n = Get-WdhNorm $e.displayName
         foreach ($want in $names) {
-            if ($n -eq $want -or (" $n " -like "* $want *")) { return @{ found = $true; scope = $e.scope; version = $e.displayVersion; how = "uninstall record ""$($e.displayName)""" } }
+            if ($n -eq $want -or (" $n " -like "* $want *")) { return @{ found = $true; scope = $e.scope; version = $e.displayVersion; how = "uninstall record ""$($e.displayName)""$(if ([string] $e['view'] -eq '32') { ' (32-bit)' })" } }
         }
     }
     if ([string] $Item['source'] -eq 'msstore' -and $Appx) {
@@ -1085,16 +1179,241 @@ function Find-WdhInstalled {
 }
 
 <#
-    The verdict for one selected application: what Windows shows (Find-WdhInstalled) weighed against
-    the engine's own record. Kept apart from detection so a later catalog can extend either one. An
-    installer exit code alone never makes an application "installed": only a match in Windows does.
-    Returns @{ Status; Result; Observed; Next; Severity; Recovery; Verification }.
+    Health engine 1.2.0: the evidence the catalog names for one application (health-config.json
+    items[].verify: the application engine's verifySpec). Older plans have none: an empty spec, and
+    the name match of Find-WdhInstalled alone decides, as in 1.1.0. Malformed values are ignored.
+#>
+function Get-WdhVerifySpec {
+    param($Item)
+    $spec = @{ uninstall = @(); appx = @(); files = @(); registry = @(); perUser = $false; after = 'none' }
+    $v = Get-WdhKey $Item 'verify' $null
+    if ($v -isnot [System.Collections.IDictionary]) { return $spec }
+    $spec.uninstall = @(@(ConvertTo-WdhList (Get-WdhKey $v 'uninstall')) | ForEach-Object { ([string] $_).Trim() } | Where-Object { $_.Length -ge 3 })
+    $spec.appx = @(@(ConvertTo-WdhList (Get-WdhKey $v 'appx')) | ForEach-Object { [string] $_ } | Where-Object { $_ -match '^[A-Za-z0-9][A-Za-z0-9.-]{2,99}$' })
+    # Only the five known roots, no other variable and no "." or ".." segment (the website's schema enforces the same).
+    $spec.files = @(@(ConvertTo-WdhList (Get-WdhKey $v 'files')) | ForEach-Object { [string] $_ } | Where-Object { $_ -match '^%(ProgramFiles|ProgramFiles\(x86\)|ProgramData|LocalAppData|AppData)%(\\[^\\/:*?"<>|%]+)+$' -and $_ -notmatch '\\\.{1,2}(\\|$)' })
+    $spec.registry = @(@(ConvertTo-WdhList (Get-WdhKey $v 'registry')) | Where-Object { $_ -is [System.Collections.IDictionary] -and ([string] $_['key']) -match '^HKLM\\SOFTWARE(\\[^\\]+)+$' -and ([string] $_['name']) })
+    $spec.perUser = [bool] (Get-WdhKey $v 'perUser' $false)
+    $a = [string] (Get-WdhKey $v 'after' 'none')
+    $spec.after = $(if ($a -in 'none', 'signIn', 'restart') { $a } else { 'none' })
+    return $spec
+}
+
+$script:WdhVcRedistId = '^Microsoft\.VCRedist\.(2015\+|2013|2012|2010|2008|2005)\.(x64|x86|arm64)$'
+
+<#
+    Visual C++ runtimes in the uninstall records (the application engine's Get-WdaRuntimeInventory,
+    replicated over this engine's own, replaceable, uninstall probe):
+      "Microsoft Visual C++ 2015-2022 Redistributable (x64) - 14.40.33810"   family 2015+ (v14), x64
+      "Microsoft Visual C++ v14 Redistributable (x86) - 14.51.36247"         family 2015+, x86
+      "Microsoft Visual C++ 2010  x64 Redistributable - 10.0.40219"          family 2010, x64
+    "Minimum Runtime" and "Additional Runtime" are parts of a redistributable and are not listed.
+    x86 and x64 are separate runtimes: on 64-bit Windows, 32-bit applications use the x86 one.
+#>
+function Get-WdhRuntimeItems {
+    param([object[]] $Entries)
+    $out = @()
+    $seen = @{}
+    foreach ($e in @($Entries)) {
+        if ($null -eq $e) { continue }
+        $dn = [string] $e['displayName']
+        $m = [regex]::Match($dn, '^Microsoft Visual C\+\+ (v14|\d{4})(-\d{4})?\b.*\bRedistributable\b', 'IgnoreCase')
+        if (-not $m.Success) { continue }
+        $year = $m.Groups[1].Value
+        $family = $(if ($year -ieq 'v14' -or [int] $year -ge 2015) { '2015+' } else { $year })
+        if ($family -notin '2015+', '2013', '2012', '2010', '2008', '2005') { continue }
+        $am = [regex]::Match($dn, '\b(x64|x86|arm64|amd64)\b', 'IgnoreCase')
+        $arch = $(if ($am.Success) { $am.Groups[1].Value.ToLowerInvariant() } elseif ($family -in '2005', '2008') { 'x86' } else { '' })
+        if ($arch -eq 'amd64') { $arch = 'x64' }
+        if ($arch -notin 'x64', 'x86', 'arm64') { continue }
+        $ver = [string] $e['displayVersion']
+        if (-not $ver) { $vm = [regex]::Match($dn, '(\d+\.\d+\.\d+(\.\d+)?)\s*$'); if ($vm.Success) { $ver = $vm.Groups[1].Value } }
+        $k = "$family|$arch|$ver"
+        if ($seen.ContainsKey($k)) { continue }
+        $seen[$k] = $true
+        $out += , [ordered]@{ family = $family; architecture = $arch; version = $ver; displayName = $dn; where = 'machine' }
+    }
+    return $out
+}
+
+<#
+    The runtime inventory: the uninstall records (Get-WdhRuntimeItems), plus the Visual C++ 2015+
+    runtime keys (HKLM\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\<X64|X86|ARM64>, Installed = 1,
+    in the 64-bit view for x64/ARM64 and the 32-bit view for x86) for an architecture the records lack,
+    as the application engine reads them.
+#>
+function Get-WdhRuntimeInventory {
+    param($C, [object[]] $Entries)
+    $items = @(Get-WdhRuntimeItems $Entries)
+    foreach ($r in @(@('X64', '64', 'x64'), @('X86', '32', 'x86'), @('ARM64', '64', 'arm64'))) {
+        if (@($items | Where-Object { $_.family -eq '2015+' -and $_.architecture -eq $r[2] }).Count) { continue }
+        $rk = "SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\$($r[0])"
+        $rview = $r[1]
+        $inst = Invoke-WdhProbe $C "reg$($rview)|$rk|Installed" { Get-WdhRegValueView $rk 'Installed' $rview }
+        if ([string] $inst -ne '1') { continue }
+        $ver = [string] (Invoke-WdhProbe $C "reg$($rview)|$rk|Version" { Get-WdhRegValueView $rk 'Version' $rview })
+        $items += , [ordered]@{ family = '2015+'; architecture = $r[2]; version = $ver.TrimStart('v'); displayName = "Visual C++ 2015+ runtime key HKLM\$rk ($rview-bit view)"; where = 'machine' }
+    }
+    return $items
+}
+
+<# True when Windows or the deployment reports a restart as pending (the probe Test-WdhRestart already made). #>
+function Test-WdhRestartPendingNow {
+    param($C)
+    $sig = Invoke-WdhProbe $C 'reboot' { Get-WdhRebootSignals }
+    $marker = $false
+    try { $marker = [bool] (Test-WddRestartPending $C.Paths) } catch { }
+    return [bool] ($marker -or ($sig -and ($sig.cbs -or $sig.windowsUpdate -or $sig.agent)))
+}
+
+<#
+    Health engine 1.2.0: what Windows shows NOW for one selected application. Evidence comes from its
+    verify block (the same the application engine checks) and from the name match of
+    Find-WdhInstalled, which older plans rely on:
+      uninstall  display-name prefix (case-insensitive) in the machine-wide records, 64- and 32-bit
+                 (WOW6432Node), and the deployment user's own when that user's registry is loaded
+      appx       registered for the deployment user, or provisioned for every user
+      file       below Program Files, ProgramData, or the deployment user's profile (never SYSTEM's)
+      registry   an HKLM value in the 64- or 32-bit view, optionally with an exact value
+      VC++       a Microsoft.VCRedist package: its runtime family and architecture in the records
+    Returns @{ found; scope; version; how; evidence; userPending; userWhy; checked; mismatch }.
+    userPending: nothing was found and some evidence could not be read now (the user's registry is
+    not loaded, the user has no profile yet, the check runs as SYSTEM without either): absence is
+    then not a verdict. A user's registry hive is never loaded by this tool.
+#>
+function Find-WdhAppEvidence {
+    param($C, $Item, $Spec, [object[]] $Entries, [object[]] $Appx, [string[]] $Shortcuts, [object[]] $Runtimes)
+    $ev = New-Object System.Collections.Generic.List[object]
+    $checked = New-Object System.Collections.Generic.List[string]
+    $unread = New-Object System.Collections.Generic.List[string]
+    $mismatch = New-Object System.Collections.Generic.List[string]
+    $userWhere = "user:$($C.DeploymentUser)"
+    $add = { param([string] $Kind, [string] $Detail, [string] $Where, [string] $Version) $ev.Add([ordered]@{ kind = $Kind; detail = $Detail; where = $Where; version = [string] $Version }) }
+    $legacy = Find-WdhInstalled $Item $Entries $Appx $Shortcuts
+    if ($legacy.found) {
+        $kind = $(if ($legacy.how -like 'Store package*') { 'appx' } elseif ($legacy.how -like 'portable*') { 'file' } else { 'uninstall' })
+        & $add $kind ([string] $legacy.how) $(if ($legacy.scope -eq 'user') { $userWhere } else { 'machine' }) ([string] $legacy.version)
+    }
+    if ($Spec.uninstall.Count) {
+        $checked.Add('uninstall records by name')
+        foreach ($e in @($Entries)) {
+            if ($null -eq $e) { continue }
+            $dn = [string] $e['displayName']
+            if (-not $dn) { continue }
+            foreach ($p in $Spec.uninstall) {
+                if (-not $dn.StartsWith($p, [StringComparison]::OrdinalIgnoreCase)) { continue }
+                & $add 'uninstall' "uninstall record ""$dn""$(if ([string] $e['view'] -eq '32') { ' (32-bit)' })" $(if ([string] $e['scope'] -eq 'user') { $userWhere } else { 'machine' }) ([string] $e['displayVersion'])
+                break
+            }
+        }
+    }
+    if ($Spec.appx.Count) {
+        $checked.Add('Store packages')
+        if (-not $C.AppxReadable) { $unread.Add('Store packages could not be read (administrator rights are needed)') }
+        foreach ($n in $Spec.appx) {
+            $reg = @(@($Appx) | Where-Object { $null -ne $_ -and (([string] $_['name']) -ieq $n -or ([string] $_['family']) -like "$($n)_*") }) | Select-Object -First 1
+            if ($reg) { & $add 'appx' "Store package $($reg['name'])" $(if ($C.DeploymentSid) { $userWhere } else { 'machine' }) ([string] $reg['version']); continue }
+            $prov = @(ConvertTo-WdhList (Invoke-WdhProbe $C 'appxProvisioned' { , @(Get-WdhProvisionedAppx) }))
+            $pp = @($prov | Where-Object { ([string] $_['name']) -ieq $n }) | Select-Object -First 1
+            if ($pp) { & $add 'appx' "Store package $($pp['name']), provisioned for every user (each user registers it at sign-in)" 'provisioned' ([string] $pp['version']) }
+        }
+    }
+    if ($Spec.files.Count) {
+        $checked.Add('files')
+        $folders = Invoke-WdhProbe $C 'machineFolders' { Get-WdhMachineFolders }
+        foreach ($f in $Spec.files) {
+            $m = [regex]::Match($f, '^%([^%]+)%(\\.+)$')
+            $root = $m.Groups[1].Value
+            $rest = $m.Groups[2].Value
+            $inProfile = $root -in 'LocalAppData', 'AppData'
+            $base = ''
+            if ($inProfile) {
+                $prof = $(if ($C.DeploymentSid) { [string] (Invoke-WdhProbe $C 'userProfile' { Get-WdhUserProfilePath $C.DeploymentSid }) } else { '' })
+                if (-not $prof) { $unread.Add($(if (-not $C.DeploymentSid) { "$($C.DeploymentUser) is not known on this computer, so its profile cannot be checked" } else { "$($C.DeploymentUser) has no user profile yet (not signed in since the account was created)" })); continue }
+                $base = Join-Path $prof $(if ($root -eq 'LocalAppData') { 'AppData\Local' } else { 'AppData\Roaming' })
+            } elseif ($folders) {
+                $base = $(switch ($root) { 'ProgramFiles' { [string] $folders.ProgramFiles } 'ProgramFiles(x86)' { $(if ($folders.ProgramFilesX86) { [string] $folders.ProgramFilesX86 } else { [string] $folders.ProgramFiles }) } 'ProgramData' { [string] $folders.ProgramData } default { '' } })
+            }
+            if (-not $base) { $unread.Add("the folder %$root% could not be resolved"); continue }
+            $filePath = $base.TrimEnd('\') + $rest
+            $fe = Invoke-WdhProbe $C "file:$filePath" { Get-WdhFileEvidence $filePath }
+            if ($null -eq $fe) { $unread.Add("$f could not be read"); continue }
+            if ($fe.exists) { & $add 'file' $f $(if ($inProfile) { $userWhere } else { 'machine' }) ([string] $fe.version) }
+        }
+    }
+    if ($Spec.registry.Count) {
+        $checked.Add('registry values')
+        foreach ($rg in $Spec.registry) {
+            $rk = ([string] $rg['key']).Substring(5)
+            $rn = [string] $rg['name']
+            $rview = $(if ([string] $rg['view'] -eq '32') { '32' } else { '64' })
+            $val = Invoke-WdhProbe $C "reg$($rview)|$rk|$rn" { Get-WdhRegValueView $rk $rn $rview }
+            if ($null -eq $val) { continue }
+            $sval = $(if ($val -is [array]) { (@($val) | ForEach-Object { [string] $_ }) -join ',' } else { [string] $val })
+            $want = Get-WdhKey $rg 'equals' $null
+            if ($null -ne $want -and $sval -ne [string] $want) { $mismatch.Add("HKLM\$rk\$rn is '$sval', expected '$want'"); continue }
+            & $add 'registry' "HKLM\$rk\$rn = $sval$(if ($rview -eq '32') { ' (32-bit view)' })" 'machine' $(if ($rn -match 'version') { $sval } else { '' })
+        }
+    }
+    $rm = [regex]::Match([string] $Item['packageIdentifier'], $script:WdhVcRedistId, 'IgnoreCase')
+    if ($rm.Success) {
+        $checked.Add('Visual C++ runtimes')
+        $fam = $rm.Groups[1].Value; $arch = $rm.Groups[2].Value.ToLowerInvariant()
+        foreach ($rt in @(@($Runtimes) | Where-Object { $null -ne $_ -and $_['family'] -eq $fam -and $_['architecture'] -eq $arch })) { & $add 'uninstall' "Visual C++ runtime ""$($rt['displayName'])""" 'machine' ([string] $rt['version']) }
+    }
+    # The deployment user's own uninstall records exist only while that user's registry is loaded.
+    if (-not $C.HiveLoaded -and ($Spec.perUser -or [string] $Item['scope'] -ne 'machine')) {
+        $unread.Add($(if (-not $C.DeploymentSid) { "$($C.DeploymentUser) is not known on this computer" }
+                      elseif ($C.Identity.IsSystem) { "this check runs as SYSTEM and $($C.DeploymentUser) is not signed in (that user's registry is not loaded; this tool never loads it)" }
+                      else { "$($C.DeploymentUser) is not signed in (that user's registry is not loaded; this tool never loads it)" }))
+    }
+    # One entry per piece of evidence (the name match and a verify prefix can find the same record).
+    $list = @()
+    $keys = @{}
+    foreach ($x in $ev) {
+        $k = "$($x.kind)|$((([string] $x.detail) -replace ' \(32-bit\)$', '').ToLowerInvariant())|$($x.where)"
+        if (-not $keys.ContainsKey($k)) { $keys[$k] = $true; $list += , $x }
+    }
+    # Uninstall records and Store packages carry the package version; a file's version may differ.
+    $first = @($list | Where-Object { $_.kind -in 'uninstall', 'appx' }) + @($list | Where-Object { $_.kind -notin 'uninstall', 'appx' })
+    $withVersion = @($first | Where-Object { $_.version }) | Select-Object -First 1
+    $lead = $(if ($first.Count) { $first[0] } else { $null })
+    @{
+        found = ($list.Count -gt 0)
+        scope = $(if (-not $lead) { '' } elseif ($lead.where -like 'user:*') { 'user' } elseif ($lead.where -eq 'provisioned') { 'provisioned' } else { 'machine' })
+        version = $(if ($withVersion) { [string] $withVersion.version } else { '' })
+        how = $(if ($lead) { [string] $lead.detail } else { '' })
+        evidence = @($first)
+        userPending = ($list.Count -eq 0 -and $unread.Count -gt 0)
+        userWhy = (@($unread | Select-Object -Unique) -join '; ')
+        checked = @($checked | Select-Object -Unique)
+        mismatch = @($mismatch)
+    }
+}
+
+<#
+    The verdict for one selected application: the evidence found now (Find-WdhAppEvidence) weighed
+    against the engine's own record, which is history. Kept apart from detection so a later catalog
+    can extend either one. An installer exit code alone never makes an application "installed": only
+    evidence in Windows does; and an application with per-user evidence that cannot be read now is
+    pending, never "missing". Returns @{ Status; Result; Observed; Next; Severity; Recovery; Verification }.
+
+    Engine 1.6.0 outcomes (result.json "outcome") are read when present; older engines' "status" otherwise:
+      InstalledVerified, InstallerSucceededVerification*   the installer succeeded (the evidence decides)
+      RestartOrSignInRequired                              pending until a restart or sign-in
+      InstallationFailed / PackageUnavailable              Failed / PackageUnavailable
+      UnattendedUnsupported / ManualSetupRequired          a person must install or finish it
 #>
 function Resolve-WdhAppVerdict {
     param($Item, $Engine, $Hit, [hashtable] $X)
     $it = $Item; $e = $Engine; $hit = $Hit
     $eng = [string] $X.eng; $det = [string] $X.det; $msg = [string] $X.msg; $attempts = [int] $X.attempts; $stageFinal = [bool] $X.stageFinal; $snap = $X.snap
     $indep = [string] $X.indep; $where = [string] $X.where; $name = [string] $X.name; $recovery = [string] $X.recovery; $sev = [string] $X.sev; $user = [string] $X.user
+    $outcome = [string] $X.outcome; $after = [string] $X.after; $restart = [bool] $X.restart; $why = [string] $X.why; $checked = [string] $X.checked
+    $succ = ($eng -in 'Succeeded', 'AlreadyInstalled') -or ($outcome -in 'InstalledVerified', 'InstallerSucceededVerificationPending', 'InstallerSucceededVerificationFailed')
+    $label = $(if ($eng) { $eng } else { $outcome })
+    $fc = $(if ($e -is [System.Collections.IDictionary] -and $e['failureClass']) { " ($($e['failureClass']))" } else { '' })
+    $vf = ''
     $v = $null
     if ([string] $it['kind'] -eq 'manual') {
         if ($hit.found) { $v = @('Pass', 'InstalledManually', "Installed by hand: $where", '') }
@@ -1103,48 +1422,80 @@ function Resolve-WdhAppVerdict {
         $sev = 'Warning'
     } elseif ($eng -in 'Pending', 'Installing' -and -not $stageFinal) { $v = @('Pending', 'Pending', "Not installed yet (the application stage is $(if ($snap) { $snap.state } else { 'not started' }))", 'Wait; the stage continues by itself.') }
     elseif (-not $e -and -not $stageFinal -and -not $hit.found) { $v = @('Pending', 'Pending', 'Not installed yet (the application stage has not reached it)', 'Wait; the stage continues by itself.') }
-    elseif ($eng -eq 'RequiresRestart') { $v = @('Pending', 'WaitingForReboot', 'Installed; needs a restart to finish', 'Restart the computer.') }
+    elseif ($eng -eq 'RequiresRestart' -or ($outcome -eq 'RestartOrSignInRequired' -and -not $hit.found)) {
+        $v = @('Pending', 'WaitingForReboot', $(if ($eng -eq 'RequiresRestart') { 'Installed; needs a restart to finish' } else { 'The installer finished; it needs a restart or a sign-in before it can be verified' }), 'Restart the computer (or sign in as the deployment user), then verify again.')
+        $vf = $(if ($hit.found) { 'InstalledAndVerified' } else { 'InstallerSucceededVerificationPending' })
+    }
     elseif ($eng -eq 'SkippedByUser') { $v = @('NotApplicable', 'SkippedByUser', 'Deselected for this deployment', '') }
     elseif ($hit.found) {
-        if ($eng -in 'Succeeded', 'AlreadyInstalled', '' -or ($eng -eq 'RequiresInteraction')) {
+        if ($eng -in 'Succeeded', 'AlreadyInstalled', '' -or ($eng -eq 'RequiresInteraction') -or $succ) {
             $want = [string] $it['version']
             if ($want -and $hit.version -and $hit.version -ne $want) { $v = @('Warning', 'InstalledVersionDiffers', "Installed, version $($hit.version) instead of $want ($where)", 'Check whether the pinned version is still required.') }
             else { $v = @('Pass', $(if ($eng -eq 'AlreadyInstalled') { 'AlreadyInstalledVerified' } else { 'InstalledVerified' }), "Installed: $where$(if (-not $e) { '; the engine has no record of it' })", '') }
-        } else { $v = @('Warning', 'InstalledVerificationUncertain', "Present ($where), although the installation reported $eng. $msg", 'Open it once to confirm it works; retry it with "Deployment recovery" if it does not.') }
-    } elseif ($indep -eq 'Deferred' -and $eng -in 'Succeeded', 'AlreadyInstalled') {
-        $v = @('Deferred', 'WaitingForUserContext', "The engine reported $eng in $($user)'s account; not found machine-wide, and $($user)'s own applications cannot be checked while that user is signed out", "Sign in as $($user) and open the Health Report again.")
-    } elseif ($eng -in 'Succeeded', 'AlreadyInstalled') {
-        $v = @('Warning', 'InstalledVerificationUncertain', "The engine reported $eng$(if ($det -eq 'Unconfirmed') { ', but WinGet could not confirm it afterwards' } elseif ($det) { " (WinGet detection: $det)" }); no uninstall record or Store package matched its name", 'Open it once to confirm it is installed; uninstall records do not exist for every installer.')
+        } else { $v = @('Warning', 'InstalledVerificationUncertain', "Present ($where), although the installation reported $label. $msg", 'Open it once to confirm it works; retry it with "Deployment recovery" if it does not.') }
+    } elseif ($succ -and $indep -eq 'Deferred') {
+        $v = @('Deferred', 'WaitingForUserContext', "The engine reported $label in $($user)'s account; not found machine-wide, and $($user)'s own applications cannot be checked now: $why", "Sign in as $($user) and open the Health Report again.")
+        $vf = 'InstallerSucceededVerificationPending'
+    } elseif ($succ -and $after -eq 'restart' -and $restart) {
+        $v = @('Pending', 'WaitingForReboot', "The engine reported $label; its evidence appears only after the pending restart", 'Restart the computer, then verify again.')
+        $vf = 'InstallerSucceededVerificationPending'
+    } elseif ($succ -and $after -eq 'signIn') {
+        $v = @('Pending', 'WaitingForSignIn', "The engine reported $label; its evidence appears only after $($user) signs in", "Sign in as $($user) (sign out and in again if already signed in), then verify again.")
+        $vf = 'InstallerSucceededVerificationPending'
+    } elseif ($succ) {
+        $v = @('Warning', 'InstalledVerificationUncertain', "The engine reported $label$(if ($det -eq 'Unconfirmed') { ', but WinGet could not confirm it afterwards' } elseif ($det) { " (WinGet detection: $det)" }); no uninstall record or Store package matched its name$(if ($checked) { ", and none of its evidence was found ($checked)" })", 'Open it once to confirm it is installed (uninstall records do not exist for every installer), then "Deployment recovery" > Reverify applications.')
+        $vf = 'InstallerSucceededVerificationFailed'
     } elseif ($eng -eq 'Skipped') { $v = @('Fail', 'BlockedByDependency', "Not installed: a dependency failed. $msg", 'Run "Deployment recovery" > Retry failed operations (it retries the dependency too).') }
-    elseif ($eng -eq 'RequiresInteraction') { $v = @('Warning', 'ManualInstallationRequired', "Needs a person: $msg", "Install or finish $name by hand.") }
-    elseif ($eng -in 'Failed', 'Unavailable') { $v = @('Fail', 'Failed', "Missing: the installation failed$(if ($e['failureClass']) { " ($($e['failureClass']))" }) after $attempts attempt(s). $msg", $(if ($recovery -eq 'RetryFailed') { 'Run "Deployment recovery" > Retry failed operations.' } else { 'Correct the cause (see the message), then "Deployment recovery" > Retry one application with -IncludePermanent.' })) }
-    elseif (-not $e -and $indep -eq 'Deferred') { $v = @('Deferred', 'WaitingForUserContext', "No engine record, and $($user)'s own applications cannot be checked now", "Sign in as $($user) and open the Health Report again.") }
-    else { $v = @('Fail', 'Missing', "Not installed$(if (-not $e) { '; the application stage has no record of it (inconsistent results)' } else { " (engine: $eng)" })", 'Run "Deployment recovery" > Resume.') ; if (-not $recovery) { $recovery = 'Resume' } }
-    @{ Status = $v[0]; Result = $v[1]; Observed = $v[2]; Next = $v[3]; Severity = $sev; Recovery = $recovery; Verification = (Get-WdhAppVerification $v[1] ([bool] $hit.found)) }
+    elseif ($outcome -eq 'UnattendedUnsupported') { $v = @('Warning', 'UnattendedUnsupported', "Not installed: it cannot be installed unattended. $msg", "Install $name by hand."); $sev = 'Warning' }
+    elseif ($eng -eq 'RequiresInteraction' -or $outcome -eq 'ManualSetupRequired') { $v = @('Warning', 'ManualInstallationRequired', "Needs a person: $msg", "Install or finish $name by hand.") }
+    elseif ($eng -eq 'Unavailable' -or $outcome -eq 'PackageUnavailable') { $v = @('Fail', 'PackageUnavailable', "Missing: the package was not available$fc after $attempts attempt(s). $msg", $(if ($recovery -eq 'RetryFailed') { 'Run "Deployment recovery" > Retry failed operations.' } else { 'Correct the cause (see the message), then "Deployment recovery" > Retry one application with -IncludePermanent.' })) }
+    elseif ($eng -eq 'Failed' -or $outcome -eq 'InstallationFailed') { $v = @('Fail', 'Failed', "Missing: the installation failed$fc after $attempts attempt(s). $msg", $(if ($recovery -eq 'RetryFailed') { 'Run "Deployment recovery" > Retry failed operations.' } else { 'Correct the cause (see the message), then "Deployment recovery" > Retry one application with -IncludePermanent.' })) }
+    elseif (-not $e -and $indep -eq 'Deferred') { $v = @('Deferred', 'WaitingForUserContext', "No engine record, and $($user)'s own applications cannot be checked now: $why", "Sign in as $($user) and open the Health Report again.") }
+    else { $v = @('Fail', 'Missing', "Not installed$(if (-not $e) { '; the application stage has no record of it (inconsistent results)' } else { " (engine: $label)" })", 'Run "Deployment recovery" > Resume.') ; if (-not $recovery) { $recovery = 'Resume' } }
+    @{ Status = $v[0]; Result = $v[1]; Observed = $v[2]; Next = $v[3]; Severity = $sev; Recovery = $recovery; Verification = (Get-WdhAppVerification $v[1] ([bool] $hit.found) $vf) }
 }
 
 <#
-    The verification status reported for an application:
-      InstalledAndVerified          Windows lists it (uninstall record, Store package or portable shortcut)
-      InstallerSucceededUnverified  the installer reported success, but Windows lists nothing that matches
-      Missing / Failed              not found; the installation failed, or there is no result at all
-      ManualActionRequired          no unattended installation, or the installer needs a person
-      NotSelected                   deselected for this deployment (listed, never counted as missing)
-      Pending / Deferred            still running or waiting for a restart / the user's own profile is not available
+    The verification status reported for an application (contract.ts APP_VERIFICATION_STATES):
+      InstalledAndVerified                   evidence found now (uninstall record, Store package, file, registry, shortcut)
+      InstallerSucceededVerificationPending  the installer succeeded; its evidence can only appear later (sign-in,
+                                             restart) or lies in the deployment user's profile, unreadable now
+      InstallerSucceededVerificationFailed   the installer succeeded; the evidence was checked and none was found
+      Missing / Failed / PackageUnavailable  not found; it failed, was not offered, or there is no result at all
+      UnattendedUnsupported                  it cannot be installed without a person
+      ManualActionRequired                   no unattended installation, or the installer needs a person
+      NotSelected                            deselected for this deployment (listed, never counted as missing)
+      Pending / Deferred                     still running / no record and the user's profile is not available
+    (InstallerSucceededUnverified is health engine 1.1.0's name for both InstallerSucceeded* states.)
 #>
 function Get-WdhAppVerification {
-    param([string] $Result, [bool] $Found)
+    param([string] $Result, [bool] $Found, [string] $Override = '')
+    if ($Override) { return $Override }
     switch ($Result) {
         { $_ -in 'InstalledVerified', 'AlreadyInstalledVerified', 'InstalledManually', 'InstalledVersionDiffers' } { return 'InstalledAndVerified' }
-        'InstalledVerificationUncertain' { if ($Found) { return 'InstalledAndVerified' } return 'InstallerSucceededUnverified' }
+        'InstalledVerificationUncertain' { if ($Found) { return 'InstalledAndVerified' } return 'InstallerSucceededVerificationFailed' }
         'Failed' { return 'Failed' }
+        'PackageUnavailable' { return 'PackageUnavailable' }
+        'UnattendedUnsupported' { return 'UnattendedUnsupported' }
         { $_ -in 'Missing', 'BlockedByDependency' } { return 'Missing' }
         'ManualInstallationRequired' { return 'ManualActionRequired' }
         'SkippedByUser' { return 'NotSelected' }
         'WaitingForUserContext' { return 'Deferred' }
+        'WaitingForSignIn' { return 'InstallerSucceededVerificationPending' }
         default { return 'Pending' }
     }
 }
+
+<# The engine's own evidence list (engine 1.6.0 verificationEvidence), as history; unknown kinds are left out. #>
+function ConvertTo-WdhEngineEvidence {
+    param($Engine)
+    if ($Engine -isnot [System.Collections.IDictionary]) { return @() }
+    @(@(ConvertTo-WdhList (Get-WdhKey $Engine 'verificationEvidence')) | Where-Object { $_ -is [System.Collections.IDictionary] -and [string] $_['kind'] -in 'winget', 'uninstall', 'appx', 'file', 'registry' } | Select-Object -First 10 | ForEach-Object {
+        [ordered]@{ kind = [string] $_['kind']; detail = [string] (Get-WdhKey $_ 'detail' ''); where = [string] (Get-WdhKey $_ 'where' ''); version = [string] (Get-WdhKey $_ 'version' '') }
+    })
+}
+
+function Format-WdhEvidence { param([object[]] $Evidence) (@(@($Evidence) | Where-Object { $_ } | ForEach-Object { "$($_.kind) $($_.detail) ($($_.where))$(if ($_.version) { " $($_.version)" })" }) -join '; ') }
 
 function Test-WdhApplications {
     param($C)
@@ -1181,8 +1532,11 @@ function Test-WdhApplications {
     $sid = $C.DeploymentSid
     $entries = @(ConvertTo-WdhList (Invoke-WdhProbe $C 'uninstall' { Get-WdhUninstallEntries $(if ($C.HiveLoaded) { $sid } else { '' }) }))
     $appx = Invoke-WdhProbe $C 'appx' { Get-WdhAppxPackages $(if ($sid) { $sid } else { '' }) }
+    # An empty list is a result; only a failed read (reported in the limitations) leaves Store packages unknown.
+    $C.AppxReadable = @($C.Limitations | Where-Object { $_ -like 'Could not read appx*' }).Count -eq 0
     $shortcuts = @(ConvertTo-WdhList (Invoke-WdhProbe $C 'shortcuts' { Get-WdhPortableShortcuts }))
-    $userAvailable = $C.HiveLoaded
+    $runtimes = @(Get-WdhRuntimeInventory $C $entries)
+    $restart = Test-WdhRestartPendingNow $C
     foreach ($it in $items) {
         $key = ([string] $it['key']).ToLowerInvariant()
         $fid = "app.$key"
@@ -1192,31 +1546,185 @@ function Test-WdhApplications {
         $life = $(if ($e -and $e.ContainsKey('lifecycle')) { [string] $e['lifecycle'] } elseif ($e -and (Get-Command Get-WdaLifecycle -ErrorAction SilentlyContinue)) { [string] (Get-WdaLifecycle $e) } else { '' })
         $attempts = $(if ($e -and $e.ContainsKey('totalAttempts')) { [int] $e['totalAttempts'] } elseif ($e) { [int] $e['attempts'] } else { 0 })
         $msg = $(if ($e) { [string] $e['message'] } else { '' })
-        $hit = Find-WdhInstalled $it $entries @(ConvertTo-WdhList $appx) $shortcuts
+        # Application engine 1.6.0 fields (absent from older results).
+        $outcome = [string] (Get-WdhKey $e 'outcome' '')
+        $engVer = [string] (Get-WdhKey $e 'verification' '')
+        $engNote = [string] (Get-WdhKey $e 'verificationNote' '')
+        $engEvidence = @(ConvertTo-WdhEngineEvidence $e)
+        $spec = Get-WdhVerifySpec $it
+        $hit = Find-WdhAppEvidence $C $it $spec $entries @(ConvertTo-WdhList $appx) $shortcuts $runtimes
         $scope = [string] $it['scope']
-        $indep = $(if ($hit.found) { 'Found' } elseif (-not $userAvailable -and $scope -ne 'machine') { 'Deferred' } else { 'NotFound' })
+        $indep = $(if ($hit.found) { 'Found' } elseif ($hit.userPending) { 'Deferred' } else { 'NotFound' })
         $required = [bool] $it['required']
         $sev = $(if ($required) { 'Error' } else { 'Warning' })
         $name = [string] $it['name']
         $where = $(if ($hit.found) { "$($hit.how)$(if ($hit.version) { ", version $($hit.version)" }) ($($hit.scope))" } else { '' })
-        $method = 'Uninstall records (machine and the deployment user), Store packages, portable shortcut; the engine''s result as evidence'
-        $evidence = $(if ($e) { "engine: $eng$(if ($det) { ", detection $det" })$(if ($attempts) { ", $attempts attempt(s)" })" } else { 'no engine record' })
-        $recovery = $(if ($e -and $e.ContainsKey('retryable') -and [bool] $e['retryable']) { 'RetryFailed' } elseif ($eng -in 'Failed', 'Unavailable') { 'Retry -IncludePermanent' } else { '' })
-        $verdict = Resolve-WdhAppVerdict $it $e $hit @{ eng = $eng; det = $det; msg = $msg; attempts = $attempts; stageFinal = $stageFinal; snap = $snap; indep = $indep; where = $where; name = $name; recovery = $recovery; sev = $sev; user = $C.DeploymentUser }
+        $checked = @($hit.checked) -join ', '
+        $method = "Evidence now: $(if ($checked) { "$checked, " })uninstall records (machine, 32-bit and the deployment user's), Store packages, portable shortcut by name; the engine's result as history"
+        $evidence = $(if ($e) { "engine: $(if ($eng) { $eng } else { '-' })$(if ($outcome) { ", outcome $outcome" })$(if ($engVer) { ", its verification $engVer" })$(if ($det) { ", detection $det" })$(if ($attempts) { ", $attempts attempt(s)" })" } else { 'no engine record' })
+        if ($hit.found) { $evidence += "; found now: $(Format-WdhEvidence $hit.evidence)" }
+        if (@($hit.mismatch).Count) { $evidence += "; not matching: $(@($hit.mismatch) -join '; ')" }
+        $recovery = $(if ($e -and $e.ContainsKey('retryable') -and [bool] $e['retryable']) { 'RetryFailed' } elseif ($eng -in 'Failed', 'Unavailable' -or $outcome -in 'InstallationFailed', 'PackageUnavailable') { 'Retry -IncludePermanent' } else { '' })
+        $verdict = Resolve-WdhAppVerdict $it $e $hit @{ eng = $eng; det = $det; msg = $msg; attempts = $attempts; stageFinal = $stageFinal; snap = $snap; indep = $indep; where = $where; name = $name; recovery = $recovery; sev = $sev; user = $C.DeploymentUser
+                                                       outcome = $outcome; after = $spec.after; restart = $restart; why = $hit.userWhy; checked = $checked }
         $v = @($verdict.Status, $verdict.Result, $verdict.Observed, $verdict.Next)
         $sev = $verdict.Severity; $recovery = $verdict.Recovery
         $status = $v[0]
         if ($status -eq 'Fail' -and -not $required) { $sev = 'Warning' }
         Add-WdhFinding $C $fid 'applications' $name $status $sev $(if ([string] $it['kind'] -eq 'manual') { 'Installed (manual follow-up)' } elseif ($it['version']) { "Installed, version $($it['version'])" } else { 'Installed' }) $v[2] $method $evidence $v[3] -Required ($required -and [string] $it['kind'] -ne 'manual') -AutomaticRecovery ($status -eq 'Pending') -TechnicianRequired ($status -in 'Fail', 'Warning', 'Deferred') -RecoveryAction $(if ($status -eq 'Fail') { $recovery } else { '' }) | Out-Null
+        $note = $(if ($hit.found) { "Evidence found now: $(Format-WdhEvidence $hit.evidence)" }
+                  elseif ($hit.userPending) { "No evidence yet; it cannot be read now: $($hit.userWhy)" }
+                  elseif ($checked) { "No evidence found ($checked; names)" }
+                  else { 'No evidence found (uninstall records, Store packages and the portable shortcut by name)' })
+        if ($engNote) { $note += " Engine: $engNote" }
         # Deselected for this deployment: listed as NotSelected (as before 1.1.0), never counted as missing.
         $C.Apps.Add([ordered]@{ key = $key; name = $name; source = [string] $it['source']; packageIdentifier = [string] $it['packageIdentifier']; method = [string] $it['method']; kind = [string] $it['kind']; required = $required
                                 scope = $scope; engineStatus = $eng; lifecycle = $life; attempts = $attempts; detection = $det; independent = $indep; foundIn = $(if ($hit.found) { [string] $hit.scope } else { '' }); version = [string] $hit.version; result = $v[1]
-                                verification = $verdict.Verification; findingId = $fid })
-        if ($v[1] -eq 'ManualInstallationRequired') { $C.Manual.Add([ordered]@{ id = $fid; text = "$name`: $($v[3])"; url = [string] $it['url'] }) }
+                                verification = $verdict.Verification; findingId = $fid
+                                evidence = @($hit.evidence); engineEvidence = @($engEvidence); outcome = $outcome; engineVerification = $engVer; failureClass = [string] (Get-WdhKey $e 'failureClass' ''); verificationNote = $note })
+        if ($v[1] -in 'ManualInstallationRequired', 'UnattendedUnsupported') { $C.Manual.Add([ordered]@{ id = $fid; text = "$name`: $($v[3])"; url = [string] $it['url'] }) }
     }
     if ($res.Data -and $res.Data['bootstrap'] -is [hashtable] -and [string] $res.Data['bootstrap']['status'] -in 'Failed', 'Unsupported', 'NeedsRepair') {
         Add-WdhFinding $C 'apps.winget' 'applications' 'WinGet' 'Fail' 'Error' 'WinGet usable' "$($res.Data['bootstrap']['status']): $($res.Data['bootstrap']['message'])" 'Applications\result.json bootstrap' 'Applications\result.json' 'Update App Installer from the Microsoft Store, then "Deployment recovery" > Retry failed operations.' -RecoveryAction 'RetryFailed' | Out-Null
     }
+}
+
+<#
+    Visual C++ runtimes (read-only; its own finding, apps.runtimes): every family and architecture in
+    the uninstall records, with versions. Information, unless a runtime this deployment selected is
+    absent (Warning; the application's own finding says what its installation did). On 64-bit
+    Windows the x86 runtime is what 32-bit applications load: it is never redundant beside x64, and
+    x64 does not replace it (nor the other way round).
+#>
+function Test-WdhRuntimes {
+    param($C)
+    $cfgApps = $C.Config['applications']
+    $items = @(ConvertTo-WdhList $cfgApps['items'])
+    $entries = @(ConvertTo-WdhList (Invoke-WdhProbe $C 'uninstall' { Get-WdhUninstallEntries $(if ($C.HiveLoaded) { $C.DeploymentSid } else { '' }) }))
+    $readable = @($C.Limitations | Where-Object { $_ -like 'Could not read uninstall*' }).Count -eq 0
+    $runtimes = @(Get-WdhRuntimeInventory $C $entries)
+    $os = $C.Obs['os']
+    $osArch = $(if ($os) { [string] $os.architecture } else { '' })
+    $is64 = $osArch -match '64'
+    $selected = @()
+    foreach ($it in $items) {
+        $m = [regex]::Match([string] $it['packageIdentifier'], $script:WdhVcRedistId, 'IgnoreCase')
+        if (-not $m.Success) { continue }
+        $fam = $m.Groups[1].Value; $arch = $m.Groups[2].Value.ToLowerInvariant()
+        $have = @($runtimes | Where-Object { $_.family -eq $fam -and $_.architecture -eq $arch }) | Select-Object -First 1
+        $selected += , [ordered]@{ key = ([string] $it['key']).ToLowerInvariant(); name = [string] $it['name']; family = $fam; architecture = $arch; present = [bool] $have; version = $(if ($have) { [string] $have.version } else { '' }) }
+    }
+    $notes = @()
+    if ($is64) { $notes += 'On 64-bit Windows, 32-bit applications use the x86 runtime and 64-bit applications the x64 one: both are needed, neither replaces the other.' }
+    foreach ($f in @($runtimes | ForEach-Object { $_.family } | Select-Object -Unique)) {
+        $archs = @($runtimes | Where-Object { $_.family -eq $f } | ForEach-Object { $_.architecture } | Select-Object -Unique)
+        if ($is64 -and $archs -contains 'x86' -and $archs -notcontains 'x64') { $notes += "Visual C++ $f is present for x86 only: 32-bit applications can use it; 64-bit applications that need it would not start." }
+        if ($is64 -and $archs -contains 'x64' -and $archs -notcontains 'x86') { $notes += "Visual C++ $f is present for x64 only: 32-bit applications that need it would not start." }
+    }
+    $fid = 'apps.runtimes'
+    $C.Runtimes = [ordered]@{ checkedUtc = (Get-WdhTime).ToString('o'); osArchitecture = $osArch; available = $readable; source = 'Uninstall records (64- and 32-bit) and the Visual C++ 2015+ runtime keys, as the application engine''s runtime inventory'
+                              items = @($runtimes); selected = @($selected); notes = @($notes); findingId = $(if ($cfgApps['enabled'] -and $items.Count) { $fid } else { '' }) }
+    # Without applications in this deployment the inventory stays in the report, without a finding.
+    if (-not ($cfgApps['enabled'] -and $items.Count)) { return }
+    $list = $(if ($runtimes.Count) { (@($runtimes | Sort-Object { $_.family }, { $_.architecture } | ForEach-Object { "$($_.family) $($_.architecture) $($_.version)" }) -join ', ') } else { 'none' })
+    $missing = @($selected | Where-Object { -not $_.present })
+    $method = 'Uninstall records and the VC\Runtimes keys, by family (2015+ = the shared v14 runtime, 2013, 2012, 2010, 2008, 2005) and architecture'
+    if (-not $readable) { Add-WdhFinding $C $fid 'applications' 'Visual C++ runtimes' 'Info' 'Informational' 'Listed for information' 'The uninstall records could not be read' $method 'Uninstall records' -Required $false -TechnicianRequired $false | Out-Null; return }
+    if ($missing.Count) {
+        $why = @($missing | ForEach-Object { "$($_.family) $($_.architecture)$(if ($is64 -and $_.architecture -eq 'x86') { ' (needed by 32-bit applications even on 64-bit Windows)' } elseif ($_.architecture -eq 'x64') { ' (needed by 64-bit applications; the x86 runtime does not replace it)' })" })
+        Add-WdhFinding $C $fid 'applications' 'Visual C++ runtimes' 'Warning' 'Warning' "The selected runtimes: $(@($selected | ForEach-Object { "$($_.family) $($_.architecture)" }) -join ', ')" "Missing: $($why -join ', '). Present: $list" $method 'Uninstall records' 'Install the missing runtime ("Deployment recovery" > Retry failed operations, or its WinGet package Microsoft.VCRedist.<family>.<architecture>).' -Required $false | Out-Null
+    } else {
+        Add-WdhFinding $C $fid 'applications' 'Visual C++ runtimes' 'Info' 'Informational' $(if ($selected.Count) { "The selected runtimes: $(@($selected | ForEach-Object { "$($_.family) $($_.architecture)" }) -join ', ')" } else { 'Listed for information' }) "Present: $list.$(if ($notes.Count) { ' ' + ($notes -join ' ') })" $method 'Uninstall records' -Required $false -TechnicianRequired $false | Out-Null
+    }
+}
+
+<#
+    WinGet's table (winget upgrade): the Application Manager's parser when it is loaded (it handles
+    wide characters, other display languages and every WinGet table), else a compact reading of the
+    same table by its English column titles. Each row: name, id, version, available, source.
+#>
+function ConvertFrom-WdhWinGetTable {
+    param([string] $Text)
+    if (Get-Command ConvertFrom-WamTable -ErrorAction SilentlyContinue) { return @(ConvertFrom-WamTable $Text) }
+    $lines = @(($Text -replace "`r`n", "`n") -split "`n" | ForEach-Object { ($_.TrimEnd("`r") -split "`r")[-1].TrimEnd() })
+    $rows = @()
+    for ($i = 1; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -notmatch '^-{10,}\s*$') { continue }
+        $head = $lines[$i - 1]
+        $starts = @(); $titles = @()
+        foreach ($m in [regex]::Matches($head, '\S+')) { $starts += $m.Index; $titles += $m.Value.ToLowerInvariant() }
+        if ($starts.Count -lt 3 -or $starts[0] -ne 0) { continue }
+        $roles = @($titles | ForEach-Object { if ($_ -in 'name', 'id', 'version', 'available', 'source') { $_ } else { '' } })
+        if (@($roles | Where-Object { -not $_ }).Count) { $roles = @('name', 'id', 'version', 'available', 'source') | Select-Object -First $starts.Count }
+        for ($j = $i + 1; $j -lt $lines.Count; $j++) {
+            $l = $lines[$j]
+            if (-not $l.Trim() -or $l.Length -le $starts[1]) { break }
+            $r = @{ name = ''; id = ''; version = ''; available = ''; source = '' }
+            for ($k = 0; $k -lt $starts.Count; $k++) {
+                if ($starts[$k] -ge $l.Length) { continue }
+                $end = $(if ($k + 1 -lt $starts.Count) { [Math]::Min($starts[$k + 1], $l.Length) } else { $l.Length })
+                if ($roles[$k]) { $r[$roles[$k]] = $l.Substring($starts[$k], $end - $starts[$k]).Trim() }
+            }
+            if (-not $r.id -or $r.id -match '\s' -or -not $r.version) { break }
+            $rows += , $r
+        }
+    }
+    return $rows
+}
+
+<#
+    -CheckAppUpdates (read-only): which selected applications WinGet can update. WinGet lists the
+    packages of the account that runs it; as SYSTEM it cannot run for the deployment user, so that
+    is said instead of a result. Information only: an available update is not a deployment defect,
+    and nothing is ever installed here (updates are a separate action of the Application Manager).
+#>
+function Test-WdhAppUpdates {
+    param($C)
+    if (-not $C.CheckAppUpdates) { return }
+    $items = @(ConvertTo-WdhList $C.Config['applications']['items'])
+    $fid = 'apps.updates'
+    $runAs = $(if ($C.Identity.IsSystem) { 'SYSTEM' } else { [string] $C.Identity.Name })
+    $view = [ordered]@{ checkedUtc = (Get-WdhTime).ToString('o'); status = 'ok'; runAs = $runAs; asDeploymentUser = $C.SameUser; exitCode = ''; items = @(); otherAvailable = 0; problems = @(); note = ''; findingId = $fid }
+    $method = 'winget upgrade --source winget (read-only listing; nothing is installed)'
+    if ($C.Identity.IsSystem) {
+        $view.status = 'notAsSystem'
+        $view.note = "WinGet lists updates per user and cannot run for $($C.DeploymentUser) as SYSTEM. Run DeploymentHealth.ps1 -CheckAppUpdates as $($C.DeploymentUser), or use the Application Manager."
+        $C.AppUpdates = $view
+        Add-WdhFinding $C $fid 'applications' 'Application updates' 'Info' 'Informational' 'Listed for information' "Not checked: this audit runs as SYSTEM. $($view.note)" $method 'WinGet' -Required $false -TechnicianRequired $false | Out-Null
+        return
+    }
+    $r = Invoke-WdhProbe $C 'wingetUpgrade' { Get-WdhWinGetUpgrades }
+    if (-not $r -or -not $r.available) {
+        $view.status = 'wingetUnavailable'; $view.note = 'WinGet (App Installer) was not found for this account.'
+        $C.AppUpdates = $view
+        Add-WdhFinding $C $fid 'applications' 'Application updates' 'Info' 'Informational' 'Listed for information' "Not checked: $($view.note)" $method 'WinGet' -Required $false -TechnicianRequired $false | Out-Null
+        return
+    }
+    $view.exitCode = $(if ($null -ne $r.exitCode) { '0x{0:X8}' -f [BitConverter]::ToUInt32([BitConverter]::GetBytes([int32] $r.exitCode), 0) } else { '' })
+    $rows = @(ConvertFrom-WdhWinGetTable ([string] $r.text))
+    if (-not $rows.Count -and $r.exitCode -ne 0 -and [string] $r.text -notmatch '(?i)no (installed package|applicable upgrade|available upgrade)') {
+        $view.status = 'failed'; $view.note = "WinGet could not list updates (exit code $($view.exitCode))."
+        $view.problems = @(@(([string] $r.text) -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -and $_ -notmatch '^[-\\|/ ]+$' } | Select-Object -Last 2) | ForEach-Object { ConvertTo-WdhSafeText $_ })
+        $C.AppUpdates = $view
+        Add-WdhFinding $C $fid 'applications' 'Application updates' 'Info' 'Informational' 'Listed for information' $view.note $method 'WinGet' 'Run the check again when online; the Application Manager shows the same list.' -Required $false -TechnicianRequired $false | Out-Null
+        return
+    }
+    $byId = @{}
+    foreach ($row in $rows) { if ($row.id) { $byId[([string] $row.id).ToLowerInvariant()] = $row } }
+    $found = @()
+    foreach ($it in $items) {
+        $id = ([string] $it['packageIdentifier']).ToLowerInvariant()
+        if (-not $id -or -not $byId.ContainsKey($id)) { continue }
+        $row = $byId[$id]
+        $found += , [ordered]@{ key = ([string] $it['key']).ToLowerInvariant(); name = [string] $it['name']; id = [string] $row.id; installed = [string] $row.version; available = [string] $row.available; source = $(if ($row.source) { [string] $row.source } else { 'winget' }) }
+    }
+    $view.items = @($found)
+    $view.otherAvailable = [Math]::Max(0, $rows.Count - $found.Count)
+    if ($C.SameUser -eq $false) { $view.note = "Listed for $runAs, not for the deployment user $($C.DeploymentUser): that user's own per-user applications are not included." }
+    $C.AppUpdates = $view
+    $obs = $(if ($found.Count) { "$($found.Count) selected application(s) can be updated: $((@($found | ForEach-Object { "$($_.name) $($_.installed) -> $($_.available)" })) -join ', ')" } else { 'No update is listed for the selected applications' })
+    if ($view.otherAvailable) { $obs += "; $($view.otherAvailable) other package(s) on this computer also have updates" }
+    Add-WdhFinding $C $fid 'applications' 'Application updates' 'Info' 'Informational' 'Listed for information' "$obs.$(if ($view.note) { ' ' + $view.note })" $method 'WinGet' $(if ($found.Count) { 'Update them with the Application Manager (Updates), or leave them to the applications'' own updaters.' } else { '' }) -Required $false -TechnicianRequired $false | Out-Null
 }
 
 # ------------------------------------------------------------------------------------------------
@@ -1861,9 +2369,11 @@ function Get-WdhRecoveryActions {
     $has = Test-Path -LiteralPath $tool
     $ps = 'powershell.exe -ExecutionPolicy Bypass -File'
     $a = @([ordered]@{ id = 'verify'; label = 'Verify again'; command = "$ps `"$me`""; sideEffects = $false }
-           [ordered]@{ id = 'scanUpdates'; label = 'Recheck Windows Update (live scan)'; command = "$ps `"$me`" -ScanUpdates"; sideEffects = $false })
+           [ordered]@{ id = 'scanUpdates'; label = 'Recheck Windows Update (live scan)'; command = "$ps `"$me`" -ScanUpdates"; sideEffects = $false }
+           [ordered]@{ id = 'checkAppUpdates'; label = 'Check for application updates (WinGet list, run as the deployment user)'; command = "$ps `"$me`" -CheckAppUpdates"; sideEffects = $false })
     if ($has) {
         $a += [ordered]@{ id = 'recovery'; label = 'Open Deployment recovery'; command = "$ps `"$tool`""; sideEffects = $false }
+        if (Test-Path -LiteralPath (Join-Path $C.Paths.Package 'scripts\applications\ApplicationEngine.ps1')) { $a += [ordered]@{ id = 'ReverifyApplications'; label = 'Reverify applications (installs nothing)'; command = "$ps `"$tool`" -Action ReverifyApplications"; sideEffects = $false } }
         $a += [ordered]@{ id = 'RetryFailed'; label = 'Retry failed operations'; command = "$ps `"$tool`" -Action RetryFailed"; sideEffects = $true }
         $a += [ordered]@{ id = 'Resume'; label = 'Resume provisioning'; command = "$ps `"$tool`" -Action Resume"; sideEffects = $true }
         if ($C.Config['restoration']['required']) { $a += [ordered]@{ id = 'RestoreSettings'; label = 'Retry settings restoration'; command = "$ps `"$tool`" -Action RestoreSettings -BackupPath <backup folder>"; sideEffects = $true } }
@@ -1947,7 +2457,7 @@ function Get-WdhComparison {
 # ------------------------------------------------------------------------------------------------
 
 function New-WdhContext {
-    param([hashtable] $Manifest, [hashtable] $Paths, [hashtable] $Config, [switch] $ScanUpdates)
+    param([hashtable] $Manifest, [hashtable] $Paths, [hashtable] $Config, [switch] $ScanUpdates, [switch] $CheckAppUpdates)
     $read = Read-WddDeploymentState $Paths
     $identity = Get-WddIdentity
     $snap = $(if ($read.State) { Get-WddSnapshot $Manifest $Paths $read.State } else { [ordered]@{ stages = @(); allFinal = $false; outcome = 'FailedToInitialize'; outcomeCode = 50; outcomeDetail = ''; restartPending = $false } })
@@ -1961,13 +2471,15 @@ function New-WdhContext {
         Manifest = $Manifest; Paths = $Paths; Config = $Config; StateRead = $read; Snapshot = $snap; Identity = $identity
         DeploymentUser = $(if ($user) { $user } else { 'the deployment user' }); DeploymentSid = $sid; HiveLoaded = $hive
         SameUser = $(if ($identity.IsSystem -or -not $user) { $null } else { $identity.Name -ieq $user })
-        ScanUpdates = [bool] $ScanUpdates
+        ScanUpdates = [bool] $ScanUpdates; CheckAppUpdates = [bool] $CheckAppUpdates
         Findings = New-Object System.Collections.Generic.List[object]; Sources = New-Object System.Collections.Generic.List[object]
         Apps = New-Object System.Collections.Generic.List[object]; Manual = New-Object System.Collections.Generic.List[object]; Custom = New-Object System.Collections.Generic.List[object]
         Limitations = New-Object System.Collections.Generic.List[string]; Obs = @{}; Backups = [ordered]@{ retained = 0; bytes = 0; location = ''; requiredForOutstanding = $false; cleanup = '' }
         # Engine 1.1.0 sections: Windows Update state and history, device comparison, Office, manufacturer software.
         WindowsUpdate = $null; UpdateResult = $null; Office = $null
         DeviceComparison = New-Object System.Collections.Generic.List[object]; HardwareSoftware = New-Object System.Collections.Generic.List[object]
+        # Engine 1.2.0 sections: Visual C++ runtimes, and the optional WinGet update listing (-CheckAppUpdates).
+        Runtimes = $null; AppUpdates = $null; AppxReadable = $true
     }
 }
 
@@ -2025,7 +2537,29 @@ function Format-WdhTextReport {
     foreach ($x in @($Report['hardwareSoftware'])) { if ($x) { $l.Add("  $($x['utility']): $($x['detectedHardware']); installed $(if ($null -eq $x['installed']) { 'unknown' } else { $x['installed'] }); $($x['url'])"); $l.Add("    $($x['compatibility']) $($x['signIn']) Automatic installation: no ($($x['automaticInstallReason']))") } }
     $l.Add('')
     $l.Add("Applications ($(@($Report['applications']).Count))")
-    foreach ($a in @($Report['applications'])) { if ($a) { $l.Add(('  {0,-36} {1,-30} engine: {2}' -f $a['name'], $a['verification'], $(if ($a['engineStatus']) { $a['engineStatus'] } else { '-' }))) } }
+    foreach ($a in @($Report['applications'])) {
+        if (-not $a) { continue }
+        $l.Add(('  {0,-36} {1,-38} engine: {2}{3}' -f $a['name'], $a['verification'], $(if ($a['engineStatus']) { $a['engineStatus'] } else { '-' }), $(if ($a['outcome']) { " ($($a['outcome']))" } else { '' })))
+        foreach ($x in @(ConvertTo-WdhList $a['evidence'])) { $l.Add("      evidence: $($x['kind']) $($x['detail']) ($($x['where']))$(if ($x['version']) { " version $($x['version'])" })") }
+        if (-not @(ConvertTo-WdhList $a['evidence']).Count -and $a['verificationNote'] -and $a['kind'] -ne 'manual') { $l.Add("      $($a['verificationNote'])") }
+    }
+    $rt = $Report['runtimes']
+    if ($rt) {
+        $l.Add('')
+        $l.Add("Visual C++ runtimes ($($rt['source']))")
+        if (-not @($rt['items']).Count) { $l.Add('  None found.') }
+        foreach ($x in @($rt['items'])) { if ($x) { $l.Add(('  {0,-6} {1,-6} {2,-16} {3}' -f $x['family'], $x['architecture'], $x['version'], $x['displayName'])) } }
+        foreach ($x in @($rt['selected'])) { if ($x) { $l.Add("  Selected by this deployment: $($x['family']) $($x['architecture']) - $(if ($x['present']) { "present ($($x['version']))" } else { 'MISSING' })") } }
+        foreach ($x in @($rt['notes'])) { if ($x) { $l.Add("  $x") } }
+    }
+    $au = $Report['appUpdates']
+    if ($au) {
+        $l.Add('')
+        $l.Add("Application updates (WinGet, read-only; $($au['status']), as $($au['runAs']), $($au['checkedUtc']))")
+        foreach ($x in @($au['items'])) { if ($x) { $l.Add("  $($x['name']) ($($x['id'])): $($x['installed']) -> $($x['available'])") } }
+        if ($au['status'] -eq 'ok' -and -not @($au['items']).Count) { $l.Add('  No update listed for the selected applications.') }
+        if ($au['note']) { $l.Add("  $($au['note'])") }
+    }
     $l.Add('')
     $l.Add('Limitations')
     foreach ($x in @($Report['limitations'])) { $l.Add("  - $x") }
@@ -2039,15 +2573,15 @@ function Format-WdhTextReport {
     Nothing outside <dataRoot>\reports\health is written.
 #>
 function Invoke-WdhVerify {
-    param([hashtable] $Manifest, [hashtable] $Paths, [hashtable] $Config, [string] $Trigger = 'Technician', [switch] $ScanUpdates)
+    param([hashtable] $Manifest, [hashtable] $Paths, [hashtable] $Config, [string] $Trigger = 'Technician', [switch] $ScanUpdates, [switch] $CheckAppUpdates)
     $script:WdhNow = Get-WddNow
-    $C = New-WdhContext $Manifest $Paths $Config -ScanUpdates:$ScanUpdates
-    foreach ($t in 'Test-WdhDeployment', 'Test-WdhWindows', 'Test-WdhAccounts', 'Test-WdhUpdates', 'Test-WdhApplications', 'Test-WdhOffice', 'Test-WdhRestoration', 'Test-WdhDrivers', 'Test-WdhManufacturerSoftware', 'Test-WdhSecurity', 'Test-WdhNetwork', 'Test-WdhStorage', 'Test-WdhCustomizations') {
+    $C = New-WdhContext $Manifest $Paths $Config -ScanUpdates:$ScanUpdates -CheckAppUpdates:$CheckAppUpdates
+    foreach ($t in 'Test-WdhDeployment', 'Test-WdhWindows', 'Test-WdhAccounts', 'Test-WdhUpdates', 'Test-WdhApplications', 'Test-WdhRuntimes', 'Test-WdhAppUpdates', 'Test-WdhOffice', 'Test-WdhRestoration', 'Test-WdhDrivers', 'Test-WdhManufacturerSoftware', 'Test-WdhSecurity', 'Test-WdhNetwork', 'Test-WdhStorage', 'Test-WdhCustomizations') {
         try { & $t $C } catch {
-            $cat = @{ 'Test-WdhDeployment' = 'recovery'; 'Test-WdhWindows' = 'windows'; 'Test-WdhAccounts' = 'accounts'; 'Test-WdhUpdates' = 'updates'; 'Test-WdhApplications' = 'applications'; 'Test-WdhOffice' = 'applications'; 'Test-WdhRestoration' = 'restoration'; 'Test-WdhDrivers' = 'drivers'; 'Test-WdhManufacturerSoftware' = 'hardwareSoftware'; 'Test-WdhSecurity' = 'security'; 'Test-WdhNetwork' = 'network'; 'Test-WdhStorage' = 'storage'; 'Test-WdhCustomizations' = 'customizations' }[$t]
-            $req = $t -ne 'Test-WdhManufacturerSoftware'
+            $cat = @{ 'Test-WdhDeployment' = 'recovery'; 'Test-WdhWindows' = 'windows'; 'Test-WdhAccounts' = 'accounts'; 'Test-WdhUpdates' = 'updates'; 'Test-WdhApplications' = 'applications'; 'Test-WdhRuntimes' = 'applications'; 'Test-WdhAppUpdates' = 'applications'; 'Test-WdhOffice' = 'applications'; 'Test-WdhRestoration' = 'restoration'; 'Test-WdhDrivers' = 'drivers'; 'Test-WdhManufacturerSoftware' = 'hardwareSoftware'; 'Test-WdhSecurity' = 'security'; 'Test-WdhNetwork' = 'network'; 'Test-WdhStorage' = 'storage'; 'Test-WdhCustomizations' = 'customizations' }[$t]
+            $req = $t -notin 'Test-WdhManufacturerSoftware', 'Test-WdhRuntimes', 'Test-WdhAppUpdates'
             # Manufacturer software is a recommendation: its failure never affects the overall state beyond "Info".
-            if (-not $req) { Add-WdhFinding $C "$cat.checkError" $cat "$($script:WdhCategoryNames[$cat]) check" 'Info' 'Informational' 'The check completes' "The check stopped: $($_.Exception.Message)" $t 'DeploymentHealth.ps1' -Required $false -TechnicianRequired $false | Out-Null; continue }
+            if (-not $req) { Add-WdhFinding $C "$cat$(@{ 'Test-WdhRuntimes' = '.runtimes'; 'Test-WdhAppUpdates' = '.updates' }[$t]).checkError" $cat "$($script:WdhCategoryNames[$cat]) check" 'Info' 'Informational' 'The check completes' "The check stopped: $($_.Exception.Message)" $t 'DeploymentHealth.ps1' -Required $false -TechnicianRequired $false | Out-Null; continue }
             Add-WdhFinding $C "$cat$(if ($t -eq 'Test-WdhOffice') { '.office' }).checkError" $cat "$($script:WdhCategoryNames[$cat]) check" 'Unverifiable' 'Error' 'The check completes' "The check stopped: $($_.Exception.Message)" $t 'DeploymentHealth.ps1' 'Run the check again; report this message if it repeats.' | Out-Null
         }
     }
@@ -2067,7 +2601,8 @@ function Invoke-WdhVerify {
     $h = Save-WdhHistory $C $dir $current
     $limitations = @($C.Limitations | Select-Object -Unique)
     $limitations += 'Verification is read-only and tested with simulated computers; physical validation on real hardware is outstanding.'
-    $limitations += 'Applications are found by their uninstall records, Store packages or portable shortcut; an installer that registers none is reported as uncertain, never as missing on that basis alone.'
+    $limitations += 'Applications are verified with the evidence their catalog entry names (uninstall records, Store packages, files, registry values) and by name; an installer that leaves no evidence is reported as unverified, never as missing on that basis alone, and per-user evidence that cannot be read now as pending.'
+    if (-not $C.CheckAppUpdates) { $limitations += 'Application updates were not listed (run with -CheckAppUpdates as the deployment user for a read-only WinGet listing).' }
     $report = [ordered]@{
         format = 'windows-deployment-builder/deployment-health'; schemaVersion = 1; engineVersion = $script:WdhVersion
         verificationId = ([guid]::NewGuid().ToString('N')).Substring(0, 16); deploymentId = [string] $Manifest.packageId; generatedUtc = $script:WdhNow.ToString('o'); trigger = $Trigger; readOnly = $true
@@ -2093,6 +2628,9 @@ function Invoke-WdhVerify {
         deviceComparison = $C.DeviceComparison.ToArray()
         office = $C.Office
         hardwareSoftware = $C.HardwareSoftware.ToArray()
+        # Engine 1.2.0 sections.
+        runtimes = $C.Runtimes
+        appUpdates = $C.AppUpdates
     }
     Write-WddJson $current $report
     # The template beside this script first: a newer audit (for example from a recovery download) run on a
@@ -2254,7 +2792,7 @@ if ($script:WdhMain) {
     $id = Get-WddIdentity
     if ($a.Elevate -and -not $id.IsAdmin) {
         $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-        Start-Process -FilePath $ps -Verb RunAs -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"", '-Mode', $a.Mode)
+        Start-Process -FilePath $ps -Verb RunAs -ArgumentList (@('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"", '-Mode', $a.Mode) + @(if ($a.ScanUpdates) { '-ScanUpdates' }) + @(if ($a.CheckAppUpdates) { '-CheckAppUpdates' }))
         exit 0
     }
     if (-not $id.IsAdmin -and $a.Mode -in 'Verify', 'Dashboard') { Write-Output 'Note: not running as administrator; some checks (accounts, encryption, Store packages) may be reported as not verifiable.' }
@@ -2263,7 +2801,7 @@ if ($script:WdhMain) {
         'CleanupBackups' { $r = Invoke-WdhCleanupBackups $manifest $paths $config $a.ConfirmCleanup; Write-Output "CleanupBackups: $($r.Outcome). $($r.Message)"; exit $(if ($r.Outcome -eq 'Done') { 0 } elseif ($r.Outcome -eq 'NotElevated') { 4 } else { 1 }) }
         'ExportDiagnostics' { $r = Invoke-WdhExport $manifest $paths $config $a.OutputPath; Write-Output "ExportDiagnostics: $($r.Outcome). $($r.Message)"; exit $(if ($r.Outcome -eq 'Done') { 0 } else { 1 }) }
         default {
-            $r = $(if ($a.Trigger -eq 'Startup') { Invoke-WdhStartupRecheck $manifest $paths $config } else { Invoke-WdhVerify $manifest $paths $config $a.Trigger -ScanUpdates:$a.ScanUpdates })
+            $r = $(if ($a.Trigger -eq 'Startup') { Invoke-WdhStartupRecheck $manifest $paths $config } else { Invoke-WdhVerify $manifest $paths $config $a.Trigger -ScanUpdates:$a.ScanUpdates -CheckAppUpdates:$a.CheckAppUpdates })
             if ($a.Json) { $r.Report | ConvertTo-Json -Depth 12 } else {
                 Write-Output "Deployment health: $($r.Status) - $($r.Report.overall.summary)"
                 foreach ($k in $r.Report.categories) { Write-Output ('  {0,-32} {1}' -f $k.name, $k.status) }

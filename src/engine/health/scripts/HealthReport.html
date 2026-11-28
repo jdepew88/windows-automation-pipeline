@@ -203,10 +203,12 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
         var f = findings.filter(function (x) { return x.id === a.findingId; })[0];
         tbody.appendChild(el('tr', {},
           el('td', {}, el('strong', {}, a.name), el('div', { 'class': 'muted' }, a.packageIdentifier ? a.source + ': ' + a.packageIdentifier : a.source)),
-          el('td', {}, f ? badge(f.status) : '', el('div', {}, a.result)),
+          el('td', {}, f ? badge(f.status) : '', el('div', {}, a.result), el('div', { 'class': 'muted' }, a.verification)),
           el('td', {}, a.kind === 'manual' ? 'Manual follow-up' : a.kind === 'additional' ? 'Additional Software' : 'Automatic', el('div', { 'class': 'muted' }, a.required ? 'Required' : 'Optional')),
-          el('td', {}, a.independent + (a.foundIn ? ' (' + a.foundIn + ')' : ''), a.version ? el('div', { 'class': 'muted' }, a.version) : null),
-          el('td', {}, a.engineStatus || '\u2014', el('div', { 'class': 'muted' }, a.attempts ? a.attempts + ' attempt(s)' : ''))));
+          el('td', {}, a.independent + (a.foundIn ? ' (' + a.foundIn + ')' : ''), a.version ? el('div', { 'class': 'muted' }, a.version) : null,
+            (a.evidence || []).map(function (e) { return el('div', { 'class': 'muted' }, e.kind + ': ' + e.detail + ' (' + e.where + ')' + (e.version ? ' ' + e.version : '')); }),
+            !(a.evidence || []).length && a.verificationNote && a.kind !== 'manual' ? el('div', { 'class': 'muted' }, a.verificationNote) : null),
+          el('td', {}, a.engineStatus || '\u2014', a.outcome ? el('div', { 'class': 'muted' }, a.outcome) : null, el('div', { 'class': 'muted' }, a.attempts ? a.attempts + ' attempt(s)' : ''))));
       });
       if (!shown.length) { tbody.appendChild(el('tr', {}, el('td', { colspan: '5' }, apps.length ? 'No application matches.' : 'This deployment selected no applications.'))); }
     }
@@ -214,10 +216,25 @@ footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
     filter.addEventListener('change', drawApps);
     out.push(el('h2', { id: 'apps' }, 'Applications (' + apps.length + ')'));
     out.push(el('section', { 'class': 'card', 'data-testid': 'apps' },
-      el('p', { 'class': 'muted' }, 'Only the applications this deployment selected, plus its Additional Software. "Found" means Windows itself lists the application (uninstall records, Store packages or the portable shortcut); the installation engine\u2019s own result is shown separately.'),
+      el('p', { 'class': 'muted' }, 'Only the applications this deployment selected, plus its Additional Software. "Found" means evidence exists on this computer now (uninstall records, Store packages, files, registry values or the portable shortcut, as listed); "Deferred" means the evidence lies in the user\u2019s profile, which cannot be read now. The installation engine\u2019s own result is history and is shown separately.'),
       el('div', { 'class': 'tools' }, search, filter),
       el('div', { 'class': 'table-wrap' }, el('table', {}, el('thead', {}, el('tr', {}, el('th', { scope: 'col' }, 'Application'), el('th', { scope: 'col' }, 'Result'), el('th', { scope: 'col' }, 'Type'), el('th', { scope: 'col' }, 'On this computer'), el('th', { scope: 'col' }, 'Engine'))), tbody))));
     drawApps();
+    var rt = r.runtimes;
+    if (rt) {
+      out.push(el('section', { 'class': 'card', 'data-testid': 'runtimes', style: 'margin-top:12px' }, el('h3', { style: 'margin-top:0' }, 'Visual C++ runtimes'),
+        el('p', { 'class': 'muted' }, rt.source + '. x86 and x64 are separate runtimes: on 64-bit Windows, 32-bit applications use the x86 one.'),
+        (rt.items || []).length ? el('div', { 'class': 'table-wrap' }, el('table', {}, el('thead', {}, el('tr', {}, el('th', { scope: 'col' }, 'Family'), el('th', { scope: 'col' }, 'Architecture'), el('th', { scope: 'col' }, 'Version'), el('th', { scope: 'col' }, 'Listed as'))),
+          el('tbody', {}, rt.items.map(function (x) { return el('tr', {}, el('td', {}, x.family), el('td', {}, x.architecture), el('td', {}, x.version), el('td', {}, x.displayName)); })))) : el('p', {}, 'None found.'),
+        (rt.selected || []).length ? el('p', {}, 'Selected by this deployment: ' + rt.selected.map(function (x) { return x.family + ' ' + x.architecture + (x.present ? ' (present)' : ' (MISSING)'); }).join(', ')) : null,
+        (rt.notes || []).map(function (n) { return el('p', { 'class': 'muted' }, n); })));
+    }
+    var au = r.appUpdates;
+    if (au) {
+      out.push(el('section', { 'class': 'card', 'data-testid': 'app-updates', style: 'margin-top:12px' }, el('h3', { style: 'margin-top:0' }, 'Application updates (WinGet, read-only)'),
+        au.status !== 'ok' ? el('p', {}, au.note || ('Not checked: ' + au.status)) : (au.items || []).length ? el('ul', {}, au.items.map(function (x) { return el('li', {}, el('strong', {}, x.name), ' ' + x.installed + ' \u2192 ' + x.available + ' (' + x.id + ')'); })) : el('p', {}, 'No update is listed for the selected applications.'),
+        au.status === 'ok' && au.note ? el('p', { 'class': 'muted' }, au.note) : null));
+    }
 
     out.push(el('h2', {}, 'Details by category'));
     cats.forEach(function (k) {

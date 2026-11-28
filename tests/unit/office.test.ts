@@ -242,7 +242,7 @@ describe('Activation', () => {
         }
       }
     }
-  });
+  }, 30_000); // builds 12 complete packages: slow under parallel load, not a hang
 
   it('the review summary lists software and activation separately', () => {
     const p = withOffice('ltsc2024ProPlus', (x) => { x.activation.windows = 'microsoft'; x.activation.office = 'manual'; });

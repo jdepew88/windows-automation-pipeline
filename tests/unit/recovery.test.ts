@@ -23,7 +23,7 @@ describe('Phase 5 defaults and compatibility', () => {
     expect(a.maxAttemptsPerPackage).toBe(3);
     expect(a.recovery).toEqual({ automaticRetry: true, continueAfterFailure: true, includeRecoveryTool: true });
     const c = applicationsConfig(profile());
-    expect(c.engineVersion).toBe('1.5.0');
+    expect(c.engineVersion).toBe('1.6.0');
     expect(c.retry).toEqual({ automatic: true, continueAfterFailure: true, ...RETRY_TIMING });
     expect(RETRY_TIMING).toEqual({ baseDelaySeconds: 60, maxDelaySeconds: 900, jitterRatio: 0.2, maxNetworkDeferrals: 6 });
   });
@@ -121,8 +121,8 @@ describe('Phase 5 retry classification and result schema', () => {
       if (m.status === 'Failed' && m.retry) expect(RETRIED_CLASSES as readonly string[], code).toContain(m.class);
       expect(FAILURE_CLASSES as readonly string[]).toContain(m.class);
     }
-    expect(WINGET_EXIT_CODES['0x8A150011']).toMatchObject({ class: 'Integrity', retry: false });
-    expect(WINGET_EXIT_CODES['0x8A15003A']).toMatchObject({ class: 'Policy', retry: false });
+    expect(WINGET_EXIT_CODES['0x8A150011']).toMatchObject({ class: 'HashMismatch', retry: false });
+    expect(WINGET_EXIT_CODES['0x8A15003A']).toMatchObject({ class: 'Blocked', retry: false });
     expect(WINGET_EXIT_CODES['0x8A15010C']).toMatchObject({ class: 'User', retry: false });
     expect(WINGET_EXIT_CODES['0x8A150107']).toMatchObject({ class: 'Network', retry: true });
   });
@@ -169,7 +169,8 @@ describe('Phase 5 scripts: static safety checks', () => {
       expect(s).toContain('[System.IO.FileOptions]::WriteThrough');
       expect(s).toContain('[System.IO.File]::Replace($tmp, $Path');
     }
-    expect(engineSource).toContain('function Save-WdaState { param([hashtable] $State, [hashtable] $Paths) Write-WdaJson $Paths.State $State -Backup }');
+    // Engine 1.6.0: Save-WdaState derives each operation's outcome first, then writes atomically with a backup.
+    expect(engineSource).toMatch(/function Save-WdaState \{\s+param\(\[hashtable\] \$State, \[hashtable\] \$Paths\)[\s\S]{0,400}?\n {4}Write-WdaJson \$Paths\.State \$State -Backup\n\}/);
     expect(commonSource).toContain('function Save-WddState { param([hashtable] $Paths, [hashtable] $State) Write-WddJson $Paths.State $State -Backup }');
   });
 });

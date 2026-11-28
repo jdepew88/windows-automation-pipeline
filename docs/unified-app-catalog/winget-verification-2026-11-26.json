@@ -1,0 +1,5088 @@
+{
+  "format": "windows-deployment-builder/winget-verification",
+  "version": 1,
+  "repository": "microsoft/winget-pkgs",
+  "commit": "aca69c384d300bfdddf79bd1bb219d70cfcd1cb1",
+  "commitDate": "2026-11-26T14:15:13Z",
+  "checkedUtc": "2026-11-26T14:25:11.951Z",
+  "results": [
+    {
+      "id": "RustDesk.RustDesk",
+      "found": false,
+      "reason": "no package folder manifests/r/RustDesk"
+    },
+    {
+      "id": "TimKosse.FileZilla.Client",
+      "found": false,
+      "reason": "no package folder manifests/t/TimKosse"
+    },
+    {
+      "id": "FreeFileSync.FreeFileSync",
+      "found": false,
+      "reason": "no package folder manifests/f/FreeFileSync"
+    },
+    {
+      "id": "LaunchBox.LaunchBox",
+      "found": false,
+      "reason": "no package folder manifests/l/LaunchBox"
+    },
+    {
+      "id": "SaferNetworking.SpybotSearchandDestroy",
+      "found": false,
+      "reason": "no package folder manifests/s/SaferNetworking/SpybotSearchandDestroy"
+    },
+    {
+      "id": "SumatraPDF.SumatraPDF",
+      "found": true,
+      "canonicalId": "SumatraPDF.SumatraPDF",
+      "caseDiffers": false,
+      "path": "manifests/s/SumatraPDF/SumatraPDF",
+      "latestVersion": "3.6.1",
+      "versions": 14,
+      "packageName": "SumatraPDF",
+      "publisher": "Krzysztof Kowalczyk",
+      "license": "GPL-3.0",
+      "shortDescription": "SumatraPDF is a multi-format (PDF, EPUB, MOBI, CBZ, CBR, FB2, CHM, XPS, DjVu) reader for Windows.",
+      "packageUrl": "https://github.com/sumatrapdfreader/sumatrapdf",
+      "agreements": false,
+      "installerTypes": [
+        "exe",
+        "portable"
+      ],
+      "scopes": [
+        "machine",
+        "user"
+      ],
+      "architectures": [
+        "arm64",
+        "x64",
+        "x86"
+      ],
+      "elevation": [
+        "elevationRequired"
+      ],
+      "installerHosts": [
+        "www.sumatrapdfreader.org"
+      ],
+      "installers": 9,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [
+        "SumatraPDF (ARM64 portable)",
+        "SumatraPDF (x64 portable)",
+        "SumatraPDF (x86 portable)"
+      ],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "ONLYOFFICE.DesktopEditors",
+      "found": true,
+      "canonicalId": "ONLYOFFICE.DesktopEditors",
+      "caseDiffers": false,
+      "path": "manifests/o/ONLYOFFICE/DesktopEditors",
+      "latestVersion": "10.0.0",
+      "versions": 36,
+      "packageName": "ONLYOFFICE Desktop Editors",
+      "publisher": "Ascensio System SIA",
+      "license": "AGPL-3.0",
+      "shortDescription": "All the tools you need to work with text documents, spreadsheets, presentations, and fillable forms on Windows, Linux, and macOS.",
+      "packageUrl": "https://www.onlyoffice.com/en/desktop.aspx",
+      "agreements": false,
+      "installerTypes": [
+        "inno"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "arm64",
+        "x64",
+        "x86"
+      ],
+      "elevation": [
+        "elevatesSelf"
+      ],
+      "installerHosts": [
+        "github.com"
+      ],
+      "installers": 3,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [
+        "ONLYOFFICE 10.0.0 (arm64)",
+        "ONLYOFFICE 10.0.0 (x64)",
+        "ONLYOFFICE 10.0.0 (x86)"
+      ],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "PDFsam.PDFsam",
+      "found": true,
+      "canonicalId": "PDFsam.PDFsam",
+      "caseDiffers": false,
+      "path": "manifests/p/PDFsam/PDFsam",
+      "latestVersion": "6.0.11.0",
+      "versions": 42,
+      "packageName": "PDFsam Basic",
+      "publisher": "Sober Lemur S.r.l.",
+      "license": "AGPL-3.0",
+      "shortDescription": "A free, open source, multi-platform software designed to split, merge, extract pages, mix and rotate PDF files.",
+      "packageUrl": "https://pdfsam.org/pdfsam-basic/",
+      "agreements": false,
+      "installerTypes": [
+        "wix"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "github.com"
+      ],
+      "installers": 1,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Cyanfish.NAPS2",
+      "found": true,
+      "canonicalId": "Cyanfish.NAPS2",
+      "caseDiffers": false,
+      "path": "manifests/c/Cyanfish/NAPS2",
+      "latestVersion": "8.6.1",
+      "versions": 34,
+      "packageName": "NAPS2",
+      "publisher": "NAPS2 Software",
+      "license": "GPL-2.0",
+      "shortDescription": "Scan documents to PDF and other file types, as simply as possible.",
+      "packageUrl": "https://www.naps2.com/",
+      "agreements": false,
+      "installerTypes": [
+        "inno",
+        "msix",
+        "wix"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "arm64",
+        "x64"
+      ],
+      "elevation": [
+        "elevatesSelf"
+      ],
+      "installerHosts": [
+        "github.com"
+      ],
+      "installers": 4,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "DigitalScholar.Zotero",
+      "found": true,
+      "canonicalId": "DigitalScholar.Zotero",
+      "caseDiffers": false,
+      "path": "manifests/d/DigitalScholar/Zotero",
+      "latestVersion": "10.0.8",
+      "versions": 80,
+      "packageName": "Zotero",
+      "publisher": "Corporation for Digital Scholarship",
+      "license": "AGPL-3.0",
+      "shortDescription": "Your personal research assistant",
+      "packageUrl": "https://www.zotero.org/",
+      "agreements": false,
+      "installerTypes": [
+        "nullsoft"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "arm64",
+        "x64",
+        "x86"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "download.zotero.org"
+      ],
+      "installers": 3,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Anki.Anki",
+      "found": true,
+      "canonicalId": "Anki.Anki",
+      "caseDiffers": false,
+      "path": "manifests/a/Anki/Anki",
+      "latestVersion": "26.09.4",
+      "versions": 47,
+      "packageName": "Anki",
+      "publisher": "Anki",
+      "license": "AGPL-3.0-or-later",
+      "shortDescription": "Powerful and intelligent flash cards.",
+      "packageUrl": "https://apps.ankiweb.net/",
+      "agreements": false,
+      "installerTypes": [
+        "wix"
+      ],
+      "scopes": [],
+      "architectures": [
+        "arm64",
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "github.com"
+      ],
+      "installers": 2,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "KDE.Okular",
+      "found": true,
+      "canonicalId": "KDE.Okular",
+      "caseDiffers": false,
+      "path": "manifests/k/KDE/Okular",
+      "latestVersion": "26.11.80",
+      "versions": 30,
+      "packageName": "Okular",
+      "publisher": "KDE e.V.",
+      "license": "GPL-2.0-or-later",
+      "shortDescription": "The Universal Document Viewer",
+      "packageUrl": "https://okular.kde.org/",
+      "agreements": false,
+      "installerTypes": [
+        "nullsoft"
+      ],
+      "scopes": [
+        "machine",
+        "user"
+      ],
+      "architectures": [
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "cdn.kde.org"
+      ],
+      "installers": 2,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Logseq.Logseq",
+      "found": true,
+      "canonicalId": "Logseq.Logseq",
+      "caseDiffers": false,
+      "path": "manifests/l/Logseq/Logseq",
+      "latestVersion": "2.0.2",
+      "versions": 94,
+      "packageName": "Logseq",
+      "publisher": "Logseq",
+      "license": "AGPL-3.0",
+      "shortDescription": "A privacy-first, open-source platform for knowledge management and collaboration",
+      "packageUrl": "https://logseq.com/",
+      "agreements": false,
+      "installerTypes": [
+        "nullsoft"
+      ],
+      "scopes": [
+        "machine",
+        "user"
+      ],
+      "architectures": [
+        "arm64",
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "github.com"
+      ],
+      "installers": 4,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Evernote.Evernote",
+      "found": true,
+      "canonicalId": "Evernote.Evernote",
+      "caseDiffers": false,
+      "path": "manifests/e/Evernote/Evernote",
+      "latestVersion": "11.44.6",
+      "versions": 156,
+      "packageName": "Evernote",
+      "publisher": "Evernote Corporation",
+      "license": "Proprietary",
+      "shortDescription": "Remember everything and tackle any project with your notes, tasks, and schedule all in one place.",
+      "packageUrl": "https://evernote.com/download",
+      "agreements": false,
+      "installerTypes": [
+        "nullsoft"
+      ],
+      "scopes": [
+        "machine",
+        "user"
+      ],
+      "architectures": [
+        "x64",
+        "x86"
+      ],
+      "elevation": [
+        "elevationRequired"
+      ],
+      "installerHosts": [
+        "win.desktop.evernote.com"
+      ],
+      "installers": 4,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "OpenWhisperSystems.Signal",
+      "found": true,
+      "canonicalId": "OpenWhisperSystems.Signal",
+      "caseDiffers": false,
+      "path": "manifests/o/OpenWhisperSystems/Signal",
+      "latestVersion": "8.36.0",
+      "versions": 286,
+      "packageName": "Signal",
+      "publisher": "Signal Messenger, LLC",
+      "license": "AGPL-3.0",
+      "shortDescription": "Signal is an encrypted communications application.",
+      "packageUrl": "https://www.signal.org/",
+      "agreements": false,
+      "installerTypes": [
+        "nullsoft"
+      ],
+      "scopes": [
+        "user"
+      ],
+      "architectures": [
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "updates.signal.org"
+      ],
+      "installers": 1,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Element.Element",
+      "found": true,
+      "canonicalId": "Element.Element",
+      "caseDiffers": false,
+      "path": "manifests/e/Element/Element",
+      "latestVersion": "1.12.36",
+      "versions": 170,
+      "packageName": "Element",
+      "publisher": "Element",
+      "license": "AGPL-3.0-only or GPL-3.0-only",
+      "shortDescription": "Secure collaboration and messaging",
+      "packageUrl": "https://element.io/download",
+      "agreements": false,
+      "installerTypes": [
+        "exe"
+      ],
+      "scopes": [
+        "user"
+      ],
+      "architectures": [
+        "arm64",
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "packages.element.io"
+      ],
+      "installers": 2,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Rakuten.Viber",
+      "found": true,
+      "canonicalId": "Rakuten.Viber",
+      "caseDiffers": false,
+      "path": "manifests/r/Rakuten/Viber",
+      "latestVersion": "29.7.0.0",
+      "versions": 67,
+      "packageName": "Viber",
+      "publisher": "Rakuten",
+      "license": "Proprietary",
+      "shortDescription": "Free and secure calls and messages to anyone, anywhere.",
+      "packageUrl": "https://www.viber.com/",
+      "agreements": false,
+      "installerTypes": [
+        "wix"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "download.cdn.viber.com"
+      ],
+      "installers": 1,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Cisco.Webex",
+      "found": true,
+      "canonicalId": "Cisco.Webex",
+      "caseDiffers": false,
+      "path": "manifests/c/Cisco/Webex",
+      "latestVersion": "46.11.0.36194",
+      "versions": 55,
+      "packageName": "Webex",
+      "publisher": "Cisco Systems, Inc",
+      "license": "Proprietary",
+      "shortDescription": "With industry leading video conferencing, calling, and contact center solutions, Webex fuels hybrid work for businesses of all sizes.",
+      "packageUrl": "",
+      "agreements": false,
+      "installerTypes": [
+        "wix"
+      ],
+      "scopes": [
+        "machine",
+        "user"
+      ],
+      "architectures": [
+        "arm64",
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "binaries.webex.com"
+      ],
+      "installers": 4,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "uninstallPrevious"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Cisco.WebexMeetings",
+      "found": false,
+      "reason": "no package folder manifests/c/Cisco/WebexMeetings"
+    },
+    {
+      "id": "KeePassXCTeam.KeePassXC",
+      "found": true,
+      "canonicalId": "KeePassXCTeam.KeePassXC",
+      "caseDiffers": false,
+      "path": "manifests/k/KeePassXCTeam/KeePassXC",
+      "latestVersion": "2.8.0",
+      "versions": 21,
+      "packageName": "KeePassXC",
+      "publisher": "KeePassXC Team",
+      "license": "GPL-2.0-or-later",
+      "shortDescription": "KeePassXC is a cross-platform community-driven port of the Windows application “Keepass Password Safe”.",
+      "packageUrl": "https://keepassxc.org/",
+      "agreements": false,
+      "installerTypes": [
+        "wix"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "arm64",
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "github.com"
+      ],
+      "installers": 2,
+      "allHashed": true,
+      "dependencies": [
+        "Microsoft.VCRedist.2015+.arm64",
+        "Microsoft.VCRedist.2015+.x64"
+      ],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "DominikReichl.KeePass",
+      "found": true,
+      "canonicalId": "DominikReichl.KeePass",
+      "caseDiffers": false,
+      "path": "manifests/d/DominikReichl/KeePass",
+      "latestVersion": "2.61.1",
+      "versions": 23,
+      "packageName": "KeePass",
+      "publisher": "Dominik Reichl",
+      "license": "GPL-2.0",
+      "shortDescription": "KeePass, the free, open source, light-weight and easy-to-use password manager.",
+      "packageUrl": "https://keepass.info/",
+      "agreements": false,
+      "installerTypes": [
+        "inno",
+        "msi"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "arm64",
+        "x64",
+        "x86"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "sourceforge.net"
+      ],
+      "installers": 6,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "AgileBits.1Password",
+      "found": true,
+      "canonicalId": "AgileBits.1Password",
+      "caseDiffers": false,
+      "path": "manifests/a/AgileBits/1Password",
+      "latestVersion": "8.12.46.29",
+      "versions": 96,
+      "packageName": "1Password",
+      "publisher": "AgileBits Inc.",
+      "license": "Proprietary",
+      "shortDescription": "Top-Rated Password Manager for Personal & Business Use",
+      "packageUrl": "https://1password.com/downloads/windows",
+      "agreements": false,
+      "installerTypes": [
+        "msi",
+        "msix"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "arm64",
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "c.1password.com"
+      ],
+      "installers": 3,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Proton.ProtonPass",
+      "found": true,
+      "canonicalId": "Proton.ProtonPass",
+      "caseDiffers": false,
+      "path": "manifests/p/Proton/ProtonPass",
+      "latestVersion": "1.44.1",
+      "versions": 46,
+      "packageName": "Proton Pass",
+      "publisher": "Proton AG",
+      "license": "GPL-3.0",
+      "shortDescription": "Open-source and encrypted password manager",
+      "packageUrl": "https://proton.me/pass",
+      "agreements": false,
+      "installerTypes": [
+        "msix"
+      ],
+      "scopes": [],
+      "architectures": [
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "proton.me"
+      ],
+      "installers": 1,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Proton.ProtonVPN",
+      "found": true,
+      "canonicalId": "Proton.ProtonVPN",
+      "caseDiffers": false,
+      "path": "manifests/p/Proton/ProtonVPN",
+      "latestVersion": "5.1.10",
+      "versions": 32,
+      "packageName": "Proton VPN",
+      "publisher": "Proton AG",
+      "license": "GPL-3.0",
+      "shortDescription": "High-speed Swiss VPN that safeguards your privacy.",
+      "packageUrl": "https://protonvpn.com/",
+      "agreements": false,
+      "installerTypes": [
+        "inno"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "arm64",
+        "x64"
+      ],
+      "elevation": [
+        "elevatesSelf"
+      ],
+      "installerHosts": [
+        "vpn.protondownload.com"
+      ],
+      "installers": 2,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "MullvadVPN.MullvadVPN",
+      "found": true,
+      "canonicalId": "MullvadVPN.MullvadVPN",
+      "caseDiffers": false,
+      "path": "manifests/m/MullvadVPN/MullvadVPN",
+      "latestVersion": "2026.5",
+      "versions": 49,
+      "packageName": "Mullvad VPN",
+      "publisher": "Mullvad VPN",
+      "license": "GPL-3.0",
+      "shortDescription": "Mullvad is an open-source commercial virtual private network service based in Sweden.",
+      "packageUrl": "https://mullvad.net/",
+      "agreements": false,
+      "installerTypes": [
+        "nullsoft"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "arm64",
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "github.com"
+      ],
+      "installers": 2,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [
+        "Mullvad VPN 2026.5"
+      ],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Cryptomator.Cryptomator",
+      "found": true,
+      "canonicalId": "Cryptomator.Cryptomator",
+      "caseDiffers": false,
+      "path": "manifests/c/Cryptomator/Cryptomator",
+      "latestVersion": "1.19.7",
+      "versions": 50,
+      "packageName": "Cryptomator",
+      "publisher": "Skymatic GmbH",
+      "license": "GPL-3.0",
+      "shortDescription": "Encryption made easy and optimized for the cloud",
+      "packageUrl": "https://cryptomator.org/",
+      "agreements": false,
+      "installerTypes": [
+        "wix"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "github.com"
+      ],
+      "installers": 1,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "IDRIX.VeraCrypt",
+      "found": true,
+      "canonicalId": "IDRIX.VeraCrypt",
+      "caseDiffers": false,
+      "path": "manifests/i/IDRIX/VeraCrypt",
+      "latestVersion": "1.26.31",
+      "versions": 9,
+      "packageName": "VeraCrypt",
+      "publisher": "IDRIX",
+      "license": "Apache 2.0",
+      "shortDescription": "VeraCrypt is a free open source disk encryption software for Windows, Mac OSX and Linux.",
+      "packageUrl": "https://veracrypt.io/",
+      "agreements": true,
+      "installerTypes": [
+        "wix"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "x64"
+      ],
+      "elevation": [
+        "elevatesSelf"
+      ],
+      "installerHosts": [
+        "github.com"
+      ],
+      "installers": 1,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [
+        "VeraCrypt 1.26.31"
+      ],
+      "upgradeBehavior": [],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Malwarebytes.AdwCleaner",
+      "found": true,
+      "canonicalId": "Malwarebytes.AdwCleaner",
+      "caseDiffers": false,
+      "path": "manifests/m/Malwarebytes/AdwCleaner",
+      "latestVersion": "8.8.1.639",
+      "versions": 1,
+      "packageName": "AdwCleaner",
+      "publisher": "Malwarebytes",
+      "license": "Freeware",
+      "shortDescription": "Adware cleaner",
+      "packageUrl": "https://www.malwarebytes.com/adwcleaner",
+      "agreements": false,
+      "installerTypes": [
+        "portable"
+      ],
+      "scopes": [],
+      "architectures": [
+        "x86"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "adwcleaner.malwarebytes.com"
+      ],
+      "installers": 1,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Yubico.Authenticator",
+      "found": true,
+      "canonicalId": "Yubico.Authenticator",
+      "caseDiffers": false,
+      "path": "manifests/y/Yubico/Authenticator",
+      "latestVersion": "7.5.1",
+      "versions": 21,
+      "packageName": "Yubico Authenticator",
+      "publisher": "Yubico AB",
+      "license": "Apache-2.0",
+      "shortDescription": "Authenticator to generate 2-step verification codes using your YubiKey",
+      "packageUrl": "https://www.yubico.com/products/yubico-authenticator/",
+      "agreements": false,
+      "installerTypes": [
+        "wix"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "github.com"
+      ],
+      "installers": 1,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "GnuPG.Gpg4win",
+      "found": true,
+      "canonicalId": "GnuPG.Gpg4win",
+      "caseDiffers": false,
+      "path": "manifests/g/GnuPG/Gpg4win",
+      "latestVersion": "5.1.2",
+      "versions": 20,
+      "packageName": "Gpg4win",
+      "publisher": "The Gpg4win Project",
+      "license": "GPL-2.0",
+      "shortDescription": "A secure solution for file and email encryption.",
+      "packageUrl": "https://www.gpg4win.org/",
+      "agreements": false,
+      "installerTypes": [
+        "nullsoft"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "x64"
+      ],
+      "elevation": [
+        "elevatesSelf"
+      ],
+      "installerHosts": [
+        "files.gpg4win.org"
+      ],
+      "installers": 1,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "AnyDeskSoftwareGmbH.AnyDesk",
+      "found": false,
+      "reason": "no package folder manifests/a/AnyDeskSoftwareGmbH"
+    },
+    {
+      "id": "Google.ChromeRemoteDesktopHost",
+      "found": true,
+      "canonicalId": "Google.ChromeRemoteDesktopHost",
+      "caseDiffers": false,
+      "path": "manifests/g/Google/ChromeRemoteDesktopHost",
+      "latestVersion": "157.0.8103.41",
+      "versions": 29,
+      "packageName": "Chrome Remote Desktop Host",
+      "publisher": "Google LLC",
+      "license": "Freeware",
+      "shortDescription": "The easy way to remotely connect with your home or work computer, or share your screen with others.",
+      "packageUrl": "https://remotedesktop.google.com/",
+      "agreements": false,
+      "installerTypes": [
+        "wix"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "x86"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "dl.google.com"
+      ],
+      "installers": 1,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "MoonlightGameStreamingProject.Moonlight",
+      "found": true,
+      "canonicalId": "MoonlightGameStreamingProject.Moonlight",
+      "caseDiffers": false,
+      "path": "manifests/m/MoonlightGameStreamingProject/Moonlight",
+      "latestVersion": "6.2.0.0",
+      "versions": 20,
+      "packageName": "Moonlight Game Streaming Client",
+      "publisher": "Moonlight Game Streaming Project",
+      "license": "GPL-3.0",
+      "shortDescription": "Play games remotely from your NVIDIA GameStream-enabled PC",
+      "packageUrl": "https://moonlight-stream.org/",
+      "agreements": false,
+      "installerTypes": [
+        "burn"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "arm64",
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "github.com"
+      ],
+      "installers": 2,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "LizardByte.Sunshine",
+      "found": true,
+      "canonicalId": "LizardByte.Sunshine",
+      "caseDiffers": false,
+      "path": "manifests/l/LizardByte/Sunshine",
+      "latestVersion": "2026.914.233613",
+      "versions": 24,
+      "packageName": "Sunshine",
+      "publisher": "LizardByte",
+      "license": "GPL-3.0",
+      "shortDescription": "Sunshine is a Gamestream host for Moonlight.",
+      "packageUrl": "https://github.com/LizardByte/Sunshine",
+      "agreements": false,
+      "installerTypes": [
+        "wix"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "arm64",
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "github.com"
+      ],
+      "installers": 2,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "mRemoteNG.mRemoteNG",
+      "found": true,
+      "canonicalId": "mRemoteNG.mRemoteNG",
+      "caseDiffers": false,
+      "path": "manifests/m/mRemoteNG/mRemoteNG",
+      "latestVersion": "1.76.20.24615",
+      "versions": 2,
+      "packageName": "mRemoteNG",
+      "publisher": "Next Generation Software",
+      "license": "GPL-2.0",
+      "shortDescription": "An open source, multi-protocol, tabbed remote connections manager allowing you to view all of your connections in a simple yet powerful interface",
+      "packageUrl": "https://mremoteng.org/download",
+      "agreements": false,
+      "installerTypes": [
+        "wix"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "github.com"
+      ],
+      "installers": 1,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Mobatek.MobaXterm",
+      "found": true,
+      "canonicalId": "Mobatek.MobaXterm",
+      "caseDiffers": false,
+      "path": "manifests/m/Mobatek/MobaXterm",
+      "latestVersion": "26.6.0.5560",
+      "versions": 24,
+      "packageName": "MobaXterm",
+      "publisher": "Mobatek",
+      "license": "Freeware",
+      "shortDescription": "Enhanced terminal for Windows with X11 server, tabbed SSH client, network tools and much more",
+      "packageUrl": "https://mobaxterm.mobatek.net/",
+      "agreements": false,
+      "installerTypes": [
+        "wix",
+        "zip"
+      ],
+      "scopes": [],
+      "architectures": [
+        "x86"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "download.mobatek.net"
+      ],
+      "installers": 1,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Devolutions.RemoteDesktopManager",
+      "found": true,
+      "canonicalId": "Devolutions.RemoteDesktopManager",
+      "caseDiffers": false,
+      "path": "manifests/d/Devolutions/RemoteDesktopManager",
+      "latestVersion": "2026.3.19.0",
+      "versions": 201,
+      "packageName": "Remote Desktop Manager",
+      "publisher": "Devolutions inc.",
+      "license": "Proprietary",
+      "shortDescription": "Remote Connections & Passwords. Everywhere!",
+      "packageUrl": "https://remotedesktopmanager.com/",
+      "agreements": false,
+      "installerTypes": [
+        "msi"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "arm64",
+        "neutral",
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "cdn.devolutions.net"
+      ],
+      "installers": 3,
+      "allHashed": true,
+      "dependencies": [
+        "Microsoft.DotNet.DesktopRuntime.10"
+      ],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "AIMP.AIMP",
+      "found": true,
+      "canonicalId": "AIMP.AIMP",
+      "caseDiffers": false,
+      "path": "manifests/a/AIMP/AIMP",
+      "latestVersion": "5.10.2418",
+      "versions": 1,
+      "packageName": "AIMP",
+      "publisher": "Artem Izmaylov",
+      "license": "Proprietary",
+      "shortDescription": "AIMP is a freeware audio player.",
+      "packageUrl": "https://www.aimp.ru",
+      "agreements": false,
+      "installerTypes": [
+        "exe"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "x64",
+        "x86"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "aimp.ru"
+      ],
+      "installers": 2,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "MusicBrainz.Picard",
+      "found": true,
+      "canonicalId": "MusicBrainz.Picard",
+      "caseDiffers": false,
+      "path": "manifests/m/MusicBrainz/Picard",
+      "latestVersion": "3.0.5",
+      "versions": 24,
+      "packageName": "MusicBrainz Picard",
+      "publisher": "MusicBrainz",
+      "license": "GPL-2.0",
+      "shortDescription": "A cross-platform music tagger powered by the MusicBrainz database.",
+      "packageUrl": "https://picard.musicbrainz.org/",
+      "agreements": false,
+      "installerTypes": [
+        "nullsoft"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "data.musicbrainz.org"
+      ],
+      "installers": 1,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "TIDALMusicAS.TIDAL",
+      "found": true,
+      "canonicalId": "TIDALMusicAS.TIDAL",
+      "caseDiffers": false,
+      "path": "manifests/t/TIDALMusicAS/TIDAL",
+      "latestVersion": "2.48.0",
+      "versions": 1,
+      "packageName": "TIDAL",
+      "publisher": "TIDAL Music AS",
+      "license": "Proprietary",
+      "shortDescription": "A global music streaming service with high fidelity sound, hi-def video quality, and expertly curated playlists.",
+      "packageUrl": "https://offer.tidal.com/download",
+      "agreements": false,
+      "installerTypes": [
+        "exe"
+      ],
+      "scopes": [
+        "user"
+      ],
+      "architectures": [
+        "x64",
+        "x86"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "download.tidal.com"
+      ],
+      "installers": 2,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Amazon.Music",
+      "found": true,
+      "canonicalId": "Amazon.Music",
+      "caseDiffers": false,
+      "path": "manifests/a/Amazon/Music",
+      "latestVersion": "9.4.0.2386",
+      "versions": 3,
+      "packageName": "Amazon Music",
+      "publisher": "Amazon.com Services LLC",
+      "license": "Copyright Amazon.com Services LLC",
+      "shortDescription": "Amazon.Music",
+      "packageUrl": "",
+      "agreements": false,
+      "installerTypes": [
+        "exe"
+      ],
+      "scopes": [
+        "user"
+      ],
+      "architectures": [
+        "x86"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "d2j9xt6n9dg5d3.cloudfront.net"
+      ],
+      "installers": 1,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Deezer.Deezer",
+      "found": true,
+      "canonicalId": "Deezer.Deezer",
+      "caseDiffers": false,
+      "path": "manifests/d/Deezer/Deezer",
+      "latestVersion": "8.0.10",
+      "versions": 66,
+      "packageName": "Deezer",
+      "publisher": "Deezer",
+      "license": "Proprietary",
+      "shortDescription": "A French online music streaming service.",
+      "packageUrl": "https://www.deezer.com/explore/download/",
+      "agreements": false,
+      "installerTypes": [
+        "nullsoft"
+      ],
+      "scopes": [
+        "user"
+      ],
+      "architectures": [
+        "x86"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "www.deezer.com"
+      ],
+      "installers": 1,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "VB-Audio.Voicemeeter",
+      "found": true,
+      "canonicalId": "VB-Audio.Voicemeeter",
+      "caseDiffers": false,
+      "path": "manifests/v/VB-Audio/Voicemeeter",
+      "latestVersion": "1.1.2.2",
+      "versions": 3,
+      "packageName": "Voicemeeter",
+      "publisher": "VB-Audio Software",
+      "license": "Donationware",
+      "shortDescription": "Voicemeeter is Audio Mixer Application endowed with Virtual Audio Device used as Virtual I/O to mix and manage any audio sources from or to any audio devices or applications.",
+      "packageUrl": "https://vb-audio.com/Voicemeeter/index.htm",
+      "agreements": false,
+      "installerTypes": [
+        "exe",
+        "zip"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "download.vb-audio.com"
+      ],
+      "installers": 1,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Cockos.REAPER",
+      "found": true,
+      "canonicalId": "Cockos.REAPER",
+      "caseDiffers": false,
+      "path": "manifests/c/Cockos/REAPER",
+      "latestVersion": "7.86",
+      "versions": 148,
+      "packageName": "REAPER",
+      "publisher": "Cockos Incorporated",
+      "license": "Proprietary",
+      "shortDescription": "REAPER is a digital audio production application, offering full multitrack audio and MIDI recording, processing, editing, mixing and mastering toolset.",
+      "packageUrl": "https://www.reaper.fm/",
+      "agreements": false,
+      "installerTypes": [
+        "exe"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "arm64",
+        "x64",
+        "x86"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "www.reaper.fm"
+      ],
+      "installers": 3,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [
+        "REAPER"
+      ],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "LMMS.LMMS",
+      "found": true,
+      "canonicalId": "LMMS.LMMS",
+      "caseDiffers": false,
+      "path": "manifests/l/LMMS/LMMS",
+      "latestVersion": "1.2.2",
+      "versions": 5,
+      "packageName": "LMMS",
+      "publisher": "LMMS Developers",
+      "license": "GPL-2.0-or-later",
+      "shortDescription": "LMMS is a free cross-platform alternative to commercial programs like FL Studio®, which allow you to produce music with your computer.",
+      "packageUrl": "https://lmms.io/download",
+      "agreements": false,
+      "installerTypes": [
+        "nullsoft"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "x64",
+        "x86"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "github.com"
+      ],
+      "installers": 2,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Musescore.Musescore",
+      "found": true,
+      "canonicalId": "Musescore.Musescore",
+      "caseDiffers": false,
+      "path": "manifests/m/Musescore/Musescore",
+      "latestVersion": "4.7.7.261109195",
+      "versions": 30,
+      "packageName": "MuseScore",
+      "publisher": "MuseScore BVBA and Others",
+      "license": "GPL-3.0 License",
+      "shortDescription": "Create, play back and print beautiful sheet music with free and easy to use music notation software MuseScore.",
+      "packageUrl": "https://musescore.org/en",
+      "agreements": false,
+      "installerTypes": [
+        "wix"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "github.com"
+      ],
+      "installers": 1,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [
+        "MuseScore Studio 4"
+      ],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "enzo1982.freac",
+      "found": true,
+      "canonicalId": "enzo1982.freac",
+      "caseDiffers": false,
+      "path": "manifests/e/enzo1982/freac",
+      "latestVersion": "1.1.7",
+      "versions": 1,
+      "packageName": "fre:ac",
+      "publisher": "Robert Kausch / freeac.org",
+      "license": "GPL-2.0",
+      "shortDescription": "fre:ac is a free audio converter and CD ripper with support for various popular formats and encoders. It converts freely between MP3, M4A/AAC, FLAC, WMA, Opus, Ogg Vorbis, Speex, Monkey's Audio (APE), WavPack, WAV and other formats.",
+      "packageUrl": "https://github.com/enzo1982/freac",
+      "agreements": false,
+      "installerTypes": [
+        "portable",
+        "zip"
+      ],
+      "scopes": [],
+      "architectures": [
+        "arm64",
+        "x64",
+        "x86"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "github.com"
+      ],
+      "installers": 3,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "AndreWiethoff.ExactAudioCopy",
+      "found": true,
+      "canonicalId": "AndreWiethoff.ExactAudioCopy",
+      "caseDiffers": false,
+      "path": "manifests/a/AndreWiethoff/ExactAudioCopy",
+      "latestVersion": "1.8",
+      "versions": 2,
+      "packageName": "Exact Audio Copy",
+      "publisher": "Andre Wiethoff",
+      "license": "Cardware",
+      "shortDescription": "Exact Audio Copy is a so-called audio grabber for audio CDs using standard CD and DVD-ROM drives.",
+      "packageUrl": "https://www.exactaudiocopy.de/en",
+      "agreements": false,
+      "installerTypes": [
+        "nullsoft"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "x86"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "www.exactaudiocopy.de"
+      ],
+      "installers": 1,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "StrawberryMusicPlayer.Strawberry",
+      "found": false,
+      "reason": "no package folder manifests/s/StrawberryMusicPlayer"
+    },
+    {
+      "id": "EqualizerAPO.EqualizerAPO",
+      "found": false,
+      "reason": "no package folder manifests/e/EqualizerAPO"
+    },
+    {
+      "id": "clsid2.mpc-hc",
+      "found": true,
+      "canonicalId": "clsid2.mpc-hc",
+      "caseDiffers": false,
+      "path": "manifests/c/clsid2/mpc-hc",
+      "latestVersion": "2.8.5",
+      "versions": 64,
+      "packageName": "MPC-HC",
+      "publisher": "MPC-HC Team",
+      "license": "GPL-3.0",
+      "shortDescription": "MPC-HC is an extremely light-weight, open source media player for Windows. It supports all common video and audio file formats available for playback.",
+      "packageUrl": "https://github.com/clsid2/mpc-hc",
+      "agreements": false,
+      "installerTypes": [
+        "inno"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "x64",
+        "x86"
+      ],
+      "elevation": [
+        "elevatesSelf"
+      ],
+      "installerHosts": [
+        "github.com"
+      ],
+      "installers": 2,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Daum.PotPlayer",
+      "found": true,
+      "canonicalId": "Daum.PotPlayer",
+      "caseDiffers": false,
+      "path": "manifests/d/Daum/PotPlayer",
+      "latestVersion": "26.10.21.0",
+      "versions": 4,
+      "packageName": "PotPlayer",
+      "publisher": "Kakao Corp.",
+      "license": "Freeware",
+      "shortDescription": "Powerful multimedia player that supports a variety of different video codecs and formats.",
+      "packageUrl": "https://potplayer.tv/",
+      "agreements": false,
+      "installerTypes": [
+        "nullsoft"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "arm64",
+        "x64",
+        "x86"
+      ],
+      "elevation": [
+        "elevatesSelf"
+      ],
+      "installerHosts": [
+        "t1.daumcdn.net"
+      ],
+      "installers": 3,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [
+        "PotPlayer-64 bit"
+      ],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Plex.Plex",
+      "found": true,
+      "canonicalId": "Plex.Plex",
+      "caseDiffers": false,
+      "path": "manifests/p/Plex/Plex",
+      "latestVersion": "1.115.0",
+      "versions": 56,
+      "packageName": "Plex",
+      "publisher": "Plex, Inc.",
+      "license": "Freemium AND GPL-2.0",
+      "shortDescription": "Plex is a global streaming media service and a client–server media player platform, made by Plex, Inc.",
+      "packageUrl": "https://www.plex.tv/",
+      "agreements": false,
+      "installerTypes": [
+        "nullsoft"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "x64"
+      ],
+      "elevation": [
+        "elevatesSelf"
+      ],
+      "installerHosts": [
+        "downloads.plex.tv"
+      ],
+      "installers": 1,
+      "allHashed": true,
+      "dependencies": [
+        "Microsoft.VCRedist.2015+.x64"
+      ],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Plex.Plexamp",
+      "found": true,
+      "canonicalId": "Plex.Plexamp",
+      "caseDiffers": false,
+      "path": "manifests/p/Plex/Plexamp",
+      "latestVersion": "4.50.20",
+      "versions": 55,
+      "packageName": "Plexamp",
+      "publisher": "Plex, Inc.",
+      "license": "Proprietary",
+      "shortDescription": "A beautiful Plex music player for audiophiles, curators, and hipsters.",
+      "packageUrl": "https://www.plex.tv/plexamp/",
+      "agreements": false,
+      "installerTypes": [
+        "nullsoft"
+      ],
+      "scopes": [
+        "user"
+      ],
+      "architectures": [
+        "arm64",
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "plexamp.plex.tv"
+      ],
+      "installers": 2,
+      "allHashed": true,
+      "dependencies": [
+        "Microsoft.VCRedist.2015+.arm64",
+        "Microsoft.VCRedist.2015+.x64"
+      ],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Jellyfin.JellyfinMediaPlayer",
+      "found": true,
+      "canonicalId": "Jellyfin.JellyfinMediaPlayer",
+      "caseDiffers": false,
+      "path": "manifests/j/Jellyfin/JellyfinMediaPlayer",
+      "latestVersion": "1.12.0",
+      "versions": 12,
+      "packageName": "Jellyfin Media Player",
+      "publisher": "Jellyfin",
+      "license": "GPL-2.0",
+      "shortDescription": "Jellyfin Desktop Client based on Plex Media Player",
+      "packageUrl": "https://github.com/jellyfin/jellyfin-media-player",
+      "agreements": false,
+      "installerTypes": [
+        "burn"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "x64"
+      ],
+      "elevation": [
+        "elevationRequired"
+      ],
+      "installerHosts": [
+        "github.com"
+      ],
+      "installers": 1,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Meltytech.Shotcut",
+      "found": true,
+      "canonicalId": "Meltytech.Shotcut",
+      "caseDiffers": false,
+      "path": "manifests/m/Meltytech/Shotcut",
+      "latestVersion": "26.11.15",
+      "versions": 52,
+      "packageName": "Shotcut",
+      "publisher": "Meltytech",
+      "license": "GPL-3.0",
+      "shortDescription": "A free, open source, cross-platform video editor.",
+      "packageUrl": "https://shotcut.org/",
+      "agreements": false,
+      "installerTypes": [
+        "inno"
+      ],
+      "scopes": [
+        "machine",
+        "user"
+      ],
+      "architectures": [
+        "arm64",
+        "x64"
+      ],
+      "elevation": [
+        "elevatesSelf"
+      ],
+      "installerHosts": [
+        "github.com"
+      ],
+      "installers": 4,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "KDE.Kdenlive",
+      "found": true,
+      "canonicalId": "KDE.Kdenlive",
+      "caseDiffers": false,
+      "path": "manifests/k/KDE/Kdenlive",
+      "latestVersion": "26.08.3",
+      "versions": 50,
+      "packageName": "Kdenlive",
+      "publisher": "KDE e.V.",
+      "license": "GPL-3.0",
+      "shortDescription": "Free and Open Source Video Editor",
+      "packageUrl": "https://kdenlive.org/",
+      "agreements": false,
+      "installerTypes": [
+        "nullsoft"
+      ],
+      "scopes": [
+        "machine",
+        "user"
+      ],
+      "architectures": [
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "download.kde.org"
+      ],
+      "installers": 2,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "BlackmagicDesign.DaVinciResolve",
+      "found": false,
+      "reason": "no package folder manifests/b/BlackmagicDesign"
+    },
+    {
+      "id": "MoritzBunkus.MKVToolNix",
+      "found": true,
+      "canonicalId": "MoritzBunkus.MKVToolNix",
+      "caseDiffers": false,
+      "path": "manifests/m/MoritzBunkus/MKVToolNix",
+      "latestVersion": "103.0.0",
+      "versions": 56,
+      "packageName": "MKVToolNix",
+      "publisher": "Moritz Bunkus",
+      "license": "GPL-2.0",
+      "shortDescription": "MKVToolNix is a set of tools to create, alter and inspect Matroska files under Linux, other Unices and Windows.",
+      "packageUrl": "https://mkvtoolnix.download/",
+      "agreements": false,
+      "installerTypes": [
+        "nullsoft",
+        "portable",
+        "zip"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "x64",
+        "x86"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "mkvtoolnix.download"
+      ],
+      "installers": 4,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "uninstallPrevious"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "MediaArea.MediaInfo.GUI",
+      "found": true,
+      "canonicalId": "MediaArea.MediaInfo.GUI",
+      "caseDiffers": false,
+      "path": "manifests/m/MediaArea/MediaInfo/GUI",
+      "latestVersion": "26.10",
+      "versions": 31,
+      "packageName": "MediaInfo",
+      "publisher": "MediaArea.net",
+      "license": "BSD-2-Clause",
+      "shortDescription": "A convenient unified display of the most relevant technical and tag data for video and audio files.",
+      "packageUrl": "https://mediaarea.net/MediaInfo",
+      "agreements": false,
+      "installerTypes": [
+        "nullsoft"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "arm64",
+        "x64",
+        "x86"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "mediaarea.net"
+      ],
+      "installers": 3,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "KDE.Krita",
+      "found": true,
+      "canonicalId": "KDE.Krita",
+      "caseDiffers": false,
+      "path": "manifests/k/KDE/Krita",
+      "latestVersion": "5.3.5.0",
+      "versions": 33,
+      "packageName": "Krita",
+      "publisher": "Krita Foundation",
+      "license": "GPL-3.0",
+      "shortDescription": "Krita is a professional FREE and open source painting program. It is made by artists that want to see affordable art tools for everyone.",
+      "packageUrl": "https://krita.org/",
+      "agreements": false,
+      "installerTypes": [
+        "nullsoft"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "download.kde.org"
+      ],
+      "installers": 1,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Inkscape.Inkscape",
+      "found": true,
+      "canonicalId": "Inkscape.Inkscape",
+      "caseDiffers": false,
+      "path": "manifests/i/Inkscape/Inkscape",
+      "latestVersion": "1.4.4",
+      "versions": 18,
+      "packageName": "Inkscape",
+      "publisher": "Inkscape",
+      "license": "GPL-2.0",
+      "shortDescription": "A professional vector graphics software which runs on Linux, macOS and Windows desktop computers.",
+      "packageUrl": "https://inkscape.org/release/",
+      "agreements": false,
+      "installerTypes": [
+        "nullsoft",
+        "wix"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "arm64",
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "media.inkscape.org"
+      ],
+      "installers": 3,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "uninstallPrevious"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "BlenderFoundation.Blender",
+      "found": true,
+      "canonicalId": "BlenderFoundation.Blender",
+      "caseDiffers": false,
+      "path": "manifests/b/BlenderFoundation/Blender",
+      "latestVersion": "5.3.0",
+      "versions": 57,
+      "packageName": "blender",
+      "publisher": "Blender Foundation",
+      "license": "GPL-3.0-or-later",
+      "shortDescription": "Free and Open 3D Creation Software",
+      "packageUrl": "",
+      "agreements": false,
+      "installerTypes": [
+        "wix"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "arm64",
+        "x64"
+      ],
+      "elevation": [
+        "elevatesSelf"
+      ],
+      "installerHosts": [
+        "download.blender.org"
+      ],
+      "installers": 2,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "uninstallPrevious"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "ShareX.ShareX",
+      "found": true,
+      "canonicalId": "ShareX.ShareX",
+      "caseDiffers": false,
+      "path": "manifests/s/ShareX/ShareX",
+      "latestVersion": "22.4.0",
+      "versions": 24,
+      "packageName": "ShareX",
+      "publisher": "ShareX Team",
+      "license": "GPL-3.0",
+      "shortDescription": "Screen capture, file sharing and productivity tool",
+      "packageUrl": "https://getsharex.com/",
+      "agreements": false,
+      "installerTypes": [
+        "inno"
+      ],
+      "scopes": [
+        "machine",
+        "user"
+      ],
+      "architectures": [
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "github.com"
+      ],
+      "installers": 2,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Greenshot.Greenshot",
+      "found": true,
+      "canonicalId": "Greenshot.Greenshot",
+      "caseDiffers": false,
+      "path": "manifests/g/Greenshot/Greenshot",
+      "latestVersion": "1.3.328",
+      "versions": 13,
+      "packageName": "Greenshot",
+      "publisher": "Greenshot",
+      "license": "GPL-3.0",
+      "shortDescription": "A light-weight screenshot software tool for Windows.",
+      "packageUrl": "https://getgreenshot.org/",
+      "agreements": false,
+      "installerTypes": [
+        "inno"
+      ],
+      "scopes": [
+        "machine",
+        "user"
+      ],
+      "architectures": [
+        "x86"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "github.com"
+      ],
+      "installers": 2,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "dotPDN.PaintDotNet",
+      "found": true,
+      "canonicalId": "dotPDN.PaintDotNet",
+      "caseDiffers": false,
+      "path": "manifests/d/dotPDN/PaintDotNet",
+      "latestVersion": "5.2",
+      "versions": 2,
+      "packageName": "paint.net",
+      "publisher": "dotPDN LLC",
+      "license": "Proprietary (Freeware)",
+      "shortDescription": "An image and photo editing software for PCs that run Windows.",
+      "packageUrl": "https://getpaint.net/",
+      "agreements": false,
+      "installerTypes": [
+        "exe",
+        "portable",
+        "wix",
+        "zip"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "arm64",
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "github.com"
+      ],
+      "installers": 6,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "darktable.darktable",
+      "found": true,
+      "canonicalId": "darktable.darktable",
+      "caseDiffers": false,
+      "path": "manifests/d/darktable/darktable",
+      "latestVersion": "5.6.2",
+      "versions": 36,
+      "packageName": "darktable",
+      "publisher": "darktable team",
+      "license": "GPL-3.0",
+      "shortDescription": "Photography workflow application and raw developer",
+      "packageUrl": "https://www.darktable.org/",
+      "agreements": false,
+      "installerTypes": [
+        "inno"
+      ],
+      "scopes": [
+        "machine",
+        "user"
+      ],
+      "architectures": [
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "github.com"
+      ],
+      "installers": 2,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "RawTherapee.RawTherapee",
+      "found": true,
+      "canonicalId": "RawTherapee.RawTherapee",
+      "caseDiffers": false,
+      "path": "manifests/r/RawTherapee/RawTherapee",
+      "latestVersion": "5.13",
+      "versions": 5,
+      "packageName": "RawTherapee",
+      "publisher": "rawtherapee.com",
+      "license": "GPL-3.0",
+      "shortDescription": "A free, cross-platform raw image processing program",
+      "packageUrl": "https://www.rawtherapee.com/downloads/",
+      "agreements": false,
+      "installerTypes": [
+        "inno"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "arm64",
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "github.com"
+      ],
+      "installers": 2,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "uninstallPrevious"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "KDE.digikam",
+      "found": true,
+      "canonicalId": "KDE.digiKam",
+      "caseDiffers": true,
+      "path": "manifests/k/KDE/digiKam",
+      "latestVersion": "9.1.0",
+      "versions": 18,
+      "packageName": "digiKam",
+      "publisher": "The digiKam team",
+      "license": "GPL-2.0-or-later",
+      "shortDescription": "Professional Photo Management with the Power of Open Source",
+      "packageUrl": "https://www.digikam.org/",
+      "agreements": false,
+      "installerTypes": [
+        "nullsoft"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "download.kde.org"
+      ],
+      "installers": 1,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Scribus.Scribus",
+      "found": true,
+      "canonicalId": "Scribus.Scribus",
+      "caseDiffers": false,
+      "path": "manifests/s/Scribus/Scribus",
+      "latestVersion": "1.6.6",
+      "versions": 8,
+      "packageName": "Scribus",
+      "publisher": "The Scribus Team",
+      "license": "GPL-2.0-or-later",
+      "shortDescription": "Open Source Desktop Publishing",
+      "packageUrl": "https://www.scribus.net/",
+      "agreements": false,
+      "installerTypes": [
+        "nullsoft"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "x64",
+        "x86"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "sourceforge.net"
+      ],
+      "installers": 2,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "uninstallPrevious"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "FreeCAD.FreeCAD",
+      "found": true,
+      "canonicalId": "FreeCAD.FreeCAD",
+      "caseDiffers": false,
+      "path": "manifests/f/FreeCAD/FreeCAD",
+      "latestVersion": "1.1.4",
+      "versions": 19,
+      "packageName": "FreeCAD",
+      "publisher": "FreeCAD Team",
+      "license": "LGPL-2.0-or-later",
+      "shortDescription": "A general purpose open source parametric 3D CAD modeler",
+      "packageUrl": "https://www.freecad.org/downloads.php",
+      "agreements": false,
+      "installerTypes": [
+        "nullsoft"
+      ],
+      "scopes": [
+        "machine",
+        "user"
+      ],
+      "architectures": [
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "github.com"
+      ],
+      "installers": 2,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "uninstallPrevious"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Figma.Figma",
+      "found": true,
+      "canonicalId": "Figma.Figma",
+      "caseDiffers": false,
+      "path": "manifests/f/Figma/Figma",
+      "latestVersion": "126.12.8",
+      "versions": 99,
+      "packageName": "Figma",
+      "publisher": "Figma, Inc.",
+      "license": "Proprietary",
+      "shortDescription": "The Collaborative Interface Design Tool",
+      "packageUrl": "https://www.figma.com/downloads/",
+      "agreements": false,
+      "installerTypes": [
+        "exe",
+        "wix"
+      ],
+      "scopes": [
+        "machine",
+        "user"
+      ],
+      "architectures": [
+        "arm64",
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "desktop.figma.com"
+      ],
+      "installers": 3,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Upscayl.Upscayl",
+      "found": true,
+      "canonicalId": "Upscayl.Upscayl",
+      "caseDiffers": false,
+      "path": "manifests/u/Upscayl/Upscayl",
+      "latestVersion": "2.15.0",
+      "versions": 17,
+      "packageName": "Upscayl",
+      "publisher": "Nayam Amarshe",
+      "license": "AGPL-3.0",
+      "shortDescription": "A powerful image upscaling tool that uses advanced AI technology to enhance your images.",
+      "packageUrl": "https://upscayl.org/download",
+      "agreements": false,
+      "installerTypes": [
+        "nullsoft"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "github.com"
+      ],
+      "installers": 1,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "NickeManarin.ScreenToGif",
+      "found": true,
+      "canonicalId": "NickeManarin.ScreenToGif",
+      "caseDiffers": false,
+      "path": "manifests/n/NickeManarin/ScreenToGif",
+      "latestVersion": "2.43.2",
+      "versions": 45,
+      "packageName": "ScreenToGif",
+      "publisher": "Nicke Manarin",
+      "license": "MS-PL",
+      "shortDescription": "Screen, webcam and sketchboard recorder with an integrated editor.",
+      "packageUrl": "https://www.screentogif.com/",
+      "agreements": false,
+      "installerTypes": [
+        "msix",
+        "wix"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "arm64",
+        "x64",
+        "x86"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "github.com"
+      ],
+      "installers": 6,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Flameshot.Flameshot",
+      "found": true,
+      "canonicalId": "Flameshot.Flameshot",
+      "caseDiffers": false,
+      "path": "manifests/f/Flameshot/Flameshot",
+      "latestVersion": "15.0.0",
+      "versions": 14,
+      "packageName": "Flameshot",
+      "publisher": "flameshot-org",
+      "license": "GPL-3.0",
+      "shortDescription": "Powerful yet simple to use screenshot software.",
+      "packageUrl": "https://flameshot.org/",
+      "agreements": false,
+      "installerTypes": [
+        "wix"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "github.com"
+      ],
+      "installers": 1,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "uninstallPrevious"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Streamlabs.Streamlabs",
+      "found": true,
+      "canonicalId": "Streamlabs.Streamlabs",
+      "caseDiffers": false,
+      "path": "manifests/s/Streamlabs/Streamlabs",
+      "latestVersion": "1.22.5",
+      "versions": 26,
+      "packageName": "Streamlabs Desktop",
+      "publisher": "General Workings, Inc.",
+      "license": "GPL-3.0",
+      "shortDescription": "Free and open source streaming software built on OBS and Electron.",
+      "packageUrl": "https://streamlabs.com/streamlabs-live-streaming-software",
+      "agreements": false,
+      "installerTypes": [
+        "nullsoft"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "slobs-cdn.streamlabs.com"
+      ],
+      "installers": 1,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Elgato.StreamDeck",
+      "found": true,
+      "canonicalId": "Elgato.StreamDeck",
+      "caseDiffers": false,
+      "path": "manifests/e/Elgato/StreamDeck",
+      "latestVersion": "7.6.1.23033",
+      "versions": 50,
+      "packageName": "Elgato Stream Deck",
+      "publisher": "Corsair Memory, Inc.",
+      "license": "Proprietary",
+      "shortDescription": "With Stream Deck, unleash your creative genius and make waves across Twitch and YouTube. All while focusing on what matters most your audience. As a broadcaster that likes to produce on the fly and have high quality production.",
+      "packageUrl": "https://www.elgato.com/s/downloads",
+      "agreements": false,
+      "installerTypes": [
+        "wix"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "x64"
+      ],
+      "elevation": [
+        "elevatesSelf"
+      ],
+      "installerHosts": [
+        "edge.elgato.com"
+      ],
+      "installers": 1,
+      "allHashed": true,
+      "dependencies": [
+        "Microsoft.VCRedist.2015+.x64"
+      ],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "HeroicGamesLauncher.HeroicGamesLauncher",
+      "found": true,
+      "canonicalId": "HeroicGamesLauncher.HeroicGamesLauncher",
+      "caseDiffers": false,
+      "path": "manifests/h/HeroicGamesLauncher/HeroicGamesLauncher",
+      "latestVersion": "2.22.4",
+      "versions": 59,
+      "packageName": "Heroic",
+      "publisher": "Heroic Games Launcher",
+      "license": "GPL-3.0",
+      "shortDescription": "Heroic is an Open Source Game Launcher for Linux, Windows and MacOS.",
+      "packageUrl": "https://github.com/Heroic-Games-Launcher/HeroicGamesLauncher",
+      "agreements": false,
+      "installerTypes": [
+        "nullsoft",
+        "portable"
+      ],
+      "scopes": [
+        "machine",
+        "user"
+      ],
+      "architectures": [
+        "arm64",
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "github.com"
+      ],
+      "installers": 6,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Amazon.Games",
+      "found": true,
+      "canonicalId": "Amazon.Games",
+      "caseDiffers": false,
+      "path": "manifests/a/Amazon/Games",
+      "latestVersion": "3.0.9700.3",
+      "versions": 1,
+      "packageName": "Amazon Games",
+      "publisher": "Amazon.com Services, Inc.",
+      "license": "Proprietary",
+      "shortDescription": "Amazon Games app is a Windows PC game launcher that allows you to claim, download, and play new and classic Windows PC games every month from Prime Gaming.",
+      "packageUrl": "https://gaming.amazon.com/home",
+      "agreements": false,
+      "installerTypes": [
+        "exe"
+      ],
+      "scopes": [
+        "user"
+      ],
+      "architectures": [
+        "x86"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "download.amazongames.com"
+      ],
+      "installers": 1,
+      "allHashed": true,
+      "dependencies": [
+        "Microsoft.VCRedist.2015+.x86"
+      ],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "ItchIo.Itch",
+      "found": true,
+      "canonicalId": "ItchIo.Itch",
+      "caseDiffers": false,
+      "path": "manifests/i/ItchIo/Itch",
+      "latestVersion": "26.22.0",
+      "versions": 3,
+      "packageName": "itch",
+      "publisher": "itch corp.",
+      "license": "MIT",
+      "shortDescription": "Install, update and play indie games",
+      "packageUrl": "https://itch.io/app",
+      "agreements": false,
+      "installerTypes": [
+        "exe",
+        "zip"
+      ],
+      "scopes": [
+        "user"
+      ],
+      "architectures": [
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "broth.itch.zone"
+      ],
+      "installers": 1,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Guru3D.Afterburner",
+      "found": true,
+      "canonicalId": "Guru3D.Afterburner",
+      "caseDiffers": false,
+      "path": "manifests/g/Guru3D/Afterburner",
+      "latestVersion": "4.6.6",
+      "versions": 3,
+      "packageName": "MSI Afterburner",
+      "publisher": "MSI Co., LTD",
+      "license": "Freeware",
+      "shortDescription": "MSI Afterburner monitoring and GPU overclocking tool.",
+      "packageUrl": "",
+      "agreements": false,
+      "installerTypes": [
+        "nullsoft",
+        "zip"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "x86"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "ftp.nluug.nl"
+      ],
+      "installers": 1,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [
+        "MSI Afterburner 4.6.6"
+      ],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Ryochan7.DS4Windows",
+      "found": false,
+      "reason": "no package folder manifests/r/Ryochan7"
+    },
+    {
+      "id": "PrismLauncher.PrismLauncher",
+      "found": true,
+      "canonicalId": "PrismLauncher.PrismLauncher",
+      "caseDiffers": false,
+      "path": "manifests/p/PrismLauncher/PrismLauncher",
+      "latestVersion": "11.1.1",
+      "versions": 26,
+      "packageName": "Prism Launcher",
+      "publisher": "Prism Launcher Contributors",
+      "license": "GPL-3.0",
+      "shortDescription": "A custom launcher for Minecraft that allows you to easily manage multiple installations of Minecraft at once",
+      "packageUrl": "https://github.com/PrismLauncher/PrismLauncher",
+      "agreements": false,
+      "installerTypes": [
+        "nullsoft"
+      ],
+      "scopes": [
+        "user"
+      ],
+      "architectures": [
+        "arm64",
+        "x86"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "github.com"
+      ],
+      "installers": 2,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Mojang.MinecraftLauncher",
+      "found": true,
+      "canonicalId": "Mojang.MinecraftLauncher",
+      "caseDiffers": false,
+      "path": "manifests/m/Mojang/MinecraftLauncher",
+      "latestVersion": "2.0.0.0",
+      "versions": 1,
+      "packageName": "Minecraft Launcher",
+      "publisher": "Mojang",
+      "license": "Proprietary",
+      "shortDescription": "Official launcher for Minecraft, a sandbox voxel game",
+      "packageUrl": "",
+      "agreements": false,
+      "installerTypes": [
+        "wix"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "x86"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "launcher.mojang.com"
+      ],
+      "installers": 1,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Nvidia.GeForceNow",
+      "found": true,
+      "canonicalId": "Nvidia.GeForceNow",
+      "caseDiffers": false,
+      "path": "manifests/n/Nvidia/GeForceNow",
+      "latestVersion": "2.0.90.138",
+      "versions": 41,
+      "packageName": "NVIDIA GeForce NOW",
+      "publisher": "NVIDIA Corporation",
+      "license": "Proprietary",
+      "shortDescription": "GeForce NOW connects to digital PC game stores so you can stream the library of games you already own",
+      "packageUrl": "https://www.nvidia.com/en-us/geforce-now",
+      "agreements": false,
+      "installerTypes": [
+        "exe"
+      ],
+      "scopes": [
+        "user"
+      ],
+      "architectures": [
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "ota-downloads.nvidia.com"
+      ],
+      "installers": 1,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Giorgiotani.Peazip",
+      "found": true,
+      "canonicalId": "Giorgiotani.Peazip",
+      "caseDiffers": false,
+      "path": "manifests/g/Giorgiotani/Peazip",
+      "latestVersion": "11.4.0",
+      "versions": 43,
+      "packageName": "PeaZip",
+      "publisher": "Giorgio Tani",
+      "license": "LGPL-3.0",
+      "shortDescription": "A free file archiver utility and rar extractor for Windows and Linux, work with 200+ archive types and variants, handle spanned archives and support multiple archive encryption standards.",
+      "packageUrl": "https://peazip.github.io/",
+      "agreements": false,
+      "installerTypes": [
+        "inno",
+        "portable"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "x64",
+        "x86"
+      ],
+      "elevation": [
+        "elevatesSelf"
+      ],
+      "installerHosts": [
+        "github.com"
+      ],
+      "installers": 4,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "M2Team.NanaZip",
+      "found": true,
+      "canonicalId": "M2Team.NanaZip",
+      "caseDiffers": false,
+      "path": "manifests/m/M2Team/NanaZip",
+      "latestVersion": "7.0.1882.0",
+      "versions": 26,
+      "packageName": "NanaZip",
+      "publisher": "Kenji Mouri",
+      "license": "MIT",
+      "shortDescription": "The 7-Zip derivative intended for the modern Windows experience.",
+      "packageUrl": "https://github.com/M2Team/NanaZip",
+      "agreements": false,
+      "installerTypes": [
+        "msix"
+      ],
+      "scopes": [],
+      "architectures": [
+        "arm64",
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "github.com"
+      ],
+      "installers": 2,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "JAMSoftware.TreeSize.Free",
+      "found": true,
+      "canonicalId": "JAMSoftware.TreeSize.Free",
+      "caseDiffers": false,
+      "path": "manifests/j/JAMSoftware/TreeSize/Free",
+      "latestVersion": "4.8.1.610",
+      "versions": 3,
+      "packageName": "TreeSize Free",
+      "publisher": "JAM Software",
+      "license": "Proprietary",
+      "shortDescription": "Every hard disk is too small if you just wait long enough. TreeSize Free tells you where precious disk space has gone.",
+      "packageUrl": "https://www.jam-software.com/treesize_free",
+      "agreements": false,
+      "installerTypes": [
+        "inno"
+      ],
+      "scopes": [
+        "machine",
+        "user"
+      ],
+      "architectures": [
+        "x64"
+      ],
+      "elevation": [
+        "elevatesSelf"
+      ],
+      "installerHosts": [
+        "downloads.jam-software.de"
+      ],
+      "installers": 2,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [
+        "TreeSize Free V4.8.1"
+      ],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Ghisler.TotalCommander",
+      "found": true,
+      "canonicalId": "Ghisler.TotalCommander",
+      "caseDiffers": false,
+      "path": "manifests/g/Ghisler/TotalCommander",
+      "latestVersion": "11.58.1",
+      "versions": 12,
+      "packageName": "Total Commander",
+      "publisher": "Ghisler Software GmbH",
+      "license": "Shareware",
+      "shortDescription": "Total Commander is a modern file manager with plugin support in the classic 2-window style of the DOS era.",
+      "packageUrl": "https://www.ghisler.com/",
+      "agreements": false,
+      "installerTypes": [
+        "exe"
+      ],
+      "scopes": [
+        "machine",
+        "user"
+      ],
+      "architectures": [
+        "x64",
+        "x86"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "totalcommander.ch"
+      ],
+      "installers": 4,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Duplicati.Duplicati",
+      "found": true,
+      "canonicalId": "Duplicati.Duplicati",
+      "caseDiffers": false,
+      "path": "manifests/d/Duplicati/Duplicati",
+      "latestVersion": "2.4.1.1",
+      "versions": 16,
+      "packageName": "Duplicati",
+      "publisher": "Duplicati Team",
+      "license": "MIT",
+      "shortDescription": "Duplicati is a free, open source, backup client that securely stores encrypted, incremental, compressed backups on cloud storage services and remote file servers.",
+      "packageUrl": "https://www.duplicati.com/",
+      "agreements": false,
+      "installerTypes": [
+        "wix"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "arm64",
+        "x64",
+        "x86"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "github.com"
+      ],
+      "installers": 3,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Kopia.KopiaUI",
+      "found": true,
+      "canonicalId": "Kopia.KopiaUI",
+      "caseDiffers": false,
+      "path": "manifests/k/Kopia/KopiaUI",
+      "latestVersion": "0.23.1",
+      "versions": 38,
+      "packageName": "KopiaUI",
+      "publisher": "Kopia Authors",
+      "license": "Apache-2.0",
+      "shortDescription": "Cross-platform backup tool for Windows, macOS & Linux with fast, incremental backups, client-side end-to-end encryption, compression and data deduplication. CLI and GUI included.",
+      "packageUrl": "https://github.com/kopia/kopia",
+      "agreements": false,
+      "installerTypes": [
+        "nullsoft"
+      ],
+      "scopes": [
+        "machine",
+        "user"
+      ],
+      "architectures": [
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "github.com"
+      ],
+      "installers": 2,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [
+        "KopiaUI 0.23.1"
+      ],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "FilesCommunity.Files",
+      "found": true,
+      "canonicalId": "FilesCommunity.Files",
+      "caseDiffers": false,
+      "path": "manifests/f/FilesCommunity/Files",
+      "latestVersion": "4.3.0.0",
+      "versions": 17,
+      "packageName": "Files - Stable",
+      "publisher": "Files Community",
+      "license": "MPL",
+      "shortDescription": "A modern file manager that helps users organize their files and folders",
+      "packageUrl": "https://github.com/files-community/Files",
+      "agreements": false,
+      "installerTypes": [
+        "msix"
+      ],
+      "scopes": [],
+      "architectures": [
+        "arm64",
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "cdn.files.community"
+      ],
+      "installers": 2,
+      "allHashed": true,
+      "dependencies": [
+        "Microsoft.VCLibs.Desktop.14",
+        "Microsoft.WindowsAppRuntime.2"
+      ],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Bandisoft.Bandizip",
+      "found": true,
+      "canonicalId": "Bandisoft.Bandizip",
+      "caseDiffers": false,
+      "path": "manifests/b/Bandisoft/Bandizip",
+      "latestVersion": "7.47",
+      "versions": 3,
+      "packageName": "Bandizip",
+      "publisher": "Bandisoft.com",
+      "license": "Proprietary",
+      "shortDescription": "A powerful archiver that provides an ultrafast processing speed and convenient features.",
+      "packageUrl": "https://www.bandisoft.com/bandizip/",
+      "agreements": false,
+      "installerTypes": [
+        "exe"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "arm64",
+        "x64",
+        "x86"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "bandisoft.app"
+      ],
+      "installers": 3,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "RARLab.WinRAR",
+      "found": true,
+      "canonicalId": "RARLab.WinRAR",
+      "caseDiffers": false,
+      "path": "manifests/r/RARLab/WinRAR",
+      "latestVersion": "7.23.0",
+      "versions": 20,
+      "packageName": "WinRAR",
+      "publisher": "win.rar GmbH",
+      "license": "Proprietary",
+      "shortDescription": "Compress, Encrypt, Package and Backup with only one utility.",
+      "packageUrl": "https://www.win-rar.com/",
+      "agreements": false,
+      "installerTypes": [
+        "exe"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "x64"
+      ],
+      "elevation": [
+        "elevatesSelf"
+      ],
+      "installerHosts": [
+        "www.rarlab.com"
+      ],
+      "installers": 39,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "AOMEI.Backupper.Standard",
+      "found": true,
+      "canonicalId": "AOMEI.Backupper.Standard",
+      "caseDiffers": false,
+      "path": "manifests/a/AOMEI/Backupper/Standard",
+      "latestVersion": "8.5.1",
+      "versions": 2,
+      "packageName": "AOMEI Backupper",
+      "publisher": "AOMEI International Network Limited.",
+      "license": "Proprietary",
+      "shortDescription": "Reliable Windows backup software to safeguard operating system, data and applications using backup, restore or clone feature.",
+      "packageUrl": "https://www.ubackup.com/ab",
+      "agreements": false,
+      "installerTypes": [
+        "inno"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "x86"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "www.aomeiget.com"
+      ],
+      "installers": 1,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "CPUID.CPU-Z",
+      "found": true,
+      "canonicalId": "CPUID.CPU-Z",
+      "caseDiffers": false,
+      "path": "manifests/c/CPUID/CPU-Z",
+      "latestVersion": "3.02",
+      "versions": 39,
+      "packageName": "CPUID CPU-Z",
+      "publisher": "CPUID, Inc.",
+      "license": "Freeware",
+      "shortDescription": "System information software",
+      "packageUrl": "https://www.cpuid.com/softwares/cpu-z.html",
+      "agreements": false,
+      "installerTypes": [
+        "inno"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "x64",
+        "x86"
+      ],
+      "elevation": [
+        "elevatesSelf"
+      ],
+      "installerHosts": [
+        "download.cpuid.com"
+      ],
+      "installers": 4,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "TechPowerUp.GPU-Z",
+      "found": true,
+      "canonicalId": "TechPowerUp.GPU-Z",
+      "caseDiffers": false,
+      "path": "manifests/t/TechPowerUp/GPU-Z",
+      "latestVersion": "2.72.0",
+      "versions": 14,
+      "packageName": "TechPowerUp GPU-Z",
+      "publisher": "TechPowerUp",
+      "license": "Freeware",
+      "shortDescription": "GPU-Z is a lightweight system utility designed to provide vital information about your video card and graphics processor.",
+      "packageUrl": "https://www.techpowerup.com/gpuz/",
+      "agreements": false,
+      "installerTypes": [
+        "exe",
+        "inno"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "x86"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "us1-dl.techpowerup.com"
+      ],
+      "installers": 1,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "BleachBit.BleachBit",
+      "found": true,
+      "canonicalId": "BleachBit.BleachBit",
+      "caseDiffers": false,
+      "path": "manifests/b/BleachBit/BleachBit",
+      "latestVersion": "6.0.6.633",
+      "versions": 11,
+      "packageName": "BleachBit",
+      "publisher": "BleachBit",
+      "license": "GPL-3.0",
+      "shortDescription": "Clean Your System and Free Disk Space",
+      "packageUrl": "https://www.bleachbit.org/",
+      "agreements": false,
+      "installerTypes": [
+        "nullsoft"
+      ],
+      "scopes": [
+        "machine",
+        "user"
+      ],
+      "architectures": [
+        "x86"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "download.bleachbit.org"
+      ],
+      "installers": 2,
+      "allHashed": true,
+      "dependencies": [
+        "Microsoft.VCRedist.2010.x86"
+      ],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "OO-Software.ShutUp10",
+      "found": true,
+      "canonicalId": "OO-Software.ShutUp10",
+      "caseDiffers": false,
+      "path": "manifests/o/OO-Software/ShutUp10",
+      "latestVersion": "3.7.1143",
+      "versions": 16,
+      "packageName": "O&O ShutUp10",
+      "publisher": "O&O Software GmbH",
+      "license": "Proprietary",
+      "shortDescription": "O&O ShutUp10 is the free, portable antispy tool for Windows 10 and 11 that lets you control privacy, telemetry and AI data settings from a single interface.",
+      "packageUrl": "https://www.oo-software.com/en/shutup10",
+      "agreements": false,
+      "installerTypes": [
+        "portable"
+      ],
+      "scopes": [],
+      "architectures": [
+        "arm64",
+        "x64",
+        "x86"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "package.oo-software.com"
+      ],
+      "installers": 3,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Piriform.Speccy",
+      "found": true,
+      "canonicalId": "Piriform.Speccy",
+      "caseDiffers": false,
+      "path": "manifests/p/Piriform/Speccy",
+      "latestVersion": "1.34.84",
+      "versions": 3,
+      "packageName": "Speccy",
+      "publisher": "Piriform",
+      "license": "Proprietary",
+      "shortDescription": "Fast, lightweight, advanced system information at your fingertips.",
+      "packageUrl": "https://www.ccleaner.com/speccy",
+      "agreements": false,
+      "installerTypes": [
+        "nullsoft"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "neutral"
+      ],
+      "elevation": [
+        "elevatesSelf"
+      ],
+      "installerHosts": [
+        "download.ccleaner.com"
+      ],
+      "installers": 1,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "LibreHardwareMonitor.LibreHardwareMonitor",
+      "found": true,
+      "canonicalId": "LibreHardwareMonitor.LibreHardwareMonitor",
+      "caseDiffers": false,
+      "path": "manifests/l/LibreHardwareMonitor/LibreHardwareMonitor",
+      "latestVersion": "0.9.6",
+      "versions": 4,
+      "packageName": "LibreHardwareMonitor",
+      "publisher": "LibreHardwareMonitor",
+      "license": "MPL-2.0",
+      "shortDescription": "A free software fork of Open Hardware Monitor that can monitor the temperature sensors, fan speeds, voltages, load and clock speeds of your computer.",
+      "packageUrl": "https://github.com/LibreHardwareMonitor/LibreHardwareMonitor",
+      "agreements": false,
+      "installerTypes": [
+        "portable",
+        "zip"
+      ],
+      "scopes": [],
+      "architectures": [
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "github.com"
+      ],
+      "installers": 1,
+      "allHashed": true,
+      "dependencies": [
+        "namazso.PawnIO"
+      ],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "uninstallPrevious"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "NirSoft.BlueScreenView",
+      "found": true,
+      "canonicalId": "NirSoft.BlueScreenView",
+      "caseDiffers": false,
+      "path": "manifests/n/NirSoft/BlueScreenView",
+      "latestVersion": "1.55",
+      "versions": 1,
+      "packageName": "BlueScreenView",
+      "publisher": "NirSoft",
+      "license": "Freeware",
+      "shortDescription": "View crash information stored in the MiniDump files created on blue screen of Windows.",
+      "packageUrl": "https://www.nirsoft.net/utils/blue_screen_view.html",
+      "agreements": false,
+      "installerTypes": [
+        "nullsoft",
+        "portable",
+        "zip"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "x64",
+        "x86"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "www.nirsoft.net"
+      ],
+      "installers": 3,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [
+        "NirSoft BlueScreenView"
+      ],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Wagnardsoft.DisplayDriverUninstaller",
+      "found": true,
+      "canonicalId": "Wagnardsoft.DisplayDriverUninstaller",
+      "caseDiffers": false,
+      "path": "manifests/w/Wagnardsoft/DisplayDriverUninstaller",
+      "latestVersion": "18.1.5.3",
+      "versions": 35,
+      "packageName": "Display Driver Uninstaller",
+      "publisher": "Wagnardsoft",
+      "license": "MIT",
+      "shortDescription": "Display Driver Uninstaller is a driver removal utility that can help you completely uninstall AMD/NVIDIA/INTEL graphics card drivers and packages from your system, trying to remove all leftovers (including registry keys, folders and files, driver store).",
+      "packageUrl": "https://www.wagnardsoft.com/display-driver-uninstaller-ddu",
+      "agreements": false,
+      "installerTypes": [
+        "nullsoft"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "x64"
+      ],
+      "elevation": [
+        "elevatesSelf"
+      ],
+      "installerHosts": [
+        "www.wagnardsoft.com"
+      ],
+      "installers": 1,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Klocman.BulkCrapUninstaller",
+      "found": true,
+      "canonicalId": "Klocman.BulkCrapUninstaller",
+      "caseDiffers": false,
+      "path": "manifests/k/Klocman/BulkCrapUninstaller",
+      "latestVersion": "6.3.0.0",
+      "versions": 18,
+      "packageName": "BCUninstaller",
+      "publisher": "Marcin Szeniak",
+      "license": "Apache-2.0",
+      "shortDescription": "Bulk program uninstaller with advanced automation. It excels at removing large amounts of applications with minimal to no user input, while requiring next to no technical knowledge.",
+      "packageUrl": "https://www.bcuninstaller.com/",
+      "agreements": false,
+      "installerTypes": [
+        "inno"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "x86"
+      ],
+      "elevation": [
+        "elevatesSelf"
+      ],
+      "installerHosts": [
+        "github.com"
+      ],
+      "installers": 1,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "PrimateLabs.Geekbench.6",
+      "found": true,
+      "canonicalId": "PrimateLabs.Geekbench.6",
+      "caseDiffers": false,
+      "path": "manifests/p/PrimateLabs/Geekbench/6",
+      "latestVersion": "6.4.0",
+      "versions": 8,
+      "packageName": "Geekbench 6",
+      "publisher": "Primate Labs Inc.",
+      "license": "Proprietary",
+      "shortDescription": "Measures your device's CPU and GPU performance.",
+      "packageUrl": "https://www.primatelabs.com/",
+      "agreements": false,
+      "installerTypes": [
+        "nullsoft"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "x64"
+      ],
+      "elevation": [
+        "elevatesSelf"
+      ],
+      "installerHosts": [
+        "cdn.geekbench.com"
+      ],
+      "installers": 1,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Ookla.Speedtest.Desktop",
+      "found": true,
+      "canonicalId": "Ookla.Speedtest.Desktop",
+      "caseDiffers": false,
+      "path": "manifests/o/Ookla/Speedtest/Desktop",
+      "latestVersion": "1.15.200.001",
+      "versions": 3,
+      "packageName": "Speedtest by Ookla",
+      "publisher": "Ookla",
+      "license": "Proprietary",
+      "shortDescription": "The definitive way to test the speed and performance of your internet connection.",
+      "packageUrl": "https://www.speedtest.net/apps/windows",
+      "agreements": false,
+      "installerTypes": [
+        "msi"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "install.speedtest.net"
+      ],
+      "installers": 1,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Famatech.AdvancedIPScanner",
+      "found": true,
+      "canonicalId": "Famatech.AdvancedIPScanner",
+      "caseDiffers": false,
+      "path": "manifests/f/Famatech/AdvancedIPScanner",
+      "latestVersion": "2.5.4594.1",
+      "versions": 1,
+      "packageName": "Advanced IP Scanner",
+      "publisher": "Famatech",
+      "license": "Freeware",
+      "shortDescription": "Advanced IP Scanner shows all network devices, gives you access to shared folders, and can even remotely switch computers off.",
+      "packageUrl": "https://www.advanced-ip-scanner.com/",
+      "agreements": false,
+      "installerTypes": [
+        "inno",
+        "wix"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "x86"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "download.advanced-ip-scanner.com"
+      ],
+      "installers": 1,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "angryziber.AngryIPScanner",
+      "found": true,
+      "canonicalId": "angryziber.AngryIPScanner",
+      "caseDiffers": false,
+      "path": "manifests/a/angryziber/AngryIPScanner",
+      "latestVersion": "3.12.2",
+      "versions": 7,
+      "packageName": "Angry IP Scanner",
+      "publisher": "Angry IP Scanner",
+      "license": "GPL-2.0",
+      "shortDescription": "Angry IP scanner is a very fast IP address and port scanner.",
+      "packageUrl": "https://angryip.org/",
+      "agreements": false,
+      "installerTypes": [
+        "nullsoft"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "x86"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "github.com"
+      ],
+      "installers": 1,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Postman.Postman",
+      "found": true,
+      "canonicalId": "Postman.Postman",
+      "caseDiffers": false,
+      "path": "manifests/p/Postman/Postman",
+      "latestVersion": "12.38.5",
+      "versions": 407,
+      "packageName": "Postman",
+      "publisher": "Postman",
+      "license": "Proprietary",
+      "shortDescription": "The Collaboration Platform for API Development",
+      "packageUrl": "https://www.postman.com/downloads/",
+      "agreements": false,
+      "installerTypes": [
+        "exe"
+      ],
+      "scopes": [
+        "user"
+      ],
+      "architectures": [
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "dl.pstmn.io"
+      ],
+      "installers": 1,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "OpenVPNTechnologies.OpenVPNConnect",
+      "found": true,
+      "canonicalId": "OpenVPNTechnologies.OpenVPNConnect",
+      "caseDiffers": false,
+      "path": "manifests/o/OpenVPNTechnologies/OpenVPNConnect",
+      "latestVersion": "3.9.0",
+      "versions": 20,
+      "packageName": "OpenVPN Connect",
+      "publisher": "OpenVPN Inc.",
+      "license": "Proprietary",
+      "shortDescription": "Securely access your organization's network resources",
+      "packageUrl": "https://openvpn.net/client/",
+      "agreements": false,
+      "installerTypes": [
+        "wix"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "x64",
+        "x86"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "packages.openvpn.net"
+      ],
+      "installers": 2,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "OpenVPNTechnologies.OpenVPN",
+      "found": true,
+      "canonicalId": "OpenVPNTechnologies.OpenVPN",
+      "caseDiffers": false,
+      "path": "manifests/o/OpenVPNTechnologies/OpenVPN",
+      "latestVersion": "2.7.902",
+      "versions": 45,
+      "packageName": "OpenVPN",
+      "publisher": "OpenVPN, Inc.",
+      "license": "GPL-2.0",
+      "shortDescription": "Create secure VPN connections over the internet with this VPN software.",
+      "packageUrl": "https://openvpn.net/community/",
+      "agreements": false,
+      "installerTypes": [
+        "wix"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "arm64",
+        "x64",
+        "x86"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "swupdate.openvpn.org"
+      ],
+      "installers": 3,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Jounin.TFTPD64",
+      "found": false,
+      "reason": "no package folder manifests/j/Jounin"
+    },
+    {
+      "id": "Mikrotik.Winbox",
+      "found": true,
+      "canonicalId": "Mikrotik.Winbox",
+      "caseDiffers": false,
+      "path": "manifests/m/Mikrotik/Winbox",
+      "latestVersion": "4.5",
+      "versions": 51,
+      "packageName": "WinBox",
+      "publisher": "MikroTik",
+      "license": "Proprietary",
+      "shortDescription": "Small utility that allows administration of MikroTik RouterOS using a fast and simple GUI.",
+      "packageUrl": "https://mikrotik.com/download",
+      "agreements": false,
+      "installerTypes": [
+        "portable",
+        "zip"
+      ],
+      "scopes": [],
+      "architectures": [
+        "arm64",
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "download.mikrotik.com"
+      ],
+      "installers": 2,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "GNS3.GNS3",
+      "found": false,
+      "reason": "no package folder manifests/g/GNS3"
+    },
+    {
+      "id": "Microsoft.VisualStudio.2022.Community",
+      "found": true,
+      "canonicalId": "Microsoft.VisualStudio.2022.Community",
+      "caseDiffers": false,
+      "path": "manifests/m/Microsoft/VisualStudio/2022/Community",
+      "latestVersion": "17.14.45",
+      "versions": 99,
+      "packageName": "Visual Studio Community 2022",
+      "publisher": "Microsoft Corporation",
+      "license": "Proprietary",
+      "shortDescription": "Everything you need to build modern apps - free for you, built for impact.",
+      "packageUrl": "https://visualstudio.microsoft.com/",
+      "agreements": false,
+      "installerTypes": [
+        "exe"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "download.visualstudio.microsoft.com"
+      ],
+      "installers": 1,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Microsoft.VisualStudio.Community",
+      "found": true,
+      "canonicalId": "Microsoft.VisualStudio.Community",
+      "caseDiffers": false,
+      "path": "manifests/m/Microsoft/VisualStudio/Community",
+      "latestVersion": "18.12.1",
+      "versions": 49,
+      "packageName": "Visual Studio Community 2026",
+      "publisher": "Microsoft Corporation",
+      "license": "Proprietary",
+      "shortDescription": "Everything you need to build modern apps - free for you, built for impact.",
+      "packageUrl": "https://visualstudio.microsoft.com/",
+      "agreements": false,
+      "installerTypes": [
+        "exe"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "download.visualstudio.microsoft.com"
+      ],
+      "installers": 1,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "GoLang.Go",
+      "found": true,
+      "canonicalId": "GoLang.Go",
+      "caseDiffers": false,
+      "path": "manifests/g/GoLang/Go",
+      "latestVersion": "1.27.4",
+      "versions": 115,
+      "packageName": "Go Programming Language",
+      "publisher": "https://go.dev",
+      "license": "BSD-3-Clause",
+      "shortDescription": "An open source programming language that makes it simple to build secure, scalable systems.",
+      "packageUrl": "https://go.dev/dl/",
+      "agreements": false,
+      "installerTypes": [
+        "wix"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "arm64",
+        "x64",
+        "x86"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "go.dev"
+      ],
+      "installers": 3,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [
+        "Go Programming Language 386 go1.27.4",
+        "Go Programming Language amd64 go1.27.4",
+        "Go Programming Language arm64 go1.27.4"
+      ],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Rustlang.Rustup",
+      "found": true,
+      "canonicalId": "Rustlang.Rustup",
+      "caseDiffers": false,
+      "path": "manifests/r/Rustlang/Rustup",
+      "latestVersion": "1.29.3",
+      "versions": 12,
+      "packageName": "Rustup: the Rust toolchain installer",
+      "publisher": "The Rust Programming Language",
+      "license": "Apache-2.0 or MIT",
+      "shortDescription": "The Rust toolchain installer",
+      "packageUrl": "https://rust-lang.github.io/rustup/",
+      "agreements": false,
+      "installerTypes": [
+        "exe"
+      ],
+      "scopes": [],
+      "architectures": [
+        "arm64",
+        "x64",
+        "x86"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "static.rust-lang.org"
+      ],
+      "installers": 3,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "JetBrains.Toolbox",
+      "found": true,
+      "canonicalId": "JetBrains.Toolbox",
+      "caseDiffers": false,
+      "path": "manifests/j/JetBrains/Toolbox",
+      "latestVersion": "3.9.2.0",
+      "versions": 80,
+      "packageName": "JetBrains Toolbox",
+      "publisher": "JetBrains",
+      "license": "Freeware",
+      "shortDescription": "Manage your IDEs the easy way.",
+      "packageUrl": "https://www.jetbrains.com/toolbox-app/",
+      "agreements": false,
+      "installerTypes": [
+        "exe"
+      ],
+      "scopes": [
+        "user"
+      ],
+      "architectures": [
+        "arm64",
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "download.jetbrains.com"
+      ],
+      "installers": 2,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "dbeaver.dbeaver",
+      "found": false,
+      "canonicalId": "DBeaver.DBeaver",
+      "path": "manifests/d/DBeaver/DBeaver",
+      "reason": "no version folder with DBeaver.DBeaver.installer.yaml among 5 candidate(s)"
+    },
+    {
+      "id": "Codeium.Windsurf",
+      "found": true,
+      "canonicalId": "Codeium.Windsurf",
+      "caseDiffers": false,
+      "path": "manifests/c/Codeium/Windsurf",
+      "latestVersion": "2.3.15",
+      "versions": 80,
+      "packageName": "Windsurf",
+      "publisher": "Codeium",
+      "license": "Proprietary",
+      "shortDescription": "The most powerful AI IDE",
+      "packageUrl": "https://codeium.com/windsurf",
+      "agreements": false,
+      "installerTypes": [
+        "inno"
+      ],
+      "scopes": [
+        "machine",
+        "user"
+      ],
+      "architectures": [
+        "arm64",
+        "x64"
+      ],
+      "elevation": [
+        "elevatesSelf"
+      ],
+      "installerHosts": [
+        "windsurf-stable.codeiumdata.com"
+      ],
+      "installers": 4,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "ZedIndustries.Zed",
+      "found": true,
+      "canonicalId": "ZedIndustries.Zed",
+      "caseDiffers": false,
+      "path": "manifests/z/ZedIndustries/Zed",
+      "latestVersion": "1.30.2",
+      "versions": 6,
+      "packageName": "Zed",
+      "publisher": "Zed Industries",
+      "license": "GPL-3.0",
+      "shortDescription": "High-performance, multiplayer code editor from the creators of Atom and Tree-sitter.",
+      "packageUrl": "https://zed.dev/windows",
+      "agreements": false,
+      "installerTypes": [
+        "inno"
+      ],
+      "scopes": [
+        "user"
+      ],
+      "architectures": [
+        "arm64",
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "github.com"
+      ],
+      "installers": 2,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "RedHat.Podman-Desktop",
+      "found": true,
+      "canonicalId": "RedHat.Podman-Desktop",
+      "caseDiffers": false,
+      "path": "manifests/r/RedHat/Podman-Desktop",
+      "latestVersion": "1.31.0",
+      "versions": 64,
+      "packageName": "Podman Desktop",
+      "publisher": "RedHat",
+      "license": "Apache License 2.0",
+      "shortDescription": "Manage different container engines from a single UI and tray icon",
+      "packageUrl": "https://github.com/containers/podman-desktop",
+      "agreements": false,
+      "installerTypes": [
+        "nullsoft"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "arm64",
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "github.com"
+      ],
+      "installers": 2,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "CoreyButler.NVMforWindows",
+      "found": true,
+      "canonicalId": "CoreyButler.NVMforWindows",
+      "caseDiffers": false,
+      "path": "manifests/c/CoreyButler/NVMforWindows",
+      "latestVersion": "1.2.2",
+      "versions": 6,
+      "packageName": "NVM for Windows",
+      "publisher": "Ecor Ventures LLC",
+      "license": "MIT",
+      "shortDescription": "A node.js version management utility for Windows. Ironically written in Go.",
+      "packageUrl": "https://github.com/coreybutler/nvm-windows",
+      "agreements": false,
+      "installerTypes": [
+        "inno"
+      ],
+      "scopes": [
+        "user"
+      ],
+      "architectures": [
+        "x86"
+      ],
+      "elevation": [
+        "elevatesSelf"
+      ],
+      "installerHosts": [
+        "github.com"
+      ],
+      "installers": 1,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "astral-sh.uv",
+      "found": true,
+      "canonicalId": "astral-sh.uv",
+      "caseDiffers": false,
+      "path": "manifests/a/astral-sh/uv",
+      "latestVersion": "0.13.10",
+      "versions": 257,
+      "packageName": "uv",
+      "publisher": "Astral Software Inc.",
+      "license": "Apache-2.0 or MIT",
+      "shortDescription": "An extremely fast Python package and project manager, written in Rust.",
+      "packageUrl": "https://github.com/astral-sh/uv",
+      "agreements": false,
+      "installerTypes": [
+        "portable",
+        "zip"
+      ],
+      "scopes": [],
+      "architectures": [
+        "arm64",
+        "x64",
+        "x86"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "github.com"
+      ],
+      "installers": 3,
+      "allHashed": true,
+      "dependencies": [
+        "Microsoft.VCRedist.2015+.arm64",
+        "Microsoft.VCRedist.2015+.x64",
+        "Microsoft.VCRedist.2015+.x86"
+      ],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Neovim.Neovim",
+      "found": true,
+      "canonicalId": "Neovim.Neovim",
+      "caseDiffers": false,
+      "path": "manifests/n/Neovim/Neovim",
+      "latestVersion": "0.12.6",
+      "versions": 29,
+      "packageName": "Neovim",
+      "publisher": "neovim.io",
+      "license": "Apache-2.0 AND Vim",
+      "shortDescription": "Vim-fork focused on extensibility and usability",
+      "packageUrl": "https://neovim.io/",
+      "agreements": false,
+      "installerTypes": [
+        "wix"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "arm64",
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "github.com"
+      ],
+      "installers": 2,
+      "allHashed": true,
+      "dependencies": [
+        "Microsoft.VCRedist.2015+.arm64",
+        "Microsoft.VCRedist.2015+.x64"
+      ],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Nomic.GPT4All",
+      "found": true,
+      "canonicalId": "nomic.gpt4all",
+      "caseDiffers": true,
+      "path": "manifests/n/nomic/gpt4all",
+      "latestVersion": "3.10.0",
+      "versions": 10,
+      "packageName": "GPT4All",
+      "publisher": "Nomic",
+      "license": "MIT",
+      "shortDescription": "GPT4All is a GUI application for loading and interacting with Generative AI models",
+      "packageUrl": "https://github.com/nomic-ai/gpt4all",
+      "agreements": true,
+      "installerTypes": [
+        "exe"
+      ],
+      "scopes": [],
+      "architectures": [
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "github.com"
+      ],
+      "installers": 1,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "uninstallPrevious"
+      ],
+      "requireExplicitUpgrade": true,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Anaconda.Miniconda3",
+      "found": true,
+      "canonicalId": "Anaconda.Miniconda3",
+      "caseDiffers": false,
+      "path": "manifests/a/Anaconda/Miniconda3",
+      "latestVersion": "py314_26.9.4-1",
+      "versions": 28,
+      "packageName": "Miniconda3",
+      "publisher": "Anaconda, Inc.",
+      "license": "Proprietary",
+      "shortDescription": "The minimal way to bootstrap conda onto a system. Contains only conda and its dependencies.",
+      "packageUrl": "https://docs.anaconda.com/free/miniconda/",
+      "agreements": false,
+      "installerTypes": [
+        "nullsoft"
+      ],
+      "scopes": [
+        "machine",
+        "user"
+      ],
+      "architectures": [
+        "x64"
+      ],
+      "elevation": [
+        "elevationRequired"
+      ],
+      "installerHosts": [
+        "repo.anaconda.com"
+      ],
+      "installers": 2,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [
+        "Miniconda3 py314_26.9.4-1 (Python 3.14.10 64-bit)"
+      ],
+      "upgradeBehavior": [
+        "deny",
+        "uninstallPrevious"
+      ],
+      "requireExplicitUpgrade": true,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Microsoft.OpenJDK.21",
+      "found": true,
+      "canonicalId": "Microsoft.OpenJDK.21",
+      "caseDiffers": false,
+      "path": "manifests/m/Microsoft/OpenJDK/21",
+      "latestVersion": "21.0.13.102",
+      "versions": 16,
+      "packageName": "Microsoft Build of OpenJDK with Hotspot 21",
+      "publisher": "Microsoft",
+      "license": "GPL2 with Classpath Exception",
+      "shortDescription": "The Microsoft Build of OpenJDK is a new no-cost long-term supported distribution and Microsoft's new way to collaborate and contribute to the Java ecosystem.",
+      "packageUrl": "https://www.microsoft.com/openjdk",
+      "agreements": false,
+      "installerTypes": [
+        "wix"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "arm64",
+        "x64"
+      ],
+      "elevation": [
+        "elevatesSelf"
+      ],
+      "installerHosts": [
+        "aka.ms"
+      ],
+      "installers": 2,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [
+        "Microsoft Build of OpenJDK  21.0.13.1+2 (arm64)",
+        "Microsoft Build of OpenJDK  21.0.13.1+2 (x64)"
+      ],
+      "upgradeBehavior": [
+        "uninstallPrevious"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "OpenAI.Codex",
+      "found": true,
+      "canonicalId": "OpenAI.Codex",
+      "caseDiffers": false,
+      "path": "manifests/o/OpenAI/Codex",
+      "latestVersion": "0.172.0",
+      "versions": 153,
+      "packageName": "Codex CLI",
+      "publisher": "OpenAI, Inc.",
+      "license": "Apache-2.0",
+      "shortDescription": "Codex CLI is an open‑source local coding agent that runs in your terminal, letting you write, edit, and understand code without leaving the command line.",
+      "packageUrl": "https://github.com/openai/codex",
+      "agreements": false,
+      "installerTypes": [
+        "portable",
+        "zip"
+      ],
+      "scopes": [],
+      "architectures": [
+        "arm64",
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "github.com"
+      ],
+      "installers": 2,
+      "allHashed": true,
+      "dependencies": [
+        "BurntSushi.ripgrep.MSVC",
+        "Microsoft.VCRedist.2015+.arm64",
+        "Microsoft.VCRedist.2015+.x64"
+      ],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Google.PlatformTools",
+      "found": true,
+      "canonicalId": "Google.PlatformTools",
+      "caseDiffers": false,
+      "path": "manifests/g/Google/PlatformTools",
+      "latestVersion": "37.0.3",
+      "versions": 13,
+      "packageName": "Android SDK Platform-Tools",
+      "publisher": "Google LLC",
+      "license": "Apache-2.0",
+      "shortDescription": "Android SDK Platform-Tools includes tools that interface with the Android platform, primarily adb and fastboot.",
+      "packageUrl": "https://developer.android.com/tools/releases/platform-tools",
+      "agreements": false,
+      "installerTypes": [
+        "portable",
+        "zip"
+      ],
+      "scopes": [],
+      "architectures": [
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "dl.google.com"
+      ],
+      "installers": 1,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Google.AndroidStudio",
+      "found": true,
+      "canonicalId": "Google.AndroidStudio",
+      "caseDiffers": false,
+      "path": "manifests/g/Google/AndroidStudio",
+      "latestVersion": "2026.2.2.10",
+      "versions": 45,
+      "packageName": "Android Studio",
+      "publisher": "Google LLC",
+      "license": "Android Software Development Kit License Agreement",
+      "shortDescription": "The official Integrated Development Environment (IDE) for Android app development.",
+      "packageUrl": "https://developer.android.com/studio",
+      "agreements": true,
+      "installerTypes": [
+        "nullsoft"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "x64"
+      ],
+      "elevation": [
+        "elevatesSelf"
+      ],
+      "installerHosts": [
+        "edgedl.me.gvt1.com"
+      ],
+      "installers": 1,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "deny"
+      ],
+      "requireExplicitUpgrade": true,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Proton.ProtonDrive",
+      "found": true,
+      "canonicalId": "Proton.ProtonDrive",
+      "caseDiffers": false,
+      "path": "manifests/p/Proton/ProtonDrive",
+      "latestVersion": "3.1.0",
+      "versions": 57,
+      "packageName": "Proton Drive",
+      "publisher": "Proton AG",
+      "license": "Proprietary",
+      "shortDescription": "Free secure cloud storage",
+      "packageUrl": "https://proton.me/drive",
+      "agreements": false,
+      "installerTypes": [
+        "burn"
+      ],
+      "scopes": [
+        "user"
+      ],
+      "architectures": [
+        "arm64",
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "proton.me"
+      ],
+      "installers": 2,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Mega.MEGASync",
+      "found": true,
+      "canonicalId": "Mega.MEGASync",
+      "caseDiffers": false,
+      "path": "manifests/m/Mega/MEGASync",
+      "latestVersion": "6.7.1.0",
+      "versions": 1,
+      "packageName": "MEGAsync",
+      "publisher": "Mega Limited",
+      "license": "Proprietary",
+      "shortDescription": "Easy automated synchronisation between your computer and your MEGA cloud.",
+      "packageUrl": "https://mega.nz/sync",
+      "agreements": false,
+      "installerTypes": [
+        "nullsoft"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "x64",
+        "x86"
+      ],
+      "elevation": [
+        "elevatesSelf"
+      ],
+      "installerHosts": [
+        "mega.nz"
+      ],
+      "installers": 2,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Nextcloud.NextcloudDesktop",
+      "found": true,
+      "canonicalId": "Nextcloud.NextcloudDesktop",
+      "caseDiffers": false,
+      "path": "manifests/n/Nextcloud/NextcloudDesktop",
+      "latestVersion": "35.0.3",
+      "versions": 90,
+      "packageName": "Nextcloud",
+      "publisher": "Nextcloud GmbH",
+      "license": "GPL-2.0",
+      "shortDescription": "The Nextcloud Desktop Client is a tool to synchronize files from Nextcloud Server with your computer.",
+      "packageUrl": "https://nextcloud.com/",
+      "agreements": false,
+      "installerTypes": [
+        "wix"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "github.com"
+      ],
+      "installers": 1,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "pCloudAG.pCloudDrive",
+      "found": true,
+      "canonicalId": "pCloudAG.pCloudDrive",
+      "caseDiffers": false,
+      "path": "manifests/p/pCloudAG/pCloudDrive",
+      "latestVersion": "5.2.4.0",
+      "versions": 1,
+      "packageName": "pCloud Drive",
+      "publisher": "pCloud AG",
+      "license": "Proprietary",
+      "shortDescription": "pCloud is a file hosting service (also called cloud storage, or online storage), founded in Switzerland in 2013",
+      "packageUrl": "https://www.pcloud.com/download-free-online-cloud-file-storage.html",
+      "agreements": false,
+      "installerTypes": [
+        "burn"
+      ],
+      "scopes": [],
+      "architectures": [
+        "x64",
+        "x86"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "partner.pcloud.com"
+      ],
+      "installers": 2,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Box.Drive",
+      "found": false,
+      "reason": "no package folder manifests/b/Box/Drive"
+    },
+    {
+      "id": "KDE.KDEConnect",
+      "found": true,
+      "canonicalId": "KDE.KDEConnect",
+      "caseDiffers": false,
+      "path": "manifests/k/KDE/KDEConnect",
+      "latestVersion": "26.08.1",
+      "versions": 10,
+      "packageName": "KDE Connect",
+      "publisher": "KDE e.V.",
+      "license": "GPL-2.0-or-later",
+      "shortDescription": "Connect various devices (Windows, Linux, Android, etc.) to transfer files, share clipboards, remote view and control, see notifications from other devices, etc.",
+      "packageUrl": "https://kdeconnect.kde.org/",
+      "agreements": false,
+      "installerTypes": [
+        "nullsoft"
+      ],
+      "scopes": [
+        "machine",
+        "user"
+      ],
+      "architectures": [
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "download.kde.org"
+      ],
+      "installers": 2,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "LocalSend.LocalSend",
+      "found": true,
+      "canonicalId": "LocalSend.LocalSend",
+      "caseDiffers": false,
+      "path": "manifests/l/LocalSend/LocalSend",
+      "latestVersion": "1.19.0",
+      "versions": 21,
+      "packageName": "LocalSend",
+      "publisher": "Tien Do Nam",
+      "license": "Apache-2.0",
+      "shortDescription": "",
+      "packageUrl": "https://localsend.org/",
+      "agreements": false,
+      "installerTypes": [
+        "inno"
+      ],
+      "scopes": [
+        "machine",
+        "user"
+      ],
+      "architectures": [
+        "x64"
+      ],
+      "elevation": [
+        "elevatesSelf"
+      ],
+      "installerHosts": [
+        "github.com"
+      ],
+      "installers": 2,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Genymobile.scrcpy",
+      "found": true,
+      "canonicalId": "Genymobile.scrcpy",
+      "caseDiffers": false,
+      "path": "manifests/g/Genymobile/scrcpy",
+      "latestVersion": "5.0.1",
+      "versions": 22,
+      "packageName": "scrcpy",
+      "publisher": "Genymobile",
+      "license": "Apache-2.0",
+      "shortDescription": "Display and control your Android device",
+      "packageUrl": "https://github.com/Genymobile/scrcpy",
+      "agreements": false,
+      "installerTypes": [
+        "portable",
+        "zip"
+      ],
+      "scopes": [],
+      "architectures": [
+        "arm64",
+        "x64",
+        "x86"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "github.com"
+      ],
+      "installers": 3,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Google.EarthPro",
+      "found": true,
+      "canonicalId": "Google.EarthPro",
+      "caseDiffers": false,
+      "path": "manifests/g/Google/EarthPro",
+      "latestVersion": "7.3.7.1327",
+      "versions": 9,
+      "packageName": "Google Earth Pro",
+      "publisher": "Google",
+      "license": "Freeware",
+      "shortDescription": "The world's most detailed globe",
+      "packageUrl": "https://www.google.com/earth/about/",
+      "agreements": false,
+      "installerTypes": [
+        "exe",
+        "wix"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "x64",
+        "x86"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "dl.google.com"
+      ],
+      "installers": 2,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Microsoft.EdgeWebView2Runtime",
+      "found": true,
+      "canonicalId": "Microsoft.EdgeWebView2Runtime",
+      "caseDiffers": false,
+      "path": "manifests/m/Microsoft/EdgeWebView2Runtime",
+      "latestVersion": "158.0.4370.33",
+      "versions": 159,
+      "packageName": "Microsoft Edge WebView2 Runtime",
+      "publisher": "Microsoft Corporation",
+      "license": "Proprietary",
+      "shortDescription": "Embed web content (HTML, CSS, and JavaScript) in your native applications with Microsoft Edge WebView2.",
+      "packageUrl": "https://developer.microsoft.com/microsoft-edge/webview2/",
+      "agreements": false,
+      "installerTypes": [
+        "exe"
+      ],
+      "scopes": [
+        "machine",
+        "user"
+      ],
+      "architectures": [
+        "arm64",
+        "x64",
+        "x86"
+      ],
+      "elevation": [
+        "elevationRequired"
+      ],
+      "installerHosts": [
+        "msedge.sf.dl.delivery.mp.microsoft.com"
+      ],
+      "installers": 6,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "AnyDesk.AnyDesk",
+      "found": true,
+      "canonicalId": "AnyDesk.AnyDesk",
+      "caseDiffers": false,
+      "path": "manifests/a/AnyDesk/AnyDesk",
+      "latestVersion": "9.8.4",
+      "versions": 1,
+      "packageName": "AnyDesk",
+      "publisher": "AnyDesk Software GmbH",
+      "license": "Proprietary",
+      "shortDescription": "AnyDesk is a German proprietary remote desktop tool distributed by AnyDesk Software GmbH.",
+      "packageUrl": "",
+      "agreements": false,
+      "installerTypes": [
+        "exe"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "x86"
+      ],
+      "elevation": [
+        "elevationRequired"
+      ],
+      "installerHosts": [
+        "download.anydesk.com"
+      ],
+      "installers": 1,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "DBeaver.DBeaver.Community",
+      "found": true,
+      "canonicalId": "DBeaver.DBeaver.Community",
+      "caseDiffers": false,
+      "path": "manifests/d/DBeaver/DBeaver/Community",
+      "latestVersion": "26.2.5",
+      "versions": 197,
+      "packageName": "DBeaver",
+      "publisher": "DBeaver Corp",
+      "license": "Apache-2.0",
+      "shortDescription": "Free Universal Database Tool",
+      "packageUrl": "https://dbeaver.io/download/",
+      "agreements": false,
+      "installerTypes": [
+        "nullsoft"
+      ],
+      "scopes": [
+        "machine",
+        "user"
+      ],
+      "architectures": [
+        "arm64",
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "github.com"
+      ],
+      "installers": 4,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    },
+    {
+      "id": "Box.Box",
+      "found": true,
+      "canonicalId": "Box.Box",
+      "caseDiffers": false,
+      "path": "manifests/b/Box/Box",
+      "latestVersion": "2.55.145",
+      "versions": 20,
+      "packageName": "Box",
+      "publisher": "Box, Inc.",
+      "license": "Proprietary",
+      "shortDescription": "Apps for secure file sharing and collaboration from anywhere",
+      "packageUrl": "https://www.box.com/",
+      "agreements": false,
+      "installerTypes": [
+        "msi"
+      ],
+      "scopes": [
+        "machine"
+      ],
+      "architectures": [
+        "x64"
+      ],
+      "elevation": [],
+      "installerHosts": [
+        "e3.boxcdn.net"
+      ],
+      "installers": 1,
+      "allHashed": true,
+      "dependencies": [],
+      "appsAndFeaturesNames": [],
+      "upgradeBehavior": [
+        "install"
+      ],
+      "requireExplicitUpgrade": false,
+      "msstoreProductId": false
+    }
+  ]
+}

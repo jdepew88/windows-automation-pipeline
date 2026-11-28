@@ -20,6 +20,7 @@ const VSCODE = 'winget:microsoft.visualstudiocode';
 const DOCKER = 'winget:docker.dockerdesktop';
 const WSL = 'winget:microsoft.wsl';
 const MUSICBEE = 'msstore:9p4clt2rj1rs';
+const AUDACITY = 'winget:audacity.audacity';
 
 async function toType(page: Page) {
   await page.goto('/');
@@ -72,7 +73,7 @@ test.describe('Quick Deployment step 2: live profile selection', () => {
     expect(await ticked(page)).toEqual(baseKeys);
   });
 
-  test('Core + Developer, untick Developer: exactly its unique apps leave; shared apps stay with Network Engineer', async ({ page }) => {
+  test('Core + Developer, untick Developer: exactly its unique apps leave; a shared app stays with the other profile', async ({ page }) => {
     await toType(page);
     const base = await ticked(page);
     await typeBox(page, 'developer').check();
@@ -83,13 +84,13 @@ test.describe('Quick Deployment step 2: live profile selection', () => {
     await typeBox(page, 'developer').uncheck();
     await expect(count(page)).toHaveAttribute('data-count', String(base.length));
     for (const k of unique) await expect(row(page, k)).toHaveCount(0);
-    // Shared: Network Engineer includes General Developer.
-    await typeBox(page, 'developer').check();
-    await typeBox(page, 'network-engineer').check();
-    await expect(list(page).locator(`li[data-key="${GIT}"]`)).toHaveCount(1);
-    await typeBox(page, 'developer').uncheck();
-    await expect(row(page, GIT)).toHaveAttribute('data-selected', 'true');
-    await expect(row(page, GIT).locator('label')).toHaveAttribute('title', /Network Engineer/);
+    // Shared: Audacity is a default of Music Lover and of Content Creator.
+    await typeBox(page, 'music').check();
+    await typeBox(page, 'creator').check();
+    await expect(list(page).locator(`li[data-key="${AUDACITY}"]`)).toHaveCount(1);
+    await typeBox(page, 'music').uncheck();
+    await expect(row(page, AUDACITY)).toHaveAttribute('data-selected', 'true');
+    await expect(row(page, AUDACITY).locator('label')).toHaveAttribute('title', /Content Creator/);
   });
 
   test('a single app can be unticked without unticking its profile, and ticked again', async ({ page }) => {
@@ -125,7 +126,7 @@ test.describe('Quick Deployment step 2: live profile selection', () => {
     await expect(appsPanel(page).locator('[data-app="gimp"] input')).toBeChecked();
     await goStep(page, 'type');
     await expect(row(page, DOCKER)).toHaveAttribute('data-selected', 'true');
-    await expect(row(page, DOCKER).locator('label')).toHaveAttribute('title', /Recommended by General Developer, ticked by you/);
+    await expect(row(page, DOCKER).locator('label')).toHaveAttribute('title', /Recommended by Developer, ticked by you/);
     await expect(row(page, WSL).locator('label')).toHaveAttribute('title', /Required by Docker Desktop/);
     await typeBox(page, 'developer').uncheck();
     for (const k of [DOCKER, WSL, GIT, VSCODE]) await expect(row(page, k)).toHaveCount(0);

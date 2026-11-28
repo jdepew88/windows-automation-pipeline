@@ -274,20 +274,21 @@ const appBox = (page: Page, id: string) => page.locator(`[data-app="${id}"] inpu
 const showAll = (page: Page) => page.getByTestId('app-filter').locator('[data-filter="all"]').click();
 const planIds = async (page: Page) => page.getByTestId('app-order').locator('li[data-package]').evaluateAll((els) => els.map((e) => e.getAttribute('data-package')));
 
-test('application provisioning: Core Essentials by default; RustDesk is recommended and, when ticked, an honest manual follow-up', async ({ page }) => {
+test('application provisioning: Core Essentials by default; RustDesk, found in the catalog and ticked, is an honest manual follow-up', async ({ page }) => {
   await setName(page, 'Alex');
   await go(page, 'applications');
   await expect(checkbox(page, 'applications.enabled')).toBeChecked();
   await expect(checkbox(page, 'applications.profile.core')).toBeChecked();
-  for (const id of ['everyday', 'gaming', 'developer', 'network-engineer', 'music', 'laptop', 'touch']) await expect(checkbox(page, `applications.profile.${id}`)).not.toBeChecked();
-  await expect(page.getByTestId('app-count')).toHaveText('7 to install');
-  for (const id of ['chrome', 'vlc', '7zip', 'teracopy', 'bitwarden', 'vcredist-x64', 'vcredist-x86']) await expect(appBox(page, id)).toBeChecked();
+  for (const id of ['everyday', 'gaming', 'music', 'student-office', 'creator', 'developer', 'network-engineer', 'remote-support', 'laptop', 'touch']) await expect(checkbox(page, `applications.profile.${id}`)).not.toBeChecked();
+  await expect(page.getByTestId('app-count')).toHaveText('9 to install');
+  for (const id of ['chrome', '7zip', 'vlc', 'notepadpp', 'bitwarden', 'sumatrapdf', 'imageglass', 'vcredist-x64', 'vcredist-x86']) await expect(appBox(page, id)).toBeChecked();
+  await page.getByTestId('app-search').fill('rustdesk');
   await expect(appBox(page, 'rustdesk')).not.toBeChecked();
   await appBox(page, 'rustdesk').check();
-  await expect(page.getByTestId('app-count')).toHaveText('7 to install, 1 manual');
+  await expect(page.getByTestId('app-count')).toHaveText('9 to install, 1 manual');
   await expect(page.locator('[data-app="rustdesk"]')).toContainText('Manual follow-up');
   await expect(page.getByTestId('app-manual-list')).toContainText('RustDesk');
-  await expect(page.getByTestId('summary')).toContainText('7 package(s) via WinGet from Core Essentials, 1 manual follow-up');
+  await expect(page.getByTestId('summary')).toContainText('9 package(s) via WinGet from Core Essentials, 1 manual follow-up');
   await expect(preview(page)).toContainText('Applications\\Install-ApplicationEngine.ps1');
 });
 
@@ -297,9 +298,10 @@ test('quick start: Gaming, untick a launcher, add a PDF reader, download the USB
   await checkbox(page, 'applications.profile.gaming').check();
   await expect(appBox(page, 'steam')).toBeChecked();
   await expect(appBox(page, 'epic')).toBeChecked();
-  await expect(appBox(page, 'battlenet')).not.toBeChecked();
+  await expect(appBox(page, 'battlenet')).toBeChecked();
+  await expect(appBox(page, 'ea-app')).not.toBeChecked();
   await appBox(page, 'epic').uncheck();
-  await expect(page.locator('[data-app="epic"]')).toContainText('Unticked by you (default in Gaming)');
+  await expect(page.locator('[data-app="epic"]')).toContainText('Unticked by you (default in Gamer)');
   await page.getByTestId('app-search').fill('pdf');
   await appBox(page, 'acrobat-reader').check();
   await page.getByTestId('app-search').fill('');
@@ -372,19 +374,24 @@ test('antivirus conflicts imported from a profile file block generation with a c
   await expect(page.getByTestId('status')).not.toContainText('Ready');
 });
 
-test('Network Engineer profile: the full workstation, dependency added, portable tools shown as portable', async ({ page }) => {
+test('IT Technician / Network Engineer profile: diagnostics and network tools, dependency added, portable and Store tools shown as such', async ({ page }) => {
   await setName(page, 'Alex');
   await go(page, 'applications');
   await checkbox(page, 'applications.profile.network-engineer').check();
-  for (const id of ['git', 'vscode', 'python-314', 'nodejs-lts', 'claude-code', 'claude-desktop', 'chatgpt', 'docker-desktop', 'wireshark', 'tailscale', 'wireguard', 'wiztree', 'hwinfo', 'rufus', 'ventoy', 'qbittorrent', 'sabnzbd', 'syncthing']) {
+  for (const id of ['hwinfo', 'crystaldiskinfo', 'sysinternals', 'winscp', 'putty', 'wireshark', 'rufus', 'revo-uninstaller']) {
     await expect(appBox(page, id), id).toBeChecked();
   }
-  await expect(page.locator('[data-app="wsl"]')).toContainText('Required by Docker Desktop');
   await expect(page.locator('[data-app="rufus"]')).toContainText('Portable');
-  await expect(page.locator('[data-app="chatgpt"]')).toContainText('Microsoft Store');
   await expect(page.locator('[data-app="filezilla"]')).toContainText('Manual follow-up');
+  await expect(appBox(page, 'nmap')).not.toBeChecked();
   await expect(appBox(page, 'quicklook')).not.toBeChecked();
-  await expect(appBox(page, 'freefilesync')).not.toBeChecked();
+  await page.getByTestId('app-search').fill('docker');
+  await appBox(page, 'docker-desktop').check();
+  await page.getByTestId('app-search').fill('');
+  await expect(page.locator('[data-app="wsl"]')).toContainText('Required by Docker Desktop');
+  await page.getByTestId('app-search').fill('chatgpt');
+  await expect(page.locator('[data-app="chatgpt"]')).toContainText('Microsoft Store');
+  await page.getByTestId('app-search').fill('');
   await page.getByTestId('app-filter').locator('[data-filter="excluded"]').click();
   await expect(page.getByTestId('app-catalog')).toContainText('WinDirStat');
 });
@@ -426,7 +433,7 @@ test('Save as new profile: survives a page reload, re-applies exactly, can be re
   await go(page, 'applications');
   await expect(page.getByTestId('app-custom-profiles').locator('[data-profile]')).toHaveCount(0);
   // Built-in templates are untouched.
-  await expect(page.locator('[data-profile="gaming"]')).toContainText('2 apps');
+  await expect(page.locator('[data-profile="gaming"]')).toContainText('7 apps');
 });
 
 test('application provisioning: WinGet import adds a profile without overwriting, export is valid WinGet JSON', async ({ page }) => {
@@ -437,8 +444,8 @@ test('application provisioning: WinGet import adds a profile without overwriting
   await expect(page.getByTestId('app-import-status')).toContainText('Not A Valid Id');
   await expect(checkbox(page, 'applications.profile.imported-office')).toBeChecked();
   await expect(checkbox(page, 'applications.profile.core')).toBeChecked();
-  // Git is new; VLC was already in Core Essentials and is installed once.
-  await expect(page.getByTestId('app-count')).toHaveText('8 to install');
+  // Git is new; VLC was already in Core Essentials (9 apps) and is installed once.
+  await expect(page.getByTestId('app-count')).toHaveText('10 to install');
 
   const [dl] = await Promise.all([page.waitForEvent('download'), page.locator('[data-action="app-export-winget"]').click()]);
   expect(dl.suggestedFilename()).toBe('winget-packages.json');
@@ -451,7 +458,7 @@ test('application provisioning: WinGet import adds a profile without overwriting
 
   await page.getByTestId('app-import-input').setInputFiles({ name: 'evil.json', mimeType: 'application/json', buffer: Buffer.from('{"Sources":[{"SourceDetails":{"Name":"winget"},"Packages":[]}]}') });
   await expect(page.getByTestId('app-import-status')).toContainText('Could not import evil.json');
-  await expect(page.getByTestId('app-count')).toHaveText('8 to install');
+  await expect(page.getByTestId('app-count')).toHaveText('10 to install');
 });
 
 test('application provisioning (Advanced): package IDs, install order with dependencies, custom IDs, policies and validation', async ({ page }) => {
@@ -717,7 +724,7 @@ test('Phase 5: Reliability & recovery settings have safe defaults and shape the 
   expect(files.has(tool)).toBe(true);
   expect(files.get('autounattend.xml')).toContain('C:\\Windows\\Setup\\Scripts\\Deployment\\scripts\\recovery\\DeploymentRecovery.ps1');
   let cfg = JSON.parse(files.get('WindowsDeployment/scripts/applications/applications-config.json')!);
-  expect(cfg).toMatchObject({ engineVersion: '1.5.0', maxAttemptsPerPackage: 3, retry: { automatic: true, continueAfterFailure: true, baseDelaySeconds: 60, maxDelaySeconds: 900 } });
+  expect(cfg).toMatchObject({ engineVersion: '1.6.0', maxAttemptsPerPackage: 3, retry: { automatic: true, continueAfterFailure: true, baseDelaySeconds: 60, maxDelaySeconds: 900 } });
   let manifest = JSON.parse(files.get('WindowsDeployment/deployment-manifest.json')!);
   expect(manifest.recovery).toMatchObject({ tool: 'scripts/recovery/DeploymentRecovery.ps1', automaticRetry: true, maxAttemptsPerPackage: 3 });
   expect(files.get('WindowsDeployment/README.txt')).toContain('Manual recovery');

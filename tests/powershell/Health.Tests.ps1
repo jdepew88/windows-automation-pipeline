@@ -81,6 +81,25 @@ function Invoke-VerifyWith {
     (Invoke-WdhVerify $script:Manifest $script:Paths $cfg 'Technician' -ScanUpdates:$ScanUpdates).Report
 }
 
+<#
+    A selected application with a verify block in the plan, and (unless -NoRecord) the engine's
+    record of it in Applications\result.json; engine 1.6.0 fields only when given (-Outcome, -Extra).
+#>
+function Add-VerifyApp {
+    param($Cfg, [string] $Key, [string] $Name, [string] $Id, [hashtable] $Verify = @{}, [string] $Source = 'winget', [string] $Status = 'Succeeded', [string] $Outcome = '',
+          [string] $Scope = 'unknown', [hashtable] $Extra = @{}, [switch] $NoRecord, [bool] $Required = $true)
+    $Cfg.applications.items = @(@($Cfg.applications.items) + @(@{ key = $Key; operationId = "app:$Key"; name = $Name; names = @($Name); source = $Source; packageIdentifier = $Id; method = $Source; kind = 'automatic'; required = $Required; scope = $Scope; version = ''; shortcut = ''; signIn = $false; instructions = ''; url = ''; verify = $Verify }))
+    if ($NoRecord) { return }
+    $app = Join-Path $script:Paths.Root 'Applications\result.json'
+    $res = Read-WddJson $app
+    $rec = @{ key = $Key; packageIdentifier = $Id; source = $Source; name = $Name; status = $Status; detection = $(if ($Status -in 'Succeeded', 'AlreadyInstalled') { 'Installed' } else { '' }); attempts = 1; totalAttempts = 1; message = "sim $Status"; retryable = $false }
+    if ($Outcome) { $rec.outcome = $Outcome }
+    foreach ($k in $Extra.Keys) { $rec[$k] = $Extra[$k] }
+    $res.packages = @(@($res.packages | Where-Object { $_.key -ne $Key }) + @($rec))
+    Write-WddJson $app $res
+}
+function Get-AppRow { param($Report, [string] $Key) @($Report.applications | Where-Object { $_.key -eq $Key }) | Select-Object -First 1 }
+
 # ------------------------------------------------------------------------------------------------
 # The Phase 9 package and its driver stage (simulated output; the real driver engine has its own suite)
 # ------------------------------------------------------------------------------------------------
@@ -231,7 +250,8 @@ Test-HealthScenario 'package: health engine, plan and template embedded and stag
     Assert-Equal $script:Manifest.paths.healthTool 'C:\ProgramData\WindowsDeploymentBuilder\Package\scripts\health\DeploymentHealth.ps1' 'manifest: tool path'
     $cfg = Get-HealthConfig
     $keys = @($cfg.applications.items | ForEach-Object { $_.key })
-    Assert-Equal $keys.Count 10 'ten selected applications, not the catalog'
+    # Core Essentials (nine apps since the 2026-11-26 profile rebuild) + Git, Apple Devices and Rufus.
+    Assert-Equal $keys.Count 12 'twelve selected applications, not the catalog'
     Assert-True ($keys -notcontains 'catalog:rustdesk') 'the removed RustDesk is not expected'
     Assert-Equal (@($cfg.applications.items | Where-Object { -not $_.required }) | ForEach-Object { $_.key }) 'winget:videolan.vlc' 'VLC is optional'
     Assert-Equal "$($cfg.account.username) $($cfg.identity.computerName) $($cfg.windows.expectedEditionIds -join ',')" 'owner owner-Computer Professional' 'account, name, edition'
@@ -255,7 +275,7 @@ Test-HealthScenario 'A. perfect deployment: every objective verified against Win
     Assert-Equal $r.trigger 'DeploymentComplete' 'run by the deployment'
     foreach ($c in @($r.categories)) { Assert-True ($c.status -in 'Verified', 'NotApplicable') "$($c.id) is $($c.status): $($c.summary)" }
     Assert-Equal (Get-Category $r 'restoration').status 'NotApplicable' 'no restoration: not shown as verified'
-    Assert-Equal @($r.applications).Count 10 'only the ten selected applications'
+    Assert-Equal @($r.applications).Count 12 'only the twelve selected applications'
     foreach ($a in @($r.applications)) { Assert-True ($a.independent -eq 'Found' -and $a.result -in 'InstalledVerified', 'AlreadyInstalledVerified') "$($a.name): $($a.result) ($($a.independent))" }
     Assert-Equal (@($r.applications) | Where-Object { $_.key -eq 'winget:rufus.rufus' }).foundIn 'machine' 'portable Rufus found by its WinGet record'
     Assert-Equal (@($r.applications) | Where-Object { $_.key -eq 'msstore:9np83lwlpz9k' }).independent 'Found' 'Store app found as a Store package'
@@ -276,7 +296,7 @@ Test-HealthScenario 'A. perfect deployment: every objective verified against Win
     $h = Read-WddJson (Join-Path $script:Paths.Root 'reports\health\customer-handoff.json')
     Assert-Equal $h.headline 'Your computer is set up and ready to use.' 'customer headline'
     Assert-Equal "$($h.computerName) $($h.windows) $($h.account)" 'owner-Computer Windows 11 Pro owner' 'customer basics'
-    Assert-Equal @($h.applications.installed).Count 10 'installed applications listed for the customer'
+    Assert-Equal @($h.applications.installed).Count 12 'installed applications listed for the customer'
     Assert-True (@($h.actions | Where-Object { $_ -match 'Bitwarden' }).Count -eq 1) 'sign-in task for Bitwarden'
     Assert-Equal $h.notes 'Your files from the old computer are in Documents. Call us with any question.' 'technician notes'
     $html = [IO.File]::ReadAllText((Join-Path $script:Paths.Root 'reports\health\customer-handoff.html'))
@@ -314,7 +334,7 @@ Test-HealthScenario 'C. required application missing -> NeedsAttention; never "R
     Assert-Status $r 'NeedsAttention' 'overall'
     $f = Get-Finding $r 'app.winget:git.git'
     Assert-Equal "$($f.status) $($f.severity)" 'Fail Error' 'required failure'
-    Assert-True ($f.observed -match 'Integrity') "failure class reported: $($f.observed)"
+    Assert-True ($f.observed -match 'Integrity|HashMismatch') "failure class reported: $($f.observed)"
     Assert-True (-not $r.overall.readyForDelivery) 'not deliverable'
     Assert-Equal (@($r.checklist | Where-Object { $_.id -eq 'apps' })).state 'notDone' 'checklist'
     Assert-True ($script:Events -contains 5002) 'event 5002'
@@ -531,26 +551,32 @@ Test-HealthScenario 'K. technician recovery: a failed application is retried thr
 }
 
 Test-HealthScenario 'L. another administrator runs the check: per-user items are read from the deployment user''s profile, or deferred; never a false pass; recovery refuses to retarget per-user installations' {
-    $script:M.userScoped = @('Bitwarden.Bitwarden')
+    $script:M.userScoped = @('Notepad++.Notepad++')
     $script:AppSim.Behaviour['Git.Git'] = 'fail'
     Invoke-SimDeployment | Out-Null
     $r = Get-HealthReport
-    Assert-Equal (Get-Finding $r 'app.winget:bitwarden.bitwarden').status 'Pass' 'per-user application found in owner''s profile'
+    Assert-Equal (Get-Finding $r 'app.winget:notepad++.notepad++').status 'Pass' 'per-user application found in owner''s profile'
     Assert-Status $r 'NeedsAttention' 'Git failed'
     $script:SimIdentity = @{ Name = 'PC\technician'; IsSystem = $false; IsAdmin = $true }
     $script:M.hives = @('S-1-5-21-1000-2000-3000-1002')
     $r = (Invoke-Verify).Report
     Assert-Equal "$($r.context.runAs) $($r.context.deploymentUser) $($r.context.sameUser) $($r.context.userContext)" 'PC\technician PC\owner False Deferred' 'context'
-    $b = Get-Finding $r 'app.winget:bitwarden.bitwarden'
+    $b = Get-Finding $r 'app.winget:notepad++.notepad++'
     Assert-Equal $b.status 'Deferred' 'per-user application deferred, not passed (and never looked up in the technician''s profile)'
     Assert-True ($b.nextAction -match 'Sign in as PC\\owner') 'how to verify it'
+    $np = @($r.applications | Where-Object { $_.key -eq 'winget:notepad++.notepad++' })[0]
+    Assert-Equal "$($np.verification) $($np.independent)" 'InstallerSucceededVerificationPending Deferred' 'the installer succeeded; its per-user evidence is pending, never missing'
+    # A Store (MSIX) package registered for the owner is readable by its SID without loading the owner's registry.
+    $script:M.extraAppx = @(@{ name = 'OpenAI.ChatGPT-Desktop'; family = 'OpenAI.ChatGPT-Desktop_2p2nqsd0c76g0'; version = '1.2025.258.0' })
+    $cg = Get-AppRow (Invoke-VerifyWith { param($c) Add-VerifyApp $c 'msstore:9plm9xgg6vks' 'ChatGPT' '9PLM9XGG6VKS' @{ appx = @('OpenAI.ChatGPT-Desktop'); perUser = $true } -Source 'msstore' }) 'msstore:9plm9xgg6vks'
+    Assert-Equal "$($cg.verification) $(@($cg.evidence)[0].where)" 'InstalledAndVerified user:PC\owner' 'AppX evidence of the deployment user, read by SID without the owner''s hive'
     Assert-Status $r 'Unverifiable' 'an explicit inability to verify'
     Assert-Equal (Get-Finding $r 'custom.taskbar.leftAlign').status 'Deferred' 'per-user settings deferred'
     Assert-True (@($r.limitations | Where-Object { $_ -match 'never from PC\\technician' }).Count -eq 1) 'limitation stated'
     # The deployment user signs in while the technician checks again: the owner's hive is read.
     $script:M.hives = @('S-1-5-21-1000-2000-3000-1002', $script:SimUserSid)
     $r = (Invoke-Verify).Report
-    Assert-Equal (Get-Finding $r 'app.winget:bitwarden.bitwarden').status 'Pass' 'read from the owner''s own profile'
+    Assert-Equal (Get-Finding $r 'app.winget:notepad++.notepad++').status 'Pass' 'read from the owner''s own profile'
     # Recovery from the technician's account never silently moves per-user installations.
     $rec = Invoke-WdrRecovery $script:Manifest $script:Paths 'RetryFailed'
     Assert-True (@($rec.Refused | Where-Object { $_.operationId -eq 'stage:applications' -and $_.reason -match 'belongs to PC\\owner' -and $_.reason -match '-RetargetUser' }).Count -eq 1) "refused: $($rec.Message)"
@@ -722,15 +748,18 @@ Test-HealthScenario 'compatibility: Phase 5 result without lifecycle fields, an 
     Invoke-SimDeployment | Out-Null
     $app = Join-Path $script:Paths.Root 'Applications\result.json'
     $res = Read-WddJson $app
-    foreach ($p in @($res.packages)) { foreach ($k in 'lifecycle', 'operationId', 'failureClass', 'retryable', 'detection', 'totalAttempts', 'manualRetries', 'history', 'nextAttemptUtc', 'waitingFor') { [void] $p.Remove($k) } }
+    # Also without the application engine 1.6.0 fields (outcome, verification, evidence, note) and a plan without verify blocks (health engine 1.1.0).
+    foreach ($p in @($res.packages)) { foreach ($k in 'lifecycle', 'operationId', 'failureClass', 'retryable', 'detection', 'totalAttempts', 'manualRetries', 'history', 'nextAttemptUtc', 'waitingFor', 'outcome', 'verification', 'verificationEvidence', 'verificationNote') { [void] $p.Remove($k) } }
     $res.schemaVersion = 1
     Write-WddJson $app $res
     $cfg = Get-HealthConfig
     foreach ($k in 'customizations', 'customerNotes') { [void] $cfg.Remove($k) }
+    foreach ($it in @($cfg.applications.items)) { [void] $it.Remove('verify') }
     $cfg.options.Remove('storageObservations') | Out-Null
     Set-StrictMode -Version 2.0
     $v = Invoke-WdhVerify $script:Manifest $script:Paths $cfg 'Technician'
     Assert-True ($v.Report.overall.status -in 'Ready', 'ReadyWithWarnings') "legacy evidence verified: $($v.Report.overall.status) $($v.Report.overall.summary)"
+    foreach ($a in @($v.Report.applications)) { Assert-True ($a.verification -eq 'InstalledAndVerified' -and $a.outcome -eq '') "$($a.name) verified without the newer fields: $($a.verification) $($a.verificationNote)" }
     Assert-Equal @($v.Report.findings | Where-Object { $_.id -like '*.checkError' }).Count 0 'no check stopped'
 }
 
@@ -784,7 +813,7 @@ Test-HealthScenario 'W1. clean current system: update engine 2.1.0 says UpToDate
     $h = Read-WddJson (Join-Path $script:Paths.Root 'reports\health\customer-handoff.json')
     Assert-Equal $h.updates 'Windows was updated during setup.' 'customer wording'
     $txt = [IO.File]::ReadAllText((Join-Path $script:Paths.Root 'reports\health\technician-report.txt'))
-    foreach ($w in 'Windows Update \(checked', 'state UpToDate', 'Final Settings refresh', 'NOT verified', 'Manufacturer software', 'Applications \(10\)') { Assert-True ($txt -match $w) "text report has $w" }
+    foreach ($w in 'Windows Update \(checked', 'state UpToDate', 'Final Settings refresh', 'NOT verified', 'Manufacturer software', 'Applications \(12\)', 'Visual C\+\+ runtimes', 'evidence: uninstall') { Assert-True ($txt -match $w) "text report has $w" }
     Assert-Equal $script:M.HistoryQueries 0 'no history query without an original failure'
 }
 
@@ -916,7 +945,7 @@ Test-HealthScenario 'W7. applications: installed and verified, installer succeed
     $script:M.missing = @('7zip.7zip')
     $r = Invoke-VerifyWith
     $v = @{}; foreach ($a in @($r.applications)) { $v[$a.key] = $a.verification }
-    Assert-Equal $v['winget:7zip.7zip'] 'InstallerSucceededUnverified' 'exit code 0 but not found'
+    Assert-Equal $v['winget:7zip.7zip'] 'InstallerSucceededVerificationFailed' 'exit code 0 but no evidence found'
     Assert-Equal (Get-Finding $r 'app.winget:7zip.7zip').status 'Warning' 'not a pass'
     Assert-Equal $v['winget:git.git'] 'Failed' 'failed'
     Assert-Equal $v['winget:google.chrome'] 'InstalledAndVerified' 'verified in Windows'
@@ -1040,9 +1069,15 @@ Test-HealthScenario 'W12. the full audit in one report (schema-validated by the 
     $cfg = Get-HealthConfig
     $cfg['office'] = @{ product = 'ltsc2024Standard'; displayName = 'Office LTSC Standard 2024'; productReleaseId = 'Standard2024Volume' }
     $cfg['activation'] = @{ windows = 'none'; office = 'none' }
-    $r = (Invoke-WdhVerify $script:Manifest $script:Paths $cfg 'Technician').Report
+    # Health engine 1.2.0 sections too: a file-verified application, the runtime inventory and the WinGet listing.
+    $script:M.files['C:\Program Files\nodejs\node.exe'] = '22.11.0'
+    Add-VerifyApp $cfg 'winget:openjs.nodejs.lts' 'Node.js LTS' 'OpenJS.NodeJS.LTS' @{ uninstall = @('Node.js'); files = @('%ProgramFiles%\nodejs\node.exe') } -Scope 'machine' -Outcome 'InstalledVerified' -Extra @{ verification = 'Verified'; verificationEvidence = @(@{ kind = 'file'; detail = '%ProgramFiles%\nodejs\node.exe'; where = 'machine' }) }
+    $row = '{0,-22}{1,-20}{2,-10}{3,-10}{4}'
+    $script:M.wingetUpgrade = @{ available = $true; exitCode = 0; text = (@(($row -f 'Name', 'Id', 'Version', 'Available', 'Source'), ('-' * 70), ($row -f 'Git', 'Git.Git', '2.50.0', '2.51.0', 'winget'), '1 upgrade available.') -join "`n") }
+    $r = (Invoke-WdhVerify $script:Manifest $script:Paths $cfg 'Technician' -CheckAppUpdates).Report
     Assert-Status $r 'Ready' 'overall'
     Assert-True (@($r.windowsUpdate.retries).Count -eq 1 -and @($r.deviceComparison).Count -eq 1 -and $r.office -and @($r.hardwareSoftware).Count -eq 2) 'every section present'
+    Assert-True ($r.runtimes -and @($r.runtimes.items).Count -eq 2 -and $r.appUpdates.status -eq 'ok' -and @((Get-AppRow $r 'winget:openjs.nodejs.lts').engineEvidence).Count -eq 1) 'engine 1.2.0 sections present'
     Assert-Equal (Get-Finding $r 'office.activation').status 'Info' 'no Office activation requested'
     Save-Out 'W'
 }
@@ -1051,6 +1086,202 @@ Test-HealthScenario 'W13. activation text in reports: product-key fragments, KMS
     $t = ConvertTo-WdhSafeText 'Activation failed: 0xC004F074 contacting kms01.corp.contoso.com:1688 (server=kms01) at 10.0.0.5; KMS host kms02.contoso.local; see OSPP.VBS and Activation.ps1, key ending 7H2XK (key ending ABCDE) VK7JG-NPHTM-C97JM-9MPGT-3V66T'
     foreach ($secret in 'kms01', 'kms02', 'contoso', '10.0.0.5', '7H2XK', 'ABCDE', 'VK7JG') { Assert-True (-not $t.Contains($secret)) "removed: $secret ($t)" }
     foreach ($kept in '0xC004F074', 'OSPP.VBS', 'Activation.ps1') { Assert-True $t.Contains($kept) "kept: $kept" }
+}
+
+# ------------------------------------------------------------------------------------------------
+# Health engine 1.2.0: package-aware application verification (the catalog's verify block, the same
+# evidence the application engine 1.6.0 checks), Visual C++ runtimes and the optional WinGet update
+# listing. Every probe is simulated (HealthSim.ps1); nothing here is installed or queried for real.
+# ------------------------------------------------------------------------------------------------
+
+
+Test-HealthScenario 'V1. Win32 uninstall evidence: machine-wide and 32-bit (WOW6432Node) records by display-name prefix (Adobe Acrobat Reader), version shown; the name alone would not have matched' {
+    Invoke-SimDeployment | Out-Null
+    $script:M.extraUninstall = @(
+        @{ scope = 'machine'; view = '64'; keyName = '{AC76BA86-1033-FF00-7760-BC15014EA700}'; displayName = 'Adobe Acrobat (64-bit)'; displayVersion = '25.001.20531'; publisher = 'Adobe' }
+        @{ scope = 'machine'; view = '32'; keyName = 'ContosoLegacy'; displayName = 'Contoso Legacy Tool 3.1'; displayVersion = '3.1.0'; publisher = 'Contoso' })
+    $r = Invoke-VerifyWith {
+        param($c)
+        Add-VerifyApp $c 'winget:adobe.acrobat.reader.64-bit' 'Adobe Acrobat Reader' 'Adobe.Acrobat.Reader.64-bit' @{ uninstall = @('Adobe Acrobat') } -Outcome 'InstalledVerified'
+        Add-VerifyApp $c 'winget:contoso.legacytool' 'Legacy Tool' 'Contoso.LegacyTool' @{ uninstall = @('Contoso Legacy') }
+    }
+    $a = Get-AppRow $r 'winget:adobe.acrobat.reader.64-bit'
+    Assert-Equal "$($a.verification) $($a.independent) $($a.foundIn) $($a.version)" 'InstalledAndVerified Found machine 25.001.20531' 'Adobe found by its prefix'
+    Assert-Equal "$(@($a.evidence)[0].kind) $(@($a.evidence)[0].where)" 'uninstall machine' 'evidence kind and where'
+    Assert-Equal $a.outcome 'InstalledVerified' 'engine outcome shown as history'
+    Assert-Equal (Get-Finding $r 'app.winget:adobe.acrobat.reader.64-bit').status 'Pass' 'Pass with evidence'
+    $w = Get-AppRow $r 'winget:contoso.legacytool'
+    Assert-True ($w.verification -eq 'InstalledAndVerified' -and @($w.evidence)[0].detail -match '\(32-bit\)') "WOW6432Node record: $(@($w.evidence)[0].detail)"
+    Assert-True ((Get-Finding $r 'app.winget:contoso.legacytool').evidence -match 'found now: uninstall') 'the finding names the evidence'
+    Assert-Status $r 'Ready' 'overall'
+}
+
+Test-HealthScenario 'V2. Store/MSIX: ChatGPT registered for the deployment user (no uninstall record needed); a package provisioned only (registered at sign-in); absent -> InstallerSucceededVerificationFailed' {
+    Invoke-SimDeployment | Out-Null
+    $script:M.extraAppx = @(@{ name = 'OpenAI.ChatGPT-Desktop'; family = 'OpenAI.ChatGPT-Desktop_2p2nqsd0c76g0'; version = '1.2025.258.0' })
+    $script:M.provisioned = @(@{ name = 'Contoso.Notes'; version = '2.0.0.0'; packageName = 'Contoso.Notes_2.0.0.0_x64__abc' })
+    $add = {
+        param($c, [bool] $Record = $true)
+        Add-VerifyApp $c 'msstore:9plm9xgg6vks' 'ChatGPT' '9PLM9XGG6VKS' @{ appx = @('OpenAI.ChatGPT-Desktop'); perUser = $true } -Source 'msstore' -NoRecord:(-not $Record)
+        Add-VerifyApp $c 'msstore:9nblggh0note' 'Contoso Notes' '9NBLGGH0NOTE' @{ appx = @('Contoso.Notes') } -Source 'msstore' -NoRecord:(-not $Record)
+    }
+    $r = Invoke-VerifyWith { param($c) & $add $c $true }
+    $g = Get-AppRow $r 'msstore:9plm9xgg6vks'
+    Assert-Equal "$($g.verification) $(@($g.evidence)[0].kind) $(@($g.evidence)[0].where) $($g.version)" 'InstalledAndVerified appx user:PC\owner 1.2025.258.0' 'ChatGPT registered for the owner'
+    $n = Get-AppRow $r 'msstore:9nblggh0note'
+    Assert-Equal "$($n.verification) $(@($n.evidence)[0].where) $($n.foundIn)" 'InstalledAndVerified provisioned provisioned' 'provisioned-only package'
+    Assert-True (@($n.evidence)[0].detail -match 'provisioned for every user') 'provisioned evidence explained'
+    # The owner is signed in and readable: no evidence at all is a failed verification, never "missing".
+    $script:M.extraAppx = @()
+    $r = Invoke-VerifyWith { param($c) & $add $c $false }
+    $g = Get-AppRow $r 'msstore:9plm9xgg6vks'
+    Assert-Equal "$($g.verification) $($g.independent)" 'InstallerSucceededVerificationFailed NotFound' 'checked and absent'
+    Assert-Equal (Get-Finding $r 'app.msstore:9plm9xgg6vks').status 'Warning' 'a warning, not a pass'
+}
+
+Test-HealthScenario 'V3. per-user (Claude Desktop): file in the owner''s profile verified even while signed out; no profile yet -> pending (Deferred), never missing; profile readable but empty -> verification failed' {
+    Invoke-SimDeployment | Out-Null
+    $exe = 'C:\Users\owner\AppData\Local\AnthropicClaude\claude.exe'
+    $script:M.files[$exe] = '0.14.10.0'
+    $add = { param($c, [bool] $Record) Add-VerifyApp $c 'winget:anthropic.claude' 'Claude' 'Anthropic.Claude' @{ appx = @('Claude'); files = @('%LocalAppData%\AnthropicClaude\claude.exe'); perUser = $true } -Scope 'user' -NoRecord:(-not $Record) }
+    $r = Invoke-VerifyWith { param($c) & $add $c $true }
+    $a = Get-AppRow $r 'winget:anthropic.claude'
+    $fe = @($a.evidence | Where-Object { $_.kind -eq 'file' })[0]
+    Assert-Equal "$($a.verification) $($fe.where) $($fe.version) $($fe.detail)" 'InstalledAndVerified user:PC\owner 0.14.10.0 %LocalAppData%\AnthropicClaude\claude.exe' 'file below the owner''s profile (never SYSTEM''s)'
+    # The owner signs out: the profile folder is still readable, the registry hive is not.
+    $script:M.hives = @()
+    $a = Get-AppRow (Invoke-VerifyWith { param($c) & $add $c $false }) 'winget:anthropic.claude'
+    Assert-Equal $a.verification 'InstalledAndVerified' 'file evidence does not need the hive'
+    # No profile yet and the hive not loaded: the evidence cannot exist yet -> pending, never missing.
+    $script:M.files.Clear(); $script:M.profilePaths.Clear()
+    $r = Invoke-VerifyWith { param($c) & $add $c $false }
+    $a = Get-AppRow $r 'winget:anthropic.claude'
+    $f = Get-Finding $r 'app.winget:anthropic.claude'
+    Assert-Equal "$($a.verification) $($a.independent) $($f.status)" 'InstallerSucceededVerificationPending Deferred Deferred' 'pending'
+    Assert-True ($f.observed -match 'no user profile yet' -and $f.observed -match 'not signed in') "why: $($f.observed)"
+    Assert-True ($a.verification -notin 'Missing', 'Failed') 'never missing'
+    # Signed in, profile present, nothing there: checked and absent.
+    $script:M.hives = @($script:SimUserSid); $script:M.profilePaths[$script:SimUserSid] = 'C:\Users\owner'
+    $a = Get-AppRow (Invoke-VerifyWith { param($c) & $add $c $false }) 'winget:anthropic.claude'
+    Assert-Equal $a.verification 'InstallerSucceededVerificationFailed' 'readable and absent'
+}
+
+Test-HealthScenario 'V4. SYSTEM context (deployment end): the user has no profile and is not signed in -> pending, never missing; -CheckAppUpdates says WinGet cannot run as SYSTEM and never calls it' {
+    Invoke-SimDeployment | Out-Null
+    $script:SimIdentity = @{ Name = 'NT AUTHORITY\SYSTEM'; IsSystem = $true; IsAdmin = $true }
+    $script:M.hives = @(); $script:M.profilePaths.Clear()
+    $c = Get-HealthConfig
+    Add-VerifyApp $c 'winget:anthropic.claudecode' 'Claude Code' 'Anthropic.ClaudeCode' @{ files = @('%LocalAppData%\Programs\claude\claude.exe'); perUser = $true } -Outcome 'InstallerSucceededVerificationPending' -Extra @{ verification = 'Pending'; verificationNote = 'The user profile is not available yet.' }
+    $r = (Invoke-WdhVerify $script:Manifest $script:Paths $c 'Technician' -CheckAppUpdates).Report
+    $a = Get-AppRow $r 'winget:anthropic.claudecode'
+    $f = Get-Finding $r 'app.winget:anthropic.claudecode'
+    Assert-Equal "$($a.verification) $($f.status) $($a.engineVerification)" 'InstallerSucceededVerificationPending Deferred Pending' 'pending as SYSTEM'
+    Assert-True ($f.observed -match 'runs as SYSTEM') "SYSTEM said: $($f.observed)"
+    Assert-True ($a.verificationNote -match 'Engine: The user profile is not available yet') 'engine note kept as history'
+    Assert-Equal "$($r.appUpdates.status) $($script:M.WinGetCalls)" 'notAsSystem 0' 'no WinGet call as SYSTEM'
+    Assert-Equal (Get-Finding $r 'apps.updates').status 'Info' 'information only'
+    Assert-True ((Get-Finding $r 'apps.updates').observed -match 'as SYSTEM') 'reason stated'
+}
+
+Test-HealthScenario 'V5. files and registry: Node.js by its file (no uninstall record) with its file version; registry values in the 32-bit view, an exact value that differs is not evidence' {
+    Invoke-SimDeployment | Out-Null
+    $script:M.files['C:\Program Files\nodejs\node.exe'] = '22.11.0'
+    $script:M.reg['HKLM32\SOFTWARE\Contoso\RegTool\Installed'] = 1
+    $script:M.reg['HKLM\SOFTWARE\Contoso\Other\Channel'] = 'beta'
+    $r = Invoke-VerifyWith {
+        param($c)
+        Add-VerifyApp $c 'winget:openjs.nodejs.lts' 'Node.js LTS' 'OpenJS.NodeJS.LTS' @{ uninstall = @('Node.js'); files = @('%ProgramFiles%\nodejs\node.exe') } -Scope 'machine'
+        Add-VerifyApp $c 'winget:contoso.regtool' 'Contoso RegTool' 'Contoso.RegTool' @{ registry = @(@{ key = 'HKLM\SOFTWARE\Contoso\RegTool'; name = 'Installed'; equals = '1'; view = '32' }) } -Scope 'machine'
+        Add-VerifyApp $c 'winget:contoso.other' 'Contoso Other' 'Contoso.Other' @{ registry = @(@{ key = 'HKLM\SOFTWARE\Contoso\Other'; name = 'Channel'; equals = 'stable'; view = '64' }) } -Scope 'machine'
+    }
+    $n = Get-AppRow $r 'winget:openjs.nodejs.lts'
+    Assert-Equal "$($n.verification) $(@($n.evidence)[0].kind) $($n.version) $($n.foundIn)" 'InstalledAndVerified file 22.11.0 machine' 'Node.js file evidence'
+    $g = Get-AppRow $r 'winget:contoso.regtool'
+    Assert-True ($g.verification -eq 'InstalledAndVerified' -and @($g.evidence)[0].detail -match '32-bit view') "registry 32-bit: $(@($g.evidence)[0].detail)"
+    $o = Get-AppRow $r 'winget:contoso.other'
+    Assert-Equal $o.verification 'InstallerSucceededVerificationFailed' 'a different value is not evidence'
+    Assert-True ((Get-Finding $r 'app.winget:contoso.other').evidence -match "is 'beta', expected 'stable'") 'the mismatch is reported'
+    # The engine's own evidence is history, never current evidence.
+    $r = Invoke-VerifyWith { param($c) Add-VerifyApp $c 'winget:contoso.gone' 'Contoso Gone' 'Contoso.Gone' @{ files = @('%ProgramFiles%\Contoso\gone.exe') } -Scope 'machine' -Outcome 'InstalledVerified' -Extra @{ verification = 'Verified'; verificationEvidence = @(@{ kind = 'file'; detail = '%ProgramFiles%\Contoso\gone.exe'; where = 'machine' }) } }
+    $x = Get-AppRow $r 'winget:contoso.gone'
+    Assert-Equal "$($x.verification) $(@($x.evidence).Count) $(@($x.engineEvidence).Count) $($x.engineVerification)" 'InstallerSucceededVerificationFailed 0 1 Verified' 'removed since: current state decides'
+}
+
+Test-HealthScenario 'V6. engine 1.6.0 outcomes: package unavailable, unattended unsupported, after sign-in / restart pending; never green without evidence' {
+    Invoke-SimDeployment | Out-Null
+    $add = {
+        param($c, [bool] $Record)
+        Add-VerifyApp $c 'winget:contoso.unavail' 'Contoso Unavailable' 'Contoso.Unavail' @{} -Status 'Unavailable' -Outcome 'PackageUnavailable' -Extra @{ failureClass = 'Unavailable' } -NoRecord:(-not $Record)
+        Add-VerifyApp $c 'winget:contoso.manualonly' 'Contoso Manual' 'Contoso.ManualOnly' @{} -Status 'RequiresInteraction' -Outcome 'UnattendedUnsupported' -NoRecord:(-not $Record)
+        Add-VerifyApp $c 'winget:contoso.signin' 'Contoso SignIn' 'Contoso.SignIn' @{ files = @('%AppData%\Contoso\settings.json'); after = 'signIn' } -NoRecord:(-not $Record)
+        Add-VerifyApp $c 'winget:contoso.restart' 'Contoso Restart' 'Contoso.Restart' @{ files = @('%ProgramFiles%\Contoso\driver.sys'); after = 'restart' } -Scope 'machine' -NoRecord:(-not $Record)
+    }
+    $r = Invoke-VerifyWith { param($c) & $add $c $true }
+    $v = @{}; foreach ($a in @($r.applications)) { $v[$a.key] = "$($a.verification)/$((Get-Finding $r $a.findingId).status)" }
+    Assert-Equal $v['winget:contoso.unavail'] 'PackageUnavailable/Fail' 'package unavailable'
+    Assert-Equal $v['winget:contoso.manualonly'] 'UnattendedUnsupported/Warning' 'unattended unsupported'
+    Assert-True (@($r.manualActions | Where-Object { $_.id -eq 'app.winget:contoso.manualonly' }).Count -eq 1) 'manual action listed'
+    Assert-Equal $v['winget:contoso.signin'] 'InstallerSucceededVerificationPending/Pending' 'evidence after sign-in'
+    Assert-True ((Get-Finding $r 'app.winget:contoso.signin').nextAction -match 'Sign in as PC\\owner') 'how to complete it'
+    Assert-Equal $v['winget:contoso.restart'] 'InstallerSucceededVerificationFailed/Warning' 'no restart pending: checked and absent'
+    $script:M.reboot.cbs = $true
+    $r = Invoke-VerifyWith { param($c) & $add $c $false }
+    Assert-Equal "$((Get-AppRow $r 'winget:contoso.restart').verification)/$((Get-Finding $r 'app.winget:contoso.restart').status)" 'InstallerSucceededVerificationPending/Pending' 'restart pending: pending'
+    foreach ($a in @($r.applications | Where-Object { (Get-Finding $r $_.findingId).status -eq 'Pass' })) { Assert-True (@($a.evidence).Count -gt 0) "$($a.name) passed with evidence" }
+}
+
+Test-HealthScenario 'V7. Visual C++ runtimes: x86 present on x64 Windows with x64 missing (and the reverse) -> Warning naming the architecture; x86 is never called redundant' {
+    Invoke-SimDeployment | Out-Null
+    $r = Invoke-VerifyWith
+    $f = Get-Finding $r 'apps.runtimes'
+    Assert-Equal "$($f.status) $(@($r.runtimes.items).Count) $(@($r.runtimes.selected | Where-Object { $_.present }).Count)" 'Info 2 2' 'both present: information'
+    Assert-True ($f.observed -match '2015\+ x64 14\.40' -and $f.observed -match '2015\+ x86 14\.40' -and $f.observed -match 'both are needed') $f.observed
+    $script:M.missing = @('Microsoft.VCRedist.2015+.x64')
+    $r = Invoke-VerifyWith
+    $f = Get-Finding $r 'apps.runtimes'
+    Assert-Equal $f.status 'Warning' 'selected x64 missing'
+    Assert-True ($f.observed -match 'Missing: 2015\+ x64' -and $f.observed -match 'x86 runtime does not replace it' -and $f.observed -match 'Present: 2015\+ x86') $f.observed
+    Assert-True (@($r.runtimes.notes | Where-Object { $_ -match 'x86 only' }).Count -eq 1) 'x86-only noted'
+    Assert-Equal (Get-AppRow $r 'winget:microsoft.vcredist.2015+.x64').verification 'InstallerSucceededVerificationFailed' 'the x64 package itself'
+    Assert-Equal (Get-AppRow $r 'winget:microsoft.vcredist.2015+.x86').verification 'InstalledAndVerified' 'x86 verified'
+    $script:M.missing = @('Microsoft.VCRedist.2015+.x86')
+    $r = Invoke-VerifyWith
+    $f = Get-Finding $r 'apps.runtimes'
+    Assert-True ($f.status -eq 'Warning' -and $f.observed -match 'Missing: 2015\+ x86 \(needed by 32-bit applications even on 64-bit Windows\)') $f.observed
+    foreach ($t in @($f.observed) + @($r.runtimes.notes)) { Assert-True ($t -notmatch '(?i)redundant|not needed|unnecessary') "never redundant: $t" }
+    $txt = Get-Content -Raw (Join-Path $script:Paths.Root 'reports\health\technician-report.txt')
+    Assert-True ($txt -match 'Selected by this deployment: 2015\+ x86 - MISSING') 'text report section'
+}
+
+Test-HealthScenario 'V7b. Visual C++ 2013/2012/2010 by name: an x86 item never matches the x64 record (or the reverse); a record that names no architecture still matches' {
+    $x64 = @{ keyName = '{guid-x64}'; displayName = 'Microsoft Visual C++ 2013 Redistributable (x64) - 12.0.40664'; displayVersion = '12.0.40664.0'; scope = 'machine'; view = '64' }
+    $x86 = @{ keyName = '{guid-x86}'; displayName = 'Microsoft Visual C++ 2013 Redistributable (x86) - 12.0.40664'; displayVersion = '12.0.40664.0'; scope = 'machine'; view = '32' }
+    $item86 = @{ packageIdentifier = 'Microsoft.VCRedist.2013.x86'; source = 'winget'; names = @('Microsoft Visual C++ 2013 Redistributable (x86)') }
+    $item64 = @{ packageIdentifier = 'Microsoft.VCRedist.2013.x64'; source = 'winget'; names = @('Microsoft Visual C++ 2013 Redistributable (x64)') }
+    Assert-True (-not (Find-WdhInstalled $item86 @($x64) @() @()).found) 'x86 item, only the x64 record: not installed'
+    Assert-True (-not (Find-WdhInstalled $item64 @($x86) @() @()).found) 'x64 item, only the x86 record: not installed'
+    Assert-True (Find-WdhInstalled $item86 @($x64, $x86) @() @()).found 'x86 item with its own record: installed'
+    Assert-True ((Find-WdhInstalled $item86 @($x64, $x86) @() @()).how -match '\(x86\)') 'matched the x86 record'
+    $plain = @{ keyName = 'Vendor'; displayName = 'Contoso Tool 2.0'; displayVersion = '2.0'; scope = 'machine'; view = '64' }
+    Assert-True (Find-WdhInstalled @{ packageIdentifier = 'Contoso.Tool'; source = 'winget'; names = @('Contoso Tool (x64)') } @($plain) @() @()).found 'a record without an architecture still matches'
+}
+
+Test-HealthScenario 'V8. -CheckAppUpdates as the deployment user: read-only listing matched to the selected applications; information only; not run without the switch' {
+    Invoke-SimDeployment | Out-Null
+    $r = Invoke-VerifyWith
+    Assert-True (-not $r.appUpdates -and $script:M.WinGetCalls -eq 0) 'no WinGet call without -CheckAppUpdates'
+    $row = '{0,-22}{1,-20}{2,-10}{3,-10}{4}'
+    $script:M.wingetUpgrade = @{ available = $true; exitCode = 0; text = (@(($row -f 'Name', 'Id', 'Version', 'Available', 'Source'), ('-' * 70), ($row -f 'Git', 'Git.Git', '2.50.0', '2.51.0', 'winget'), ($row -f 'Contoso Thing', 'Contoso.Thing', '1.0', '1.1', 'winget'), '2 upgrades available.') -join "`n") }
+    $r = (Invoke-WdhVerify $script:Manifest $script:Paths (Get-HealthConfig) 'Technician' -CheckAppUpdates).Report
+    Assert-Equal "$($r.appUpdates.status) $(@($r.appUpdates.items).Count) $($r.appUpdates.otherAvailable) $($script:M.WinGetCalls)" 'ok 1 1 1' 'one selected application has an update'
+    $u = @($r.appUpdates.items)[0]
+    Assert-Equal "$($u.key) $($u.installed) $($u.available)" 'winget:git.git 2.50.0 2.51.0' 'Git update'
+    Assert-Equal (Get-Finding $r 'apps.updates').status 'Info' 'never a failure'
+    Assert-Status $r 'Ready' 'an available update does not change the overall state'
+    $script:M.wingetUpgrade = @{ available = $true; exitCode = -1978335212; text = 'Failed when searching source: winget' }
+    $r = (Invoke-WdhVerify $script:Manifest $script:Paths (Get-HealthConfig) 'Technician' -CheckAppUpdates).Report
+    Assert-Equal "$($r.appUpdates.status) $($r.appUpdates.exitCode)" 'failed 0x8A150014' 'WinGet failure reported with its code'
+    Assert-Status $r 'Ready' 'still information only'
 }
 
 Write-Output ''

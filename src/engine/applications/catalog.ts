@@ -33,7 +33,7 @@ export const CATALOG_CATEGORIES = {
   networking: 'Network Tools & Diagnostics',
   remote: 'Remote Access & Streaming',
   downloads: 'Downloads & Transfers',
-  files: 'File Management',
+  files: 'Files, Archives & Backup',
   storage: 'Disk & Storage Utilities',
   usb: 'USB & Imaging Tools',
   utilities: 'System Utilities & Diagnostics',
@@ -82,6 +82,46 @@ export const CONFLICT_GROUPS = {
 } as const;
 export type ConflictGroup = keyof typeof CONFLICT_GROUPS;
 
+/**
+ * Tools that do the same job. Unlike a conflict group, selecting several is allowed (a technician may
+ * want both TeamViewer and RustDesk), but the plan says so, and built-in profiles never make two of
+ * them defaults of profiles that are combined. Catalog ids, checked at load.
+ */
+export const OVERLAP_GROUPS = {
+  'remote-support': { label: 'remote-support tools', ids: ['teamviewer', 'rustdesk', 'anydesk', 'chrome-remote-desktop'] },
+  'pdf-reader': { label: 'PDF readers', ids: ['sumatrapdf', 'acrobat-reader'] },
+  'office-suite': { label: 'office suites', ids: ['libreoffice', 'onlyoffice'] },
+} as const satisfies Record<string, { label: string; ids: readonly string[] }>;
+export type OverlapGroup = keyof typeof OVERLAP_GROUPS;
+
+/** A path below one of the roots the engine resolves itself; no other variables, no "..". */
+export const VERIFY_FILE = /^(?!.*\\\.{1,2}(\\|$))%(ProgramFiles|ProgramFiles\(x86\)|ProgramData|LocalAppData|AppData)%(\\[A-Za-z0-9 ._()+-]{1,80}){1,6}$/;
+export const VERIFY_REGISTRY_KEY = /^HKLM\\SOFTWARE(\\[A-Za-z0-9 ._+-]{1,80}){1,8}$/;
+export const VerifySchema = z
+  .object({
+    uninstall: z.array(z.string().min(3).max(100)).max(10).optional(),
+    appx: z.array(z.string().regex(/^[A-Za-z0-9][A-Za-z0-9.-]{2,99}$/)).max(5).optional(),
+    files: z.array(z.string().regex(VERIFY_FILE)).max(5).optional(),
+    registry: z
+      .array(z.object({ key: z.string().regex(VERIFY_REGISTRY_KEY), name: z.string().regex(/^[A-Za-z0-9 ._-]{1,60}$/), equals: z.string().max(40).optional(), view: z.enum(['64', '32']).default('64') }).strict())
+      .max(3)
+      .optional(),
+    perUser: z.boolean().optional(),
+    after: z.enum(['none', 'signIn', 'restart']).optional(),
+  })
+  .strict();
+export type VerifySpec = z.infer<typeof VerifySchema>;
+
+/** The evidence the engine looks for: the catalog's verify block, with detectNames as uninstall names. */
+export function verifySpec(e: Pick<CatalogEntry, 'verify' | 'detectNames' | 'scope'> | undefined): VerifySpec {
+  if (!e) return {};
+  const v: VerifySpec = { ...(e.verify ?? {}) };
+  const names = [...(v.uninstall ?? []), ...(e.detectNames ?? [])];
+  if (names.length) v.uninstall = [...new Set(names)].slice(0, 10);
+  if (v.perUser === undefined && e.scope === 'user') v.perUser = true;
+  return v;
+}
+
 const CatalogEntrySchema = z
   .object({
     id: z.string().regex(/^[a-z0-9][a-z0-9-]{0,47}$/),
@@ -124,10 +164,28 @@ const CatalogEntrySchema = z
     upgrade: z.enum(UPGRADE_METHODS).optional(),
     /** Hardware the application is only useful with; the manager shows it, it never installs because of it. */
     hardware: z.object({ requirement: z.string().min(1).max(200), vendors: z.array(z.string().max(40)).max(10) }).strict().optional(),
+    /**
+     * Package keys ("winget:<id>" / "msstore:<id>", lower case) this entry was saved under before it
+     * moved to another source or became manual (catalog audit 2026-11). Saved selections and
+     * deselections under a former key mean this entry; the plan says so (never a silent substitution).
+     */
+    formerKeys: z.array(z.string().regex(/^(winget|msstore):[a-z0-9][a-z0-9.+_-]{0,127}$/)).max(5).optional(),
     /** Other verified WinGet identifiers of the same product (recognised as installed, never installed). */
     alternateIds: z.array(z.string().regex(WINGET_ID)).max(5).optional(),
     /** "Apps & features" names from the package manifest, used to recognise installations made outside WinGet. */
     detectNames: z.array(z.string().max(100)).max(10).optional(),
+    /**
+     * Package-aware installation evidence (catalog audit 2026-11). The engine and the health audit
+     * accept an installation as verified only from one of these, never from the installer's exit code:
+     * uninstall: "Apps & features" display-name prefixes (machine, 32-bit and per-user hives);
+     * appx: Store/MSIX package names (registered for a user, or provisioned);
+     * files: executables under a known root (%ProgramFiles%, %ProgramFiles(x86)%, %ProgramData%,
+     *        %LocalAppData% and %AppData% of the deployment user);
+     * registry: an exact value (for example the Visual C++ runtime "Installed" = 1 per architecture);
+     * perUser: installs into the signed-in user's profile (verified in that user's hive and folders);
+     * after: what must happen before the evidence can exist (a sign-in of the user, or a restart).
+     */
+    verify: VerifySchema.optional(),
     validation: z
       .object({
         status: z.enum(['verified', 'unverified', 'unresolved', 'manual']),
@@ -169,6 +227,12 @@ const ExcludedSchema = z
     name: z.string().min(1).max(100),
     packageIdentifier: z.string().max(128).optional(),
     reason: z.string().min(1).max(300),
+    /**
+     * Set when the app was an automated catalog entry and was taken out because WDB cannot install
+     * and verify it unattended. A saved profile that still selects it loads with a compatibility
+     * warning and keeps the reference, but the app is never installed and never replaced by another.
+     */
+    removed: z.object({ date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), formerId: z.string().regex(/^[a-z0-9][a-z0-9-]{0,47}$/) }).strict().optional(),
   })
   .strict();
 export type ExcludedApp = z.infer<typeof ExcludedSchema>;
@@ -218,6 +282,9 @@ const CatalogSchema = z
   });
 
 const PARSED = CatalogSchema.parse(catalogJson);
+for (const g of Object.values(OVERLAP_GROUPS) as { ids: readonly string[] }[]) {
+  for (const id of g.ids) if (!PARSED.entries.some((e) => e.id === id)) throw new Error(`Overlap group refers to unknown catalog id ${id}`);
+}
 export const CATALOG: readonly CatalogEntry[] = PARSED.entries;
 export const CATALOG_EXCLUDED: readonly ExcludedApp[] = PARSED.excluded;
 export const CATALOG_UPDATED: string = PARSED.updated;
@@ -226,6 +293,14 @@ const BY_KEY = new Map(CATALOG.filter((e) => entryKey(e)).map((e) => [entryKey(e
 
 export function catalogEntryForKey(key: string): CatalogEntry | undefined {
   return BY_KEY.get(key);
+}
+
+const BY_FORMER_KEY = new Map(CATALOG.flatMap((e) => (e.formerKeys ?? []).map((k) => [k, e] as const)));
+
+/** The entry that a key saved before the catalog audit now means (an entry that moved source or became manual). */
+export function entryForFormerKey(key: string): CatalogEntry | undefined {
+  const k = key.toLowerCase();
+  return BY_KEY.has(k) ? undefined : BY_FORMER_KEY.get(k);
 }
 
 export function catalogEntryById(id: string): CatalogEntry | undefined {
@@ -251,12 +326,20 @@ export function exclusionFor(ref: Pick<PackageRef, 'packageIdentifier'>): Exclud
   return CATALOG_EXCLUDED.find((x) => !!x.packageIdentifier && x.packageIdentifier.toLowerCase() === ref.packageIdentifier.toLowerCase());
 }
 
-/** Case-insensitive search over name, description, identifier and category label. */
+/** The removal record of a former catalog entry, by its old catalog id (a "catalog:<id>" reference). */
+export function removalForCatalogId(id: string): ExcludedApp | undefined {
+  return CATALOG_EXCLUDED.find((x) => x.removed?.formerId === id.toLowerCase());
+}
+
+/** The text a catalog search looks in: name, publisher, description, identifier and category label. */
+export const searchText = (e: CatalogEntry): string => `${e.displayName} ${e.publisher ?? ''} ${e.description} ${e.packageIdentifier ?? ''} ${CATALOG_CATEGORIES[e.category]}`.toLowerCase();
+
+/** Case-insensitive search (every word must match) over name, publisher, description, identifier and category label. */
 export function searchCatalog(query: string, category: CatalogCategory | '' = ''): CatalogEntry[] {
   const words = query.toLowerCase().split(/\s+/).filter(Boolean);
   return CATALOG.filter((e) => {
     if (category && e.category !== category) return false;
-    const hay = `${e.displayName} ${e.description} ${e.packageIdentifier ?? ''} ${CATALOG_CATEGORIES[e.category]}`.toLowerCase();
+    const hay = searchText(e);
     return words.every((w) => hay.includes(w));
   });
 }
