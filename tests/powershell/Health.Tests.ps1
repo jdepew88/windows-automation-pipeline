@@ -1253,6 +1253,19 @@ Test-HealthScenario 'V7. Visual C++ runtimes: x86 present on x64 Windows with x6
     Assert-True ($txt -match 'Selected by this deployment: 2015\+ x86 - MISSING') 'text report section'
 }
 
+Test-HealthScenario 'V7b. Visual C++ 2013/2012/2010 by name: an x86 item never matches the x64 record (or the reverse); a record that names no architecture still matches' {
+    $x64 = @{ keyName = '{guid-x64}'; displayName = 'Microsoft Visual C++ 2013 Redistributable (x64) - 12.0.40664'; displayVersion = '12.0.40664.0'; scope = 'machine'; view = '64' }
+    $x86 = @{ keyName = '{guid-x86}'; displayName = 'Microsoft Visual C++ 2013 Redistributable (x86) - 12.0.40664'; displayVersion = '12.0.40664.0'; scope = 'machine'; view = '32' }
+    $item86 = @{ packageIdentifier = 'Microsoft.VCRedist.2013.x86'; source = 'winget'; names = @('Microsoft Visual C++ 2013 Redistributable (x86)') }
+    $item64 = @{ packageIdentifier = 'Microsoft.VCRedist.2013.x64'; source = 'winget'; names = @('Microsoft Visual C++ 2013 Redistributable (x64)') }
+    Assert-True (-not (Find-WdhInstalled $item86 @($x64) @() @()).found) 'x86 item, only the x64 record: not installed'
+    Assert-True (-not (Find-WdhInstalled $item64 @($x86) @() @()).found) 'x64 item, only the x86 record: not installed'
+    Assert-True (Find-WdhInstalled $item86 @($x64, $x86) @() @()).found 'x86 item with its own record: installed'
+    Assert-True ((Find-WdhInstalled $item86 @($x64, $x86) @() @()).how -match '\(x86\)') 'matched the x86 record'
+    $plain = @{ keyName = 'Vendor'; displayName = 'Contoso Tool 2.0'; displayVersion = '2.0'; scope = 'machine'; view = '64' }
+    Assert-True (Find-WdhInstalled @{ packageIdentifier = 'Contoso.Tool'; source = 'winget'; names = @('Contoso Tool (x64)') } @($plain) @() @()).found 'a record without an architecture still matches'
+}
+
 Test-HealthScenario 'V8. -CheckAppUpdates as the deployment user: read-only listing matched to the selected applications; information only; not run without the switch' {
     Invoke-SimDeployment | Out-Null
     $r = Invoke-VerifyWith

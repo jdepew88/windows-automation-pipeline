@@ -95,7 +95,7 @@ export const OVERLAP_GROUPS = {
 export type OverlapGroup = keyof typeof OVERLAP_GROUPS;
 
 /** A path below one of the roots the engine resolves itself; no other variables, no "..". */
-export const VERIFY_FILE = /^%(ProgramFiles|ProgramFiles\(x86\)|ProgramData|LocalAppData|AppData)%(\\[A-Za-z0-9 ._()+-]{1,80}){1,6}$/;
+export const VERIFY_FILE = /^(?!.*\\\.{1,2}(\\|$))%(ProgramFiles|ProgramFiles\(x86\)|ProgramData|LocalAppData|AppData)%(\\[A-Za-z0-9 ._()+-]{1,80}){1,6}$/;
 export const VERIFY_REGISTRY_KEY = /^HKLM\\SOFTWARE(\\[A-Za-z0-9 ._+-]{1,80}){1,8}$/;
 export const VerifySchema = z
   .object({

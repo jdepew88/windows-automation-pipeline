@@ -56,7 +56,11 @@ describe('apps removed from the automated catalog', () => {
     // Not in the engine's install list; reported to it as unresolved (with the reason) instead.
     const cfg = applicationsConfig(p);
     expect(cfg.packages.some((x) => x.packageIdentifier === '9MSPC6MP8FM4')).toBe(false);
-    expect(cfg.unresolved.find((x) => x.packageIdentifier === '9MSPC6MP8FM4')?.reason).toMatch(/removed from the automated catalog/);
+    const u = cfg.unresolved.find((x) => x.packageIdentifier === '9MSPC6MP8FM4');
+    expect(u?.reason).toMatch(/removed from the automated catalog/);
+    // Flagged, so the engine reports it as Skipped rather than as a failed deployment.
+    expect(u?.removed).toBe(true);
+    expect(cfg.unresolved.filter((x) => x.packageIdentifier !== '9MSPC6MP8FM4').every((x) => x.removed === undefined)).toBe(true);
   });
 
   it('the frozen revision-1 Touchscreen profile still loads; its removed Whiteboard is reported, the rest is planned', () => {

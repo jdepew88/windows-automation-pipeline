@@ -745,6 +745,19 @@ $tests['unresolved and invalid entries are Unavailable and never reach WinGet'] 
     Assert-Equal $evil.ShowCalls 0 'never queried'
 }
 
+$tests['an app removed from the automated catalog (still named by a saved profile): Skipped with its reason, never installed, not a failure'] = {
+    Reset-Sim @((New-SimPackage 'Git.Git'))
+    $c = New-AppTestConfig $script:Sim.Packages -Unresolved @(@{ key = 'msstore:9mspc6mp8fm4'; packageIdentifier = '9MSPC6MP8FM4'; source = 'msstore'; displayName = 'Microsoft Whiteboard'; reason = 'Microsoft Whiteboard was removed from the automated catalog on 2026-11-27.'; removed = $true })
+    $o = Invoke-Logons $c
+    Assert-Equal $o[-1] 'Finished:Succeeded' 'not a failure'
+    $r = Get-Result $c
+    $w = Get-Pkg $r '9MSPC6MP8FM4'
+    Assert-Equal "$($w.status) $($w.outcome)" 'Skipped Skipped' 'reported as skipped'
+    Assert-True ($w.message -match 'removed from the automated catalog') 'with its reason'
+    Assert-True (@($r.followUp) -match 'Microsoft Whiteboard') 'listed for the technician'
+    Assert-Equal (Get-Pkg $r 'Git.Git').status 'Succeeded' 'the others install'
+}
+
 
 # ------------------------------------------------------------------------------------------------
 # Phase 4.2 (engine 1.1.0): portable, Store, manual, deselected, dependencies
@@ -966,6 +979,23 @@ $tests['Additional Software: manual entries become follow-up; automatic needs ha
     Assert-Equal $script:Sim.Executed.Count 1 'only the verified installer was executed'
     Assert-Equal ($script:Sim.Executed[0][1] -join ' ') '/qn ALLUSERS=1' 'arguments passed as a list'
     Assert-Equal $o[-1] 'Finished:CompletedWithFailures' 'outcome'
+}
+
+$tests['Additional Software: a successful reviewed installer alone still finishes Succeeded (as before 1.6.0); its outcome says it was not verified'] = {
+    Reset-Sim @((New-SimPackage 'Git.Git'))
+    $good = @{ id = 'a2'; name = 'Reviewed B'; execution = 'automatic'; fileName = 'b.msi'; sha256 = ('B' * 64); silentArgs = @('/qn'); installerType = 'msi' }
+    $c = New-AppTestConfig $script:Sim.Packages -Additional @($good)
+    $inst = Join-Path $c.dataRoot 'Applications\installers'
+    New-Item -ItemType Directory -Path $inst -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $inst 'b.msi') -Value 'x'
+    $script:Sim.Hashes = @{ 'b.msi' = ('B' * 64) }
+    $o = Invoke-Logons $c
+    Assert-Equal $o[-1] 'Finished:Succeeded' 'every application and the reviewed installer succeeded'
+    $r = Get-Result $c
+    $a = @($r.additionalSoftware | Where-Object { $_.id -eq 'a2' })[0]
+    Assert-Equal "$($a.status) $($a.outcome)" 'Succeeded InstallerSucceededVerificationPending' 'its own outcome stays honest'
+    Assert-Equal "$($r.counts.succeeded) $($r.counts.verificationPending)" '2 0' 'counted as a success'
+    Assert-True (-not (@($r.followUp) -match 'Reviewed B')) 'no follow-up line for it'
 }
 
 $tests['finished run does nothing on later starts'] = {
@@ -1794,6 +1824,47 @@ $tests['engine 1.6.0: restart required while restarts are not allowed: RestartOr
     Assert-Equal $script:Sim.Packages[0].InstallCalls 1 'nothing installed again'
     Assert-True $script:Sim.TaskRemoved 'task removed once nothing is pending'
     Assert-Equal (Invoke-WdaMain $c) 'AlreadyFinished' 'later starts do nothing'
+}
+
+$tests['engine 1.6.0: evidence written before the restart never clears it: same boot and -Mode Verify keep RequiresRestart; only a real restart does'] = {
+    Reset-Sim @((New-SimPackage 'Vendor.Reboot' 'reboot-finish'), (New-SimPackage 'Git.Git'))
+    $c = New-AppTestConfig $script:Sim.Packages -Overrides @{ restartPolicy = 'never' }
+    $o = Invoke-Logons $c
+    Assert-Equal $o[-1] 'Finished:CompletedWithFollowUp' 'follow-up'
+    # The installer already wrote its uninstall entry, but the computer has not restarted (same boot).
+    $script:Sim.Packages[0].Installed = $true; $script:Sim.Now = $script:Sim.Now.AddHours(1)
+    Assert-Equal (Invoke-WdaMain $c) 'Reverified:CompletedWithFollowUp' 'hourly start in the same boot'
+    $p = Get-Pkg (Get-Result $c) 'Vendor.Reboot'
+    Assert-Equal "$($p.status) $($p.outcome) $($p.verification)" 'RequiresRestart RestartOrSignInRequired Pending' 'evidence alone does not clear the restart'
+    $v = Invoke-WdaVerify $c
+    Assert-Equal $v.ExitCode 10 '-Mode Verify: still pending'
+    $p = Get-Pkg (Get-Result $c) 'Vendor.Reboot'
+    Assert-Equal "$($p.status) $($p.verification)" 'RequiresRestart Pending' '-Mode Verify never clears a restart'
+    Assert-True (-not $script:Sim.TaskRemoved) 'the task stays for the re-verification after the restart'
+    # The person restarts the computer.
+    $script:Sim.Boots++; $script:Sim.Now = $script:Sim.Now.AddHours(1)
+    Assert-Equal (Invoke-WdaMain $c) 'Reverified:Succeeded' 'after the restart'
+    Assert-Equal (Get-Pkg (Get-Result $c) 'Vendor.Reboot').status 'Succeeded' 'verified after the real restart'
+    Assert-Equal $script:Sim.Packages[0].InstallCalls 1 'nothing installed again'
+}
+
+$tests['engine 1.6.0: per-user evidence is checked for the account that installed, even when another administrator (or SYSTEM) runs -Mode Verify'] = {
+    $alex = 'S-1-5-21-1111111111-2222222222-3333333333-1001'
+    $admin = 'S-1-5-21-1111111111-2222222222-3333333333-1002'
+    $a = Select-WdaVerifyAccount 'PC\Alex' $alex $null
+    Assert-Equal "$($a.Name) $($a.IsEngineAccount) $($a.Console)" 'PC\Alex True False' 'no record: the current account'
+    $a = Select-WdaVerifyAccount 'PC\Admin' $admin @{ name = 'PC\Alex'; sid = $alex }
+    Assert-Equal "$($a.Name) $($a.Sid) $($a.IsEngineAccount)" "PC\Alex $alex False" 'another administrator: the recorded deployment user'
+    $a = Select-WdaVerifyAccount 'NT AUTHORITY\SYSTEM' 'S-1-5-18' @{ name = 'PC\Alex'; sid = $alex }
+    Assert-Equal "$($a.Name) $($a.Console)" 'PC\Alex False' 'SYSTEM: the recorded deployment user, not the console user'
+    Assert-True (Select-WdaVerifyAccount 'NT AUTHORITY\SYSTEM' 'S-1-5-18' $null).Console 'SYSTEM without a record: the console user'
+    Assert-Equal (Select-WdaVerifyAccount 'PC\Admin' $admin @{ name = 'x'; sid = 'S-1-5-18' }).Name 'PC\Admin' 'a recorded value that is not a user account is ignored'
+    # The installing run records its own account in state.json.
+    Reset-Sim @((New-SimPackage 'Git.Git'))
+    $c = New-AppTestConfig $script:Sim.Packages
+    [void] (Invoke-Logons $c)
+    $st = Get-Content -Raw (Get-StateFile $c) | ConvertFrom-Json
+    Assert-Equal "$($st.engineUser.name) $($st.engineUser.sid)" "$($script:Sim.User.Name) $($script:Sim.User.Sid)" 'recorded by the installing run'
 }
 
 $tests['engine 1.6.0: uninstall evidence in the 64-bit, WOW6432Node and per-user hives, by display-name prefix only'] = {

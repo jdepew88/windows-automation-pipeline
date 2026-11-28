@@ -616,6 +616,15 @@ function Get-WdhNorm {
     ($n -replace '[^a-z0-9+#]+', ' ').Trim()
 }
 
+<# The architecture a display name states (x64, x86, arm64), or '' when it names none. #>
+function Get-WdhArch {
+    param([string] $Name)
+    if ($Name -match '(?i)\barm64\b') { return 'arm64' }
+    if ($Name -match '(?i)\b(x64|amd64)\b|\b64-bit\b') { return 'x64' }
+    if ($Name -match '(?i)\bx86\b|\b32-bit\b') { return 'x86' }
+    return ''
+}
+
 function ConvertTo-WdhList { param($Value) if ($null -eq $Value) { return @() } return @($Value | Where-Object { $null -ne $_ }) }
 
 function Format-WdhBytes { param([double] $Bytes) if ($Bytes -ge 1GB) { '{0:N0} GB' -f ($Bytes / 1GB) } elseif ($Bytes -ge 1MB) { '{0:N0} MB' -f ($Bytes / 1MB) } else { '{0:N0} KB' -f ($Bytes / 1KB) } }
@@ -1148,8 +1157,12 @@ function Find-WdhInstalled {
         # WinGet registers portable packages (and some others) under "<PackageIdentifier>_<source>".
         if ($pkgId -and ($key -eq $pkgId -or $key.StartsWith("$($pkgId)_"))) { return @{ found = $true; scope = $e.scope; version = $e.displayVersion; how = 'WinGet uninstall record' } }
     }
+    # The name match drops architecture words, so an item that names one (the Visual C++ runtimes:
+    # x86 and x64 are independent installations) only matches a record of the same architecture.
+    $wantArch = @(@(ConvertTo-WdhList $Item['names']) | ForEach-Object { Get-WdhArch ([string] $_) } | Where-Object { $_ } | Select-Object -Unique)
     foreach ($e in $Entries) {
         if (-not $e.displayName) { continue }
+        if ($wantArch.Count) { $has = Get-WdhArch ([string] $e.displayName); if ($has -and $has -notin $wantArch) { continue } }
         $n = Get-WdhNorm $e.displayName
         foreach ($want in $names) {
             if ($n -eq $want -or (" $n " -like "* $want *")) { return @{ found = $true; scope = $e.scope; version = $e.displayVersion; how = "uninstall record ""$($e.displayName)""$(if ([string] $e['view'] -eq '32') { ' (32-bit)' })" } }

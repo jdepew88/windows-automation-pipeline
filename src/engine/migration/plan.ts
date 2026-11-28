@@ -76,7 +76,7 @@ export function applyMigration(p: Profile, inv: Inventory, items: readonly Migra
   const sel = p.applications.selection;
   const base = opts.baseProfile ?? DEFAULT_BASE_PROFILE;
   if (base && !allProfiles(sel).some((x) => x.id === base)) throw new Error(`Base profile "${base}" does not exist.`);
-  const baseKeys = new Set(base ? resolveSelection({ profiles: sel.profiles, selectedProfiles: [base], devices: { ...NO_DEVICES }, added: [], removed: [] }).packages.map((x) => x.key) : []);
+  const baseKeys = new Set(base ? resolveSelection({ profiles: sel.profiles, selectedProfiles: [base], devices: { ...NO_DEVICES }, added: [], removed: [], ...(sel.profileRevision !== undefined ? { profileRevision: sel.profileRevision } : {}) }).packages.map((x) => x.key) : []);
   const packages: PackageRef[] = [];
   const optional: PackageRef[] = [];
   const excluded: string[] = [];

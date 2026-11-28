@@ -160,7 +160,8 @@ export interface ApplicationsConfig {
     /** Engine 1.6.0: installation evidence from the catalog (verifySpec); empty = WinGet's own record only. */
     verify: VerifySpec;
   }[];
-  unresolved: { key: string; packageIdentifier: string; source: string; displayName: string; reason: string }[];
+  /** removed: an app removed from the automated catalog (reported as Skipped, not a failure). */
+  unresolved: { key: string; packageIdentifier: string; source: string; displayName: string; reason: string; removed?: true }[];
   /** Engine 1.1.0: catalog entries without an unattended installation, reported as manual follow-ups. */
   manual: { key: string; displayName: string; instructions: string; url: string }[];
   /** Engine 1.1.0: apps a profile selects but the customer deselected, reported as SkippedByUser. */
@@ -227,7 +228,7 @@ export function applicationsConfig(p: Profile, sel: SelectionResult = resolveSel
     })),
     unresolved: sel.packages
       .filter((x) => x.resolution === 'unresolved')
-      .map((x) => ({ key: x.key, packageIdentifier: x.ref.packageIdentifier, source: x.ref.source, displayName: x.displayName, reason: x.reason ?? '' })),
+      .map((x) => ({ key: x.key, packageIdentifier: x.ref.packageIdentifier, source: x.ref.source, displayName: x.displayName, reason: x.reason ?? '', ...(x.excludedFromCatalog?.removed ? { removed: true as const } : {}) })),
     manual: manualItems(sel).map((x) => ({ key: x.key, displayName: x.displayName, instructions: x.catalog?.manual?.instructions ?? 'Install it manually.', url: x.catalog?.manual?.url ?? '' })),
     deselected: sel.removed
       .filter((x) => x.resolution !== 'unresolved')
@@ -294,10 +295,15 @@ export function planPreview(p: Profile, sel: SelectionResult = resolveSelection(
     if (n) lines.push(`     ${n}`);
     if (x.interaction !== 'required') lines.push(`     winget ${wingetArguments('install', x.ref).join(' ')}`);
   });
-  const unresolved = sel.packages.filter((x) => x.resolution === 'unresolved');
+  const unresolved = sel.packages.filter((x) => x.resolution === 'unresolved' && !x.excludedFromCatalog?.removed);
   if (unresolved.length) {
     lines.push('', 'Not installed (unresolved; reported as Unavailable):');
     for (const x of unresolved) lines.push(`  - ${x.displayName} [${x.ref.source}: ${x.ref.packageIdentifier}]: ${x.reason}`);
+  }
+  const removed = sel.packages.filter((x) => x.resolution === 'unresolved' && x.excludedFromCatalog?.removed);
+  if (removed.length) {
+    lines.push('', 'Not installed (removed from the automated catalog; reported as Skipped):');
+    for (const x of removed) lines.push(`  - ${x.displayName} [${x.ref.source}: ${x.ref.packageIdentifier}]: ${x.reason}`);
   }
   const manual = manualItems(sel);
   if (manual.length) {

@@ -276,6 +276,17 @@ describe('migration profiles (review -> named profile on top of a base profile)'
     expect(p.migration.decisions.find((x) => x.displayName === 'Contoso Field Tool')!.key).toMatch(/^additional:migration-app-/);
   });
 
+  it('revision 2: the base is resolved at the deployment\'s own revision, so excluding an app new in v2 Core is kept', () => {
+    const p = profile((x) => (x.applications.selection.profileRevision = 2));
+    const i = inventory([wg('Notepad++', 'Notepad++.Notepad++'), wg('Git', 'Git.Git')]);
+    const items = matchInventory(i);
+    const d = defaultDecisions(items);
+    d.set(items.find((x) => x.app.displayName === 'Notepad++')!.id, { decision: 'exclude', confirmed: false });
+    const r = applyMigration(p, i, items, d, { name: 'Revision Two PC', baseProfile: 'core' });
+    expect(r.profile.excluded).toContain('winget:notepad++.notepad++');
+    expect(resolveSelection(p.applications.selection).packages.map((x) => x.key)).not.toContain('winget:notepad++.notepad++');
+  });
+
   it('other names are allowed (Gaming Desktop, Customer Office PC); a clash gets a suffix', () => {
     const p = profile();
     const i = inv();
