@@ -40,8 +40,12 @@ describe('one catalog for both tools', () => {
   });
 
   it('the Application Manager policy covers every catalog entry, including the new ones, and recognises them installed', () => {
-    // Every catalog entry with a package is in the manager's removal and upgrade policy.
-    expect(new Set(catalogPolicy().packages.map((x) => x.catalogId))).toEqual(new Set(CATALOG.filter((e) => e.packageIdentifier).map((e) => e.id)));
+    // Every catalog entry with a package is in the manager's removal and upgrade policy, and so is a
+    // manual entry with an alternate WinGet id (Battle.net installed earlier through WinGet), which
+    // is recognised but never upgraded unattended.
+    const policy = catalogPolicy().packages;
+    expect(new Set(policy.map((x) => x.catalogId))).toEqual(new Set(CATALOG.filter((e) => e.packageIdentifier || e.alternateIds?.length).map((e) => e.id)));
+    for (const e of CATALOG.filter((x) => !x.packageIdentifier)) expect(policy.filter((x) => x.catalogId === e.id).every((x) => x.upgrade === 'manual'), e.id).toBe(true);
     const m = matchInventory({ scannedUtc: '2026-11-26T00:00:00Z', method: 'test', note: '', packages: [{ id: 'SumatraPDF.SumatraPDF', version: '3.6.1', source: 'winget' }], programs: [] }, null);
     expect(m.get('sumatrapdf')?.state).toBe('installed');
     expect(m.get('rustdesk')?.state).not.toBe('installed');
